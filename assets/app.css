@@ -1,0 +1,54 @@
+/* ─── BossPilot 全局样式（Tailwind v4） ─── */
+@import 'tailwindcss';
+
+/* 设计令牌来自 design-prototype/bosspilot-sidebar.html 的品牌体系 */
+@theme {
+  --color-canvas: #e9efec;
+  --color-app: #f7faf8;
+  --color-surface: #ffffff;
+  --color-surface-soft: #f0f5f2;
+  --color-surface-mint: #e8f8f3;
+  --color-surface-warm: #fff8ec;
+  --color-ink: #17221e;
+  --color-ink-soft: #617069;
+  --color-ink-faint: #8d9a94;
+  --color-line: #dce6e1;
+  --color-line-strong: #c9d8d1;
+  --color-brand: #00a98f;
+  --color-brand-strong: #007f6e;
+  --color-brand-deep: #064f46;
+  --color-lime: #b6e36b;
+  --color-success: #178764;
+  --color-warning: #c47b18;
+  --color-danger: #c94c4c;
+
+  --font-sans: Inter, 'SF Pro Display', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-app);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 报告预览里的 Markdown 基础排版 */
+.report-md h1 { font-size: 1.05rem; font-weight: 700; margin: 0.8em 0 0.4em; }
+.report-md h2 { font-size: 0.95rem; font-weight: 700; margin: 0.9em 0 0.35em; color: var(--color-brand-deep); }
+.report-md h3 { font-size: 0.85rem; font-weight: 600; margin: 0.8em 0 0.3em; }
+.report-md p, .report-md li { font-size: 0.8rem; line-height: 1.6; }
+.report-md ul { padding-left: 1.1em; margin: 0.3em 0; }
+.report-md a { color: var(--color-brand-strong); text-decoration: underline; }
+.report-md table { border-collapse: collapse; font-size: 0.72rem; margin: 0.5em 0; display: block; overflow-x: auto; max-width: 100%; }
+.report-md th, .report-md td { border: 1px solid var(--color-line); padding: 4px 6px; text-align: left; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.report-md th { background: var(--color-surface-soft); }
+.report-md blockquote { border-left: 3px solid var(--color-brand); margin: 0.4em 0; padding: 0.1em 0.8em; color: var(--color-ink-soft); }
+.report-md details summary { cursor: pointer; font-size: 0.75rem; color: var(--color-ink-soft); }
+.report-md hr { border: none; border-top: 1px solid var(--color-line); margin: 0.8em 0; }

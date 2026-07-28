@@ -1,0 +1,2300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
+  <title>BossPilot · Boss 直聘 AI Agent 侧边栏原型</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --canvas: #e9efec;
+      --app: #f7faf8;
+      --surface: #ffffff;
+      --surface-soft: #f0f5f2;
+      --surface-mint: #e8f8f3;
+      --surface-warm: #fff8ec;
+      --text: #17221e;
+      --text-soft: #617069;
+      --text-faint: #8d9a94;
+      --line: #dce6e1;
+      --line-strong: #c9d8d1;
+      --brand: #00a98f;
+      --brand-strong: #007f6e;
+      --brand-deep: #064f46;
+      --brand-soft: rgba(0, 169, 143, 0.1);
+      --lime: #b6e36b;
+      --success: #178764;
+      --warning: #c47b18;
+      --danger: #c94c4c;
+      --blue: #3d72db;
+      --shadow: 0 18px 54px rgba(31, 62, 50, 0.12);
+      --shadow-soft: 0 8px 24px rgba(31, 62, 50, 0.07);
+      --radius: 16px;
+      --radius-sm: 11px;
+      --font-sans: Inter, "SF Pro Display", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      min-width: 320px;
+      height: 100%;
+      margin: 0;
+    }
+
+    body {
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 50% -20%, rgba(0, 169, 143, 0.14), transparent 42%),
+        var(--canvas);
+      color: var(--text);
+      font-family: var(--font-sans);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      font: inherit;
+    }
+
+    button {
+      color: inherit;
+    }
+
+    button:focus-visible,
+    select:focus-visible,
+    textarea:focus-visible {
+      outline: 3px solid rgba(0, 169, 143, 0.2);
+      outline-offset: 2px;
+    }
+
+    .app-shell {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      width: min(100%, 440px);
+      height: 100dvh;
+      min-height: 620px;
+      margin: 0 auto;
+      overflow: hidden;
+      border-inline: 1px solid rgba(26, 70, 55, 0.1);
+      background: var(--app);
+      box-shadow: var(--shadow);
+    }
+
+    .top-region {
+      position: relative;
+      z-index: 20;
+      border-bottom: 1px solid var(--line);
+      background: rgba(247, 250, 248, 0.92);
+      backdrop-filter: blur(18px);
+    }
+
+    .app-header {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      height: 48px;
+      padding: 6px 10px 6px 12px;
+    }
+
+    .brand-mark {
+      position: relative;
+      display: grid;
+      width: 32px;
+      height: 32px;
+      place-items: center;
+      overflow: hidden;
+      border: 1px solid rgba(0, 127, 110, 0.2);
+      border-radius: 10px;
+      background:
+        radial-gradient(circle at 72% 20%, rgba(182, 227, 107, 0.9), transparent 28%),
+        linear-gradient(145deg, #0cc1a5, #007f6e);
+      color: white;
+      box-shadow: 0 7px 18px rgba(0, 127, 110, 0.22);
+    }
+
+    .brand-mark::after {
+      position: absolute;
+      right: -5px;
+      bottom: -8px;
+      width: 22px;
+      height: 22px;
+      border: 1px solid rgba(255, 255, 255, 0.5);
+      border-radius: 50%;
+      content: "";
+    }
+
+    .brand-mark svg {
+      position: relative;
+      z-index: 1;
+      width: 18px;
+      height: 18px;
+    }
+
+    .brand-copy {
+      min-width: 0;
+    }
+
+    .brand-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .brand-title strong {
+      overflow: hidden;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: -0.2px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .beta {
+      padding: 2px 5px;
+      border-radius: 999px;
+      background: var(--brand-soft);
+      color: var(--brand-strong);
+      font-size: 8px;
+      font-weight: 700;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+    }
+
+    .page-status {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-top: 1px;
+      color: var(--text-faint);
+      font-size: 9px;
+    }
+
+    .page-status i {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 0 3px rgba(23, 135, 100, 0.1);
+    }
+
+    .header-actions {
+      display: flex;
+      gap: 3px;
+    }
+
+    .icon-button {
+      display: grid;
+      width: 30px;
+      height: 30px;
+      place-items: center;
+      border: 1px solid transparent;
+      border-radius: 9px;
+      background: transparent;
+      color: var(--text-soft);
+      cursor: pointer;
+      transition: 160ms ease;
+    }
+
+    .icon-button:hover {
+      border-color: var(--line);
+      background: var(--surface);
+      color: var(--text);
+      box-shadow: var(--shadow-soft);
+    }
+
+    .icon-button svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .model-bar {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 9px;
+      min-height: 44px;
+      padding: 6px 10px 8px;
+    }
+
+    .model-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text-soft);
+      font-size: 10px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .model-label svg {
+      width: 14px;
+      height: 14px;
+      color: var(--brand);
+    }
+
+    .model-select {
+      display: flex;
+      min-width: 0;
+      height: 30px;
+      align-items: center;
+      gap: 8px;
+      padding: 0 9px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface);
+      cursor: pointer;
+    }
+
+    .provider-badge {
+      display: grid;
+      width: 18px;
+      height: 18px;
+      flex: 0 0 auto;
+      place-items: center;
+      border-radius: 6px;
+      background: #111c18;
+      color: white;
+      font-size: 8px;
+      font-weight: 800;
+    }
+
+    .model-select-text {
+      min-width: 0;
+      flex: 1;
+    }
+
+    .model-select-text strong,
+    .model-select-text small {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .model-select-text strong {
+      font-size: 10px;
+      font-weight: 650;
+    }
+
+    .model-select-text small {
+      color: var(--text-faint);
+      font-size: 8px;
+    }
+
+    .model-select > svg {
+      width: 13px;
+      flex: 0 0 auto;
+      color: var(--text-faint);
+    }
+
+    .key-button {
+      display: flex;
+      height: 30px;
+      align-items: center;
+      gap: 5px;
+      padding: 0 9px;
+      border: 1px solid rgba(0, 169, 143, 0.2);
+      border-radius: 9px;
+      background: var(--surface-mint);
+      color: var(--brand-strong);
+      font-size: 9px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .key-button svg {
+      width: 13px;
+      height: 13px;
+    }
+
+    .conversation {
+      position: relative;
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-color: var(--line-strong) transparent;
+      scrollbar-gutter: stable;
+      scrollbar-width: thin;
+    }
+
+    .conversation-inner {
+      width: 100%;
+      padding: 14px 12px 28px;
+    }
+
+    .page-context {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 16px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--text-soft);
+      font-size: 10px;
+    }
+
+    .page-context > span {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .page-context svg {
+      width: 14px;
+      height: 14px;
+      flex: 0 0 auto;
+      color: var(--brand);
+    }
+
+    .page-context strong {
+      overflow: hidden;
+      color: var(--text);
+      font-weight: 600;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .context-action {
+      flex: 0 0 auto;
+      border: 0;
+      background: transparent;
+      color: var(--brand-strong);
+      font-size: 9px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .message {
+      display: flex;
+      gap: 9px;
+      margin-bottom: 20px;
+    }
+
+    .message.user {
+      justify-content: flex-end;
+    }
+
+    .user-bubble {
+      max-width: 84%;
+      padding: 10px 12px;
+      border: 1px solid rgba(0, 127, 110, 0.14);
+      border-radius: 15px 15px 4px 15px;
+      background: var(--surface-mint);
+      font-size: 12px;
+      line-height: 1.65;
+    }
+
+    .assistant-avatar {
+      display: grid;
+      width: 28px;
+      height: 28px;
+      flex: 0 0 auto;
+      place-items: center;
+      border: 1px solid rgba(0, 169, 143, 0.2);
+      border-radius: 9px;
+      background: var(--surface);
+      color: var(--brand);
+      box-shadow: var(--shadow-soft);
+    }
+
+    .assistant-avatar svg {
+      width: 15px;
+      height: 15px;
+    }
+
+    .assistant-body {
+      min-width: 0;
+      flex: 1;
+    }
+
+    .message-meta {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 28px;
+      color: var(--text-faint);
+      font-size: 9px;
+    }
+
+    .message-meta strong {
+      color: var(--text);
+      font-size: 11px;
+    }
+
+    .mode-pill {
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: var(--brand-soft);
+      color: var(--brand-strong);
+      font-size: 8px;
+      font-weight: 700;
+    }
+
+    .assistant-copy {
+      margin: 1px 0 12px;
+      color: #34423c;
+      font-size: 11px;
+      line-height: 1.7;
+    }
+
+    .section {
+      margin: 22px 0;
+    }
+
+    .section-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .section-heading h2 {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin: 0;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: -0.1px;
+    }
+
+    .section-heading h2 svg {
+      width: 14px;
+      height: 14px;
+      color: var(--brand);
+    }
+
+    .section-heading p,
+    .section-heading button {
+      margin: 0;
+      border: 0;
+      background: transparent;
+      color: var(--text-faint);
+      font-size: 9px;
+    }
+
+    .section-heading button {
+      cursor: pointer;
+    }
+
+    .command-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .command-card {
+      position: relative;
+      min-height: 90px;
+      padding: 11px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--surface);
+      text-align: left;
+      cursor: pointer;
+      box-shadow: 0 3px 14px rgba(31, 62, 50, 0.03);
+      transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    .command-card:hover,
+    .command-card.selected {
+      transform: translateY(-1px);
+      border-color: rgba(0, 169, 143, 0.38);
+      box-shadow: var(--shadow-soft);
+    }
+
+    .command-card::after {
+      position: absolute;
+      top: -18px;
+      right: -18px;
+      width: 46px;
+      height: 46px;
+      border-radius: 50%;
+      background: var(--brand-soft);
+      content: "";
+    }
+
+    .command-top {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-bottom: 9px;
+    }
+
+    .command-icon {
+      display: grid;
+      width: 24px;
+      height: 24px;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--surface-mint);
+      color: var(--brand-strong);
+    }
+
+    .command-icon.orange {
+      background: var(--surface-warm);
+      color: var(--warning);
+    }
+
+    .command-icon.blue {
+      background: #edf3ff;
+      color: var(--blue);
+    }
+
+    .command-icon.violet {
+      background: #f4efff;
+      color: #7453bd;
+    }
+
+    .command-icon svg {
+      width: 13px;
+      height: 13px;
+    }
+
+    .slash {
+      color: var(--text-faint);
+      font-family: var(--font-mono);
+      font-size: 8px;
+    }
+
+    .command-card strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .command-card p {
+      display: -webkit-box;
+      margin: 0;
+      overflow: hidden;
+      color: var(--text-soft);
+      font-size: 8px;
+      line-height: 1.5;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+    }
+
+    .run-card,
+    .artifact-card {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow-soft);
+    }
+
+    .run-head,
+    .artifact-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 12px;
+    }
+
+    .run-title,
+    .artifact-title {
+      display: flex;
+      min-width: 0;
+      align-items: flex-start;
+      gap: 9px;
+    }
+
+    .run-status-icon,
+    .artifact-icon {
+      display: grid;
+      width: 30px;
+      height: 30px;
+      flex: 0 0 auto;
+      place-items: center;
+      border-radius: 9px;
+      background: var(--surface-mint);
+      color: var(--brand-strong);
+    }
+
+    .run-status-icon svg,
+    .artifact-icon svg {
+      width: 15px;
+      height: 15px;
+    }
+
+    .run-title strong,
+    .artifact-title strong {
+      display: block;
+      overflow: hidden;
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .run-title small,
+    .artifact-title small {
+      display: block;
+      margin-top: 3px;
+      color: var(--text-faint);
+      font-size: 8px;
+      line-height: 1.4;
+    }
+
+    .running-badge {
+      display: flex;
+      flex: 0 0 auto;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 7px;
+      border-radius: 999px;
+      background: var(--brand-soft);
+      color: var(--brand-strong);
+      font-size: 8px;
+      font-weight: 700;
+    }
+
+    .spinner {
+      width: 9px;
+      height: 9px;
+      border: 1.5px solid rgba(0, 127, 110, 0.24);
+      border-top-color: var(--brand-strong);
+      border-radius: 50%;
+      animation: spin 900ms linear infinite;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    .progress-wrap {
+      padding: 0 12px 11px;
+    }
+
+    .progress-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+      color: var(--text-soft);
+      font-size: 8px;
+    }
+
+    .progress-meta strong {
+      color: var(--brand-strong);
+      font-size: 9px;
+    }
+
+    .progress-track {
+      height: 5px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: var(--surface-soft);
+    }
+
+    .progress-bar {
+      width: 68%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--brand), #59cbb7);
+      box-shadow: 0 0 14px rgba(0, 169, 143, 0.28);
+    }
+
+    .step-list {
+      display: grid;
+      border-top: 1px solid var(--line);
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 17px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 7px;
+      min-height: 34px;
+      padding: 6px 12px;
+      border-bottom: 1px solid var(--line);
+      font-size: 9px;
+    }
+
+    .step:last-child {
+      border-bottom: 0;
+    }
+
+    .step-icon {
+      display: grid;
+      width: 17px;
+      height: 17px;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--surface-soft);
+      color: var(--text-faint);
+    }
+
+    .step.done .step-icon {
+      background: var(--surface-mint);
+      color: var(--success);
+    }
+
+    .step.active .step-icon {
+      background: var(--brand);
+      color: white;
+      box-shadow: 0 0 0 4px var(--brand-soft);
+    }
+
+    .step-icon svg {
+      width: 10px;
+      height: 10px;
+    }
+
+    .step span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .step small {
+      color: var(--text-faint);
+      font-size: 8px;
+    }
+
+    .artifact-head {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .artifact-icon.jobs {
+      background: #edf3ff;
+      color: var(--blue);
+    }
+
+    .artifact-icon.report {
+      background: var(--surface-warm);
+      color: var(--warning);
+    }
+
+    .artifact-actions {
+      display: flex;
+      gap: 4px;
+    }
+
+    .tiny-button {
+      display: grid;
+      width: 27px;
+      height: 27px;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text-soft);
+      cursor: pointer;
+    }
+
+    .tiny-button svg {
+      width: 13px;
+      height: 13px;
+    }
+
+    .result-tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 3px;
+      margin: 10px 12px 6px;
+      padding: 3px;
+      border-radius: 10px;
+      background: var(--surface-soft);
+    }
+
+    .result-tab {
+      display: flex;
+      height: 28px;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--text-soft);
+      font-size: 9px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    .result-tab.active {
+      background: var(--surface);
+      color: var(--text);
+      box-shadow: 0 2px 8px rgba(31, 62, 50, 0.07);
+    }
+
+    .result-count {
+      display: grid;
+      min-width: 16px;
+      height: 16px;
+      place-items: center;
+      padding: 0 4px;
+      border-radius: 999px;
+      background: rgba(0, 169, 143, 0.11);
+      color: var(--brand-strong);
+      font-size: 8px;
+    }
+
+    .result-panel[hidden] {
+      display: none;
+    }
+
+    .result-list {
+      display: grid;
+      gap: 7px;
+      padding: 6px 12px 12px;
+    }
+
+    .result-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fbfdfc;
+    }
+
+    .result-primary {
+      min-width: 0;
+    }
+
+    .result-line {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+
+    .result-line strong {
+      overflow: hidden;
+      font-size: 10px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .salary {
+      flex: 0 0 auto;
+      color: var(--warning);
+      font-size: 9px;
+      font-weight: 700;
+    }
+
+    .company {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-top: 4px;
+      color: var(--text-soft);
+      font-size: 8px;
+    }
+
+    .company-avatar {
+      display: grid;
+      width: 16px;
+      height: 16px;
+      flex: 0 0 auto;
+      place-items: center;
+      border-radius: 5px;
+      background: #13251f;
+      color: white;
+      font-size: 7px;
+      font-weight: 750;
+    }
+
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 7px;
+    }
+
+    .tag {
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: var(--surface-soft);
+      color: var(--text-soft);
+      font-size: 7px;
+    }
+
+    .score-block {
+      display: flex;
+      min-width: 47px;
+      flex-direction: column;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .score {
+      display: flex;
+      align-items: baseline;
+      color: var(--brand-strong);
+      font-weight: 750;
+    }
+
+    .score b {
+      font-size: 16px;
+      letter-spacing: -0.8px;
+    }
+
+    .score small {
+      font-size: 7px;
+    }
+
+    .status-chip {
+      padding: 3px 6px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--text-soft);
+      font-size: 7px;
+      white-space: nowrap;
+    }
+
+    .status-chip.contacted {
+      border-color: rgba(0, 169, 143, 0.2);
+      background: var(--surface-mint);
+      color: var(--brand-strong);
+    }
+
+    .candidate-main {
+      display: flex;
+      min-width: 0;
+      gap: 8px;
+    }
+
+    .candidate-avatar {
+      position: relative;
+      display: grid;
+      width: 34px;
+      height: 34px;
+      flex: 0 0 auto;
+      place-items: center;
+      border-radius: 11px;
+      background: linear-gradient(145deg, #dff5ec, #b8ded1);
+      color: var(--brand-deep);
+      font-size: 10px;
+      font-weight: 750;
+    }
+
+    .candidate-avatar::after {
+      position: absolute;
+      right: -1px;
+      bottom: -1px;
+      width: 8px;
+      height: 8px;
+      border: 2px solid var(--surface);
+      border-radius: 50%;
+      background: var(--success);
+      content: "";
+    }
+
+    .candidate-copy {
+      min-width: 0;
+    }
+
+    .candidate-copy > strong {
+      display: block;
+      font-size: 10px;
+    }
+
+    .candidate-copy > p {
+      margin: 3px 0 0;
+      color: var(--text-soft);
+      font-size: 8px;
+      line-height: 1.45;
+    }
+
+    .report-preview {
+      max-height: 244px;
+      margin: 12px;
+      padding: 13px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background:
+        linear-gradient(180deg, transparent 76%, rgba(255, 255, 255, 0.98)),
+        #fbfdfc;
+      mask-image: linear-gradient(to bottom, #000 80%, transparent 100%);
+    }
+
+    .markdown-eyebrow {
+      color: var(--brand-strong);
+      font-family: var(--font-mono);
+      font-size: 7px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .report-preview h1 {
+      margin: 8px 0 6px;
+      font-size: 15px;
+      line-height: 1.35;
+      letter-spacing: -0.4px;
+    }
+
+    .report-preview p {
+      margin: 0 0 10px;
+      color: var(--text-soft);
+      font-size: 9px;
+      line-height: 1.65;
+    }
+
+    .report-preview h3 {
+      margin: 12px 0 6px;
+      font-size: 10px;
+    }
+
+    .report-preview ul {
+      margin: 0;
+      padding-left: 15px;
+      color: #3f4d47;
+      font-size: 8px;
+      line-height: 1.7;
+    }
+
+    .report-preview blockquote {
+      margin: 10px 0 0;
+      padding: 7px 9px;
+      border-left: 2px solid var(--brand);
+      border-radius: 0 7px 7px 0;
+      background: var(--surface-mint);
+      color: var(--brand-deep);
+      font-size: 8px;
+      line-height: 1.55;
+    }
+
+    .report-actions {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 6px;
+      padding: 0 12px 12px;
+    }
+
+    .action-button {
+      display: flex;
+      height: 31px;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface);
+      color: var(--text-soft);
+      font-size: 8px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    .action-button.primary {
+      border-color: var(--brand);
+      background: var(--brand);
+      color: white;
+      box-shadow: 0 7px 16px rgba(0, 169, 143, 0.18);
+    }
+
+    .action-button svg {
+      width: 12px;
+      height: 12px;
+    }
+
+    .suggestions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 12px;
+    }
+
+    .suggestion {
+      padding: 6px 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--text-soft);
+      font-size: 8px;
+      cursor: pointer;
+    }
+
+    .composer-region {
+      position: relative;
+      z-index: 30;
+      padding: 7px 9px 9px;
+      border-top: 1px solid var(--line);
+      background: rgba(247, 250, 248, 0.94);
+      backdrop-filter: blur(18px);
+    }
+
+    .run-control {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 6px;
+      padding: 0 3px;
+      color: var(--text-soft);
+      font-size: 8px;
+    }
+
+    .run-control > span {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .pulse-dot {
+      width: 6px;
+      height: 6px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: var(--brand);
+      box-shadow: 0 0 0 4px var(--brand-soft);
+      animation: pulse 1.8s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      50% {
+        box-shadow: 0 0 0 7px rgba(0, 169, 143, 0.03);
+      }
+    }
+
+    .stop-button {
+      display: flex;
+      height: 24px;
+      align-items: center;
+      gap: 5px;
+      padding: 0 8px;
+      border: 1px solid rgba(201, 76, 76, 0.2);
+      border-radius: 8px;
+      background: #fff6f6;
+      color: var(--danger);
+      font-size: 8px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .stop-square {
+      width: 7px;
+      height: 7px;
+      border-radius: 2px;
+      background: currentColor;
+    }
+
+    .composer {
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      border-radius: 15px;
+      background: var(--surface);
+      box-shadow: 0 10px 28px rgba(31, 62, 50, 0.1);
+      transition: border-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    .composer:focus-within {
+      border-color: rgba(0, 169, 143, 0.56);
+      box-shadow: 0 10px 28px rgba(31, 62, 50, 0.1), 0 0 0 3px rgba(0, 169, 143, 0.08);
+    }
+
+    .composer textarea {
+      display: block;
+      width: 100%;
+      min-height: 50px;
+      max-height: 120px;
+      padding: 10px 11px 3px;
+      resize: none;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--text);
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    .composer textarea::placeholder {
+      color: var(--text-faint);
+    }
+
+    .composer-tools {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      min-height: 35px;
+      padding: 3px 5px 5px;
+    }
+
+    .tool-button {
+      display: flex;
+      height: 27px;
+      align-items: center;
+      gap: 5px;
+      padding: 0 7px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--text-soft);
+      font-size: 8px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .tool-button:hover {
+      background: var(--surface-soft);
+      color: var(--text);
+    }
+
+    .tool-button svg {
+      width: 13px;
+      height: 13px;
+    }
+
+    .tool-button.model {
+      min-width: 0;
+      margin-left: auto;
+    }
+
+    .tool-button.model span {
+      overflow: hidden;
+      max-width: 70px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .skill-count {
+      color: var(--brand-strong);
+    }
+
+    .send-button {
+      display: grid;
+      width: 28px;
+      height: 28px;
+      flex: 0 0 auto;
+      place-items: center;
+      border: 0;
+      border-radius: 9px;
+      background: var(--brand);
+      color: white;
+      cursor: pointer;
+      box-shadow: 0 6px 14px rgba(0, 169, 143, 0.22);
+    }
+
+    .send-button svg {
+      width: 14px;
+      height: 14px;
+    }
+
+    .config-overlay {
+      position: fixed;
+      z-index: 100;
+      inset: 0;
+      display: none;
+      place-items: start center;
+      padding: 102px 12px 12px;
+      background: rgba(12, 31, 24, 0.2);
+      backdrop-filter: blur(4px);
+    }
+
+    .config-overlay.open {
+      display: grid;
+      animation: overlay-in 160ms ease both;
+    }
+
+    @keyframes overlay-in {
+      from {
+        opacity: 0;
+      }
+    }
+
+    .config-popover {
+      width: min(100%, 416px);
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 17px;
+      background: var(--surface);
+      box-shadow: 0 24px 70px rgba(17, 47, 36, 0.22);
+      transform-origin: 78% 0;
+      animation: popover-in 180ms ease both;
+    }
+
+    @keyframes popover-in {
+      from {
+        opacity: 0;
+        transform: translateY(-5px) scale(0.985);
+      }
+    }
+
+    .config-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 14px 11px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .config-head strong,
+    .config-head small {
+      display: block;
+    }
+
+    .config-head strong {
+      font-size: 12px;
+    }
+
+    .config-head small {
+      margin-top: 3px;
+      color: var(--text-faint);
+      font-size: 8px;
+      line-height: 1.45;
+    }
+
+    .config-body {
+      display: grid;
+      gap: 12px;
+      padding: 13px 14px;
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+
+    .field-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--text-soft);
+      font-size: 8px;
+      font-weight: 700;
+    }
+
+    .field-label span:last-child {
+      color: var(--text-faint);
+      font-weight: 500;
+    }
+
+    .provider-options {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 5px;
+      padding: 3px;
+      border-radius: 10px;
+      background: var(--surface-soft);
+    }
+
+    .provider-option {
+      height: 29px;
+      padding: 0 6px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--text-soft);
+      font-size: 8px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    .provider-option.active {
+      background: var(--surface);
+      color: var(--text);
+      box-shadow: 0 2px 8px rgba(31, 62, 50, 0.07);
+    }
+
+    .input-shell {
+      display: flex;
+      height: 36px;
+      align-items: center;
+      gap: 7px;
+      padding: 0 10px;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+
+    .input-shell:focus-within {
+      border-color: rgba(0, 169, 143, 0.5);
+      box-shadow: 0 0 0 3px var(--brand-soft);
+    }
+
+    .input-shell svg {
+      width: 13px;
+      height: 13px;
+      flex: 0 0 auto;
+      color: var(--text-faint);
+    }
+
+    .input-shell input,
+    .input-shell select {
+      width: 100%;
+      min-width: 0;
+      height: 100%;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--text);
+      font-size: 9px;
+    }
+
+    .input-shell select {
+      cursor: pointer;
+    }
+
+    .test-result {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 9px 10px;
+      border: 1px solid rgba(0, 169, 143, 0.16);
+      border-radius: 10px;
+      background: var(--surface-mint);
+    }
+
+    .test-result > span:first-child {
+      display: grid;
+      width: 18px;
+      height: 18px;
+      flex: 0 0 auto;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--success);
+      color: white;
+    }
+
+    .test-result svg {
+      width: 10px;
+      height: 10px;
+    }
+
+    .test-result strong,
+    .test-result small {
+      display: block;
+    }
+
+    .test-result strong {
+      color: var(--brand-deep);
+      font-size: 9px;
+    }
+
+    .test-result small {
+      margin-top: 2px;
+      color: var(--text-soft);
+      font-size: 8px;
+      line-height: 1.45;
+    }
+
+    .config-foot {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 7px;
+      padding: 10px 14px 13px;
+      border-top: 1px solid var(--line);
+    }
+
+    .privacy-note {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      gap: 5px;
+      color: var(--text-faint);
+      font-size: 7px;
+      line-height: 1.4;
+    }
+
+    .privacy-note svg {
+      width: 11px;
+      height: 11px;
+      flex: 0 0 auto;
+      color: var(--brand);
+    }
+
+    .config-button {
+      height: 30px;
+      padding: 0 11px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface);
+      color: var(--text-soft);
+      font-size: 8px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .config-button.primary {
+      border-color: var(--brand);
+      background: var(--brand);
+      color: white;
+    }
+
+    .prototype-note {
+      display: none;
+    }
+
+    @media (min-width: 600px) {
+      body {
+        padding: 18px;
+      }
+
+      .app-shell {
+        height: calc(100dvh - 36px);
+        min-height: 620px;
+        border: 1px solid rgba(26, 70, 55, 0.12);
+        border-radius: 20px;
+      }
+
+      .prototype-note {
+        position: fixed;
+        top: 20px;
+        left: max(18px, calc(50% - 420px));
+        display: grid;
+        max-width: 190px;
+        gap: 7px;
+        padding: 12px;
+        border: 1px solid rgba(26, 70, 55, 0.12);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.74);
+        color: var(--text-soft);
+        font-size: 9px;
+        line-height: 1.55;
+        backdrop-filter: blur(16px);
+      }
+
+      .prototype-note strong {
+        color: var(--text);
+        font-size: 11px;
+      }
+    }
+
+    @media (max-width: 359px) {
+      .command-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .model-label {
+        display: none;
+      }
+
+      .model-bar {
+        grid-template-columns: minmax(0, 1fr) auto;
+      }
+
+      .result-item {
+        grid-template-columns: 1fr;
+      }
+
+      .score-block {
+        min-width: 0;
+        flex-direction: row;
+        align-items: center;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-briefcase" viewBox="0 0 24 24">
+      <path d="M9 7V5.8A1.8 1.8 0 0 1 10.8 4h2.4A1.8 1.8 0 0 1 15 5.8V7m-9 0h12a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Zm-2 5.3c4.6 2.2 11.4 2.2 16 0M12 11v4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-sparkles" viewBox="0 0 24 24">
+      <path d="m12 3 .9 3.1a6.6 6.6 0 0 0 4.6 4.6l3.1.9-3.1.9a6.6 6.6 0 0 0-4.6 4.6L12 20.2l-.9-3.1a6.6 6.6 0 0 0-4.6-4.6l-3.1-.9 3.1-.9a6.6 6.6 0 0 0 4.6-4.6L12 3Zm7-1v4m2-2h-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/>
+      <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-more" viewBox="0 0 24 24">
+      <circle cx="5" cy="12" r="1.5" fill="currentColor"/>
+      <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
+      <circle cx="19" cy="12" r="1.5" fill="currentColor"/>
+    </symbol>
+    <symbol id="i-x" viewBox="0 0 24 24">
+      <path d="m6 6 12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-key" viewBox="0 0 24 24">
+      <circle cx="8" cy="15" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/>
+      <path d="m11 12 8-8m-3 3 2 2m-5 1 2 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24">
+      <path d="m7 9 5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/>
+      <path d="M3 12h18M12 3c2.2 2.4 3.3 5.4 3.3 9s-1.1 6.6-3.3 9c-2.2-2.4-3.3-5.4-3.3-9S9.8 5.4 12 3Z" fill="none" stroke="currentColor" stroke-width="1.7"/>
+    </symbol>
+    <symbol id="i-search" viewBox="0 0 24 24">
+      <circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/>
+      <path d="m16 16 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-users" viewBox="0 0 24 24">
+      <path d="M16 20v-1.5a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4V20m7-9a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm7-3a3 3 0 0 1 0 5.8m5 6.2v-1.5a4 4 0 0 0-3-3.9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24">
+      <path d="M4 19V9m6 10V5m6 14v-7m4 7H2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-message" viewBox="0 0 24 24">
+      <path d="M20 15a3 3 0 0 1-3 3H8l-4 3v-6a3 3 0 0 1-1-2.2V7a3 3 0 0 1 3-3h11a3 3 0 0 1 3 3v8Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-check" viewBox="0 0 24 24">
+      <path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-loader" viewBox="0 0 24 24">
+      <path d="M21 12a9 9 0 1 1-3.3-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-file" viewBox="0 0 24 24">
+      <path d="M6 3h8l4 4v14H6V3Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+      <path d="M14 3v5h5M9 13h6m-6 4h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-download" viewBox="0 0 24 24">
+      <path d="M12 3v12m-4-4 4 4 4-4M4 20h16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-external" viewBox="0 0 24 24">
+      <path d="M14 5h5v5m0-5-8 8M19 14v5H5V5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24">
+      <rect x="8" y="8" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/>
+      <path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" fill="none" stroke="currentColor" stroke-width="1.7"/>
+    </symbol>
+    <symbol id="i-paperclip" viewBox="0 0 24 24">
+      <path d="m20.5 11.5-8 8a5 5 0 0 1-7-7l8.2-8.2a3.5 3.5 0 0 1 5 5l-8.3 8.3a2 2 0 1 1-2.8-2.8L15 7.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24">
+      <path d="M12 19V5m-6 6 6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24">
+      <path d="M20 7v5h-5M4 17v-5h5m10.2-3A8 8 0 0 0 6 6l-2 3m.8 6A8 8 0 0 0 18 18l2-3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+  </svg>
+
+  <aside class="prototype-note" aria-label="原型说明">
+    <strong>BossPilot Side Panel</strong>
+    <span>静态 UI 原型 · 420px 侧边栏基准</span>
+    <span>品牌色已切换为薄荷青 / 墨绿 / 暖灰，与 RedScope 墨蓝体系区分。</span>
+  </aside>
+
+  <div class="app-shell">
+    <header class="top-region">
+      <div class="app-header">
+        <div class="brand-mark" aria-hidden="true">
+          <svg><use href="#i-briefcase"></use></svg>
+        </div>
+        <div class="brand-copy">
+          <div class="brand-title">
+            <strong>BossPilot</strong>
+            <span class="beta">Preview</span>
+          </div>
+          <div class="page-status">
+            <i></i>
+            <span>已连接 boss直聘.com · 当前搜索页可读取</span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button class="icon-button" type="button" aria-label="新建任务">
+            <svg><use href="#i-sparkles"></use></svg>
+          </button>
+          <button class="icon-button" id="settings-button" type="button" aria-label="打开设置">
+            <svg><use href="#i-settings"></use></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="model-bar" aria-label="模型与密钥配置">
+        <span class="model-label">
+          <svg><use href="#i-sparkles"></use></svg>
+          AI 模型
+        </span>
+        <button class="model-select" id="model-select-button" type="button" aria-label="选择模型">
+          <span class="provider-badge">DS</span>
+          <span class="model-select-text">
+            <strong>DeepSeek · deepseek-chat</strong>
+            <small>主模型 · 联网工具已启用</small>
+          </span>
+          <svg><use href="#i-chevron"></use></svg>
+        </button>
+        <button class="key-button" id="key-config-button" type="button" aria-label="管理 BYOK API Key">
+          <svg><use href="#i-key"></use></svg>
+          BYOK 已验证
+        </button>
+      </div>
+    </header>
+
+    <main class="conversation" aria-label="AI 对话与任务结果">
+      <div class="conversation-inner">
+        <div class="page-context">
+          <span>
+            <svg><use href="#i-globe"></use></svg>
+            <strong>前端开发 · 西安 · 3-5 年</strong>
+          </span>
+          <button class="context-action" type="button">读取当前页</button>
+        </div>
+
+        <div class="message user">
+          <div class="user-bubble">
+            帮我搜索西安 20K 以上的前端岗位，优先 React / TypeScript，筛掉长期不活跃的招聘者。
+          </div>
+        </div>
+
+        <div class="message assistant">
+          <div class="assistant-avatar" aria-hidden="true">
+            <svg><use href="#i-sparkles"></use></svg>
+          </div>
+          <div class="assistant-body">
+            <div class="message-meta">
+              <strong>BossPilot</strong>
+              <span class="mode-pill">深度匹配</span>
+              <span>刚刚</span>
+            </div>
+            <p class="assistant-copy">
+              已理解你的筛选重点。我会读取当前岗位列表，补充公司阶段、招聘者活跃度与技能重合度，并把高匹配岗位整理成可继续跟进的清单。
+            </p>
+
+            <div class="run-card">
+              <div class="run-head">
+                <div class="run-title">
+                  <span class="run-status-icon">
+                    <svg><use href="#i-search"></use></svg>
+                  </span>
+                  <span>
+                    <strong>搜索西安前端岗位</strong>
+                    <small>工作流 /job-search · 预计还需 42 秒</small>
+                  </span>
+                </div>
+                <span class="running-badge">
+                  <i class="spinner"></i>
+                  运行中
+                </span>
+              </div>
+              <div class="progress-wrap">
+                <div class="progress-meta">
+                  <span>已评估 34 / 50 个岗位</span>
+                  <strong>68%</strong>
+                </div>
+                <div class="progress-track" aria-label="任务进度 68%">
+                  <div class="progress-bar"></div>
+                </div>
+              </div>
+              <div class="step-list">
+                <div class="step done">
+                  <span class="step-icon"><svg><use href="#i-check"></use></svg></span>
+                  <span>解析搜索条件与排除项</span>
+                  <small>完成</small>
+                </div>
+                <div class="step done">
+                  <span class="step-icon"><svg><use href="#i-check"></use></svg></span>
+                  <span>读取岗位卡片与招聘者状态</span>
+                  <small>34 条</small>
+                </div>
+                <div class="step active">
+                  <span class="step-icon"><svg><use href="#i-loader"></use></svg></span>
+                  <span>计算技能、薪资与活跃度匹配</span>
+                  <small>处理中</small>
+                </div>
+                <div class="step">
+                  <span class="step-icon">4</span>
+                  <span>生成沟通建议与研究报告</span>
+                  <small>等待</small>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <section class="section" aria-labelledby="commands-title">
+          <div class="section-heading">
+            <h2 id="commands-title">
+              <svg><use href="#i-sparkles"></use></svg>
+              从一个快捷任务开始
+            </h2>
+            <p>输入 / 可唤起全部命令</p>
+          </div>
+          <div class="command-grid">
+            <button class="command-card" type="button" data-prompt="搜索西安前端岗位，优先 React / TypeScript，薪资 20K 以上">
+              <div class="command-top">
+                <span class="command-icon"><svg><use href="#i-search"></use></svg></span>
+                <span class="slash">/job-search</span>
+              </div>
+              <strong>搜索西安前端岗位</strong>
+              <p>按城市、薪资、技术栈和招聘者活跃度过滤岗位。</p>
+            </button>
+            <button class="command-card" type="button" data-prompt="筛选当前页面中与岗位要求匹配度最高的候选人，并给出联系优先级">
+              <div class="command-top">
+                <span class="command-icon blue"><svg><use href="#i-users"></use></svg></span>
+                <span class="slash">/talent-match</span>
+              </div>
+              <strong>筛选高匹配候选人</strong>
+              <p>对简历技能、经验、稳定性与意向进行综合评分。</p>
+            </button>
+            <button class="command-card" type="button" data-prompt="分析最近一周的招聘沟通数据，找出回复率下降的原因">
+              <div class="command-top">
+                <span class="command-icon orange"><svg><use href="#i-chart"></use></svg></span>
+                <span class="slash">/funnel-insight</span>
+              </div>
+              <strong>复盘招聘漏斗</strong>
+              <p>汇总查看、沟通、回复与约面状态，定位转化瓶颈。</p>
+            </button>
+            <button class="command-card" type="button" data-prompt="根据当前岗位要求，为高匹配候选人生成自然且个性化的首轮沟通话术">
+              <div class="command-top">
+                <span class="command-icon violet"><svg><use href="#i-message"></use></svg></span>
+                <span class="slash">/message-draft</span>
+              </div>
+              <strong>生成沟通话术</strong>
+              <p>引用候选人经历生成自然开场，由用户确认后再发送。</p>
+            </button>
+          </div>
+        </section>
+
+        <section class="section artifact-card" aria-labelledby="result-title">
+          <div class="artifact-head">
+            <div class="artifact-title">
+              <span class="artifact-icon jobs">
+                <svg><use href="#i-briefcase"></use></svg>
+              </span>
+              <span>
+                <strong id="result-title">智能匹配结果</strong>
+                <small>12 个岗位 · 8 位候选人 · 更新于 16:42</small>
+              </span>
+            </div>
+            <div class="artifact-actions">
+              <button class="tiny-button" type="button" aria-label="刷新结果">
+                <svg><use href="#i-refresh"></use></svg>
+              </button>
+              <button class="tiny-button" type="button" aria-label="更多结果操作">
+                <svg><use href="#i-more"></use></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="result-tabs" role="tablist" aria-label="结果类型">
+            <button class="result-tab active" type="button" role="tab" aria-selected="true" data-panel="jobs-panel">
+              岗位 <span class="result-count">12</span>
+            </button>
+            <button class="result-tab" type="button" role="tab" aria-selected="false" data-panel="talents-panel">
+              候选人 <span class="result-count">8</span>
+            </button>
+          </div>
+
+          <div class="result-panel" id="jobs-panel" role="tabpanel">
+            <div class="result-list">
+              <article class="result-item">
+                <div class="result-primary">
+                  <div class="result-line">
+                    <strong>高级前端开发工程师</strong>
+                    <span class="salary">20–30K · 14薪</span>
+                  </div>
+                  <div class="company">
+                    <span class="company-avatar">字</span>
+                    <span>字节跳动 · 雁塔区 · B 轮以上</span>
+                  </div>
+                  <div class="tags">
+                    <span class="tag">React</span>
+                    <span class="tag">TypeScript</span>
+                    <span class="tag">微前端</span>
+                    <span class="tag">HR 刚刚活跃</span>
+                  </div>
+                </div>
+                <div class="score-block">
+                  <span class="score"><b>94</b><small>%</small></span>
+                  <span class="status-chip contacted">待沟通</span>
+                </div>
+              </article>
+
+              <article class="result-item">
+                <div class="result-primary">
+                  <div class="result-line">
+                    <strong>前端技术专家</strong>
+                    <span class="salary">25–35K</span>
+                  </div>
+                  <div class="company">
+                    <span class="company-avatar" style="background:#3556a8">滴</span>
+                    <span>滴滴 · 高新区 · 10000 人以上</span>
+                  </div>
+                  <div class="tags">
+                    <span class="tag">React</span>
+                    <span class="tag">Node.js</span>
+                    <span class="tag">工程化</span>
+                    <span class="tag">今日活跃</span>
+                  </div>
+                </div>
+                <div class="score-block">
+                  <span class="score"><b>89</b><small>%</small></span>
+                  <span class="status-chip">已收藏</span>
+                </div>
+              </article>
+
+              <article class="result-item">
+                <div class="result-primary">
+                  <div class="result-line">
+                    <strong>Web 前端研发工程师</strong>
+                    <span class="salary">18–26K · 15薪</span>
+                  </div>
+                  <div class="company">
+                    <span class="company-avatar" style="background:#6c4bb5">紫</span>
+                    <span>紫光展锐 · 长安区 · 已上市</span>
+                  </div>
+                  <div class="tags">
+                    <span class="tag">Vue / React</span>
+                    <span class="tag">可视化</span>
+                    <span class="tag">双休</span>
+                    <span class="tag">近 1 小时活跃</span>
+                  </div>
+                </div>
+                <div class="score-block">
+                  <span class="score"><b>85</b><small>%</small></span>
+                  <span class="status-chip">待评估</span>
+                </div>
+              </article>
+            </div>
+          </div>
+
+          <div class="result-panel" id="talents-panel" role="tabpanel" hidden>
+            <div class="result-list">
+              <article class="result-item">
+                <div class="candidate-main">
+                  <span class="candidate-avatar">陈昊</span>
+                  <div class="candidate-copy">
+                    <strong>陈先生 · 5 年经验</strong>
+                    <p>西安 · React / TypeScript · 前字节前端工程师</p>
+                    <div class="tags">
+                      <span class="tag">本科</span>
+                      <span class="tag">在职看机会</span>
+                      <span class="tag">期望 25–30K</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="score-block">
+                  <span class="score"><b>96</b><small>%</small></span>
+                  <span class="status-chip contacted">优先联系</span>
+                </div>
+              </article>
+              <article class="result-item">
+                <div class="candidate-main">
+                  <span class="candidate-avatar" style="background:linear-gradient(145deg,#e7e4ff,#c8bff1);color:#51398e">林夏</span>
+                  <div class="candidate-copy">
+                    <strong>林女士 · 4 年经验</strong>
+                    <p>西安 · 中后台 / 可视化 · 交付过大型 SaaS 项目</p>
+                    <div class="tags">
+                      <span class="tag">硕士</span>
+                      <span class="tag">已离职</span>
+                      <span class="tag">一周内到岗</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="score-block">
+                  <span class="score"><b>92</b><small>%</small></span>
+                  <span class="status-chip">待沟通</span>
+                </div>
+              </article>
+              <article class="result-item">
+                <div class="candidate-main">
+                  <span class="candidate-avatar" style="background:linear-gradient(145deg,#ffeed7,#efd0a9);color:#8a5716">周屿</span>
+                  <div class="candidate-copy">
+                    <strong>周先生 · 6 年经验</strong>
+                    <p>咸阳 · React / Node.js · 有团队管理与架构经验</p>
+                    <div class="tags">
+                      <span class="tag">本科</span>
+                      <span class="tag">月内到岗</span>
+                      <span class="tag">期望 28K</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="score-block">
+                  <span class="score"><b>88</b><small>%</small></span>
+                  <span class="status-chip">已联系</span>
+                </div>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section class="section artifact-card" aria-labelledby="report-title">
+          <div class="artifact-head">
+            <div class="artifact-title">
+              <span class="artifact-icon report">
+                <svg><use href="#i-file"></use></svg>
+              </span>
+              <span>
+                <strong id="report-title">西安前端岗位匹配报告</strong>
+                <small>Markdown · 6 个章节 · 12 条可追溯来源</small>
+              </span>
+            </div>
+            <div class="artifact-actions">
+              <button class="tiny-button" type="button" aria-label="复制报告">
+                <svg><use href="#i-copy"></use></svg>
+              </button>
+              <button class="tiny-button" type="button" aria-label="打开完整报告">
+                <svg><use href="#i-external"></use></svg>
+              </button>
+            </div>
+          </div>
+
+          <article class="report-preview" aria-label="Markdown 报告预览">
+            <span class="markdown-eyebrow">research-report.md</span>
+            <h1>西安 React 前端岗位机会分析</h1>
+            <p>
+              基于当前搜索页与 50 个岗位详情，共筛出 12 个符合核心条件的机会。市场需求主要集中在高新区与雁塔区，中高级岗位对 TypeScript、工程化与跨端经验的要求明显提升。
+            </p>
+            <h3>优先建议</h3>
+            <ul>
+              <li>第一优先：高级前端开发工程师，技能重合度 94%，招聘者刚刚活跃。</li>
+              <li>第二优先：前端技术专家，平台业务稳定，但岗位更看重 Node.js 与架构经验。</li>
+              <li>不建议优先：30 天以上未活跃、薪资区间不透明或职责描述过宽的岗位。</li>
+            </ul>
+            <blockquote>
+              建议在首轮沟通中突出 TypeScript 工程治理与大型 React 项目经验，预期回复率可提升 18%–24%。
+            </blockquote>
+          </article>
+
+          <div class="report-actions">
+            <button class="action-button primary" type="button">
+              <svg><use href="#i-message"></use></svg>
+              引用报告继续追问
+            </button>
+            <button class="action-button" type="button">
+              <svg><use href="#i-download"></use></svg>
+              .md
+            </button>
+            <button class="action-button" type="button">
+              <svg><use href="#i-download"></use></svg>
+              PDF
+            </button>
+          </div>
+        </section>
+
+        <div class="message assistant">
+          <div class="assistant-avatar" aria-hidden="true">
+            <svg><use href="#i-sparkles"></use></svg>
+          </div>
+          <div class="assistant-body">
+            <div class="message-meta">
+              <strong>BossPilot</strong>
+              <span>建议下一步</span>
+            </div>
+            <p class="assistant-copy">
+              报告生成后会继续保留在本次会话中。你可以引用结果补充筛选、生成沟通话术，或把候选人状态持续更新到同一个任务里。
+            </p>
+            <div class="suggestions">
+              <button class="suggestion" type="button">只保留 25K 以上岗位</button>
+              <button class="suggestion" type="button">为前三名生成沟通话术</button>
+              <button class="suggestion" type="button">对比岗位福利与加班风险</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="composer-region">
+      <div class="run-control" aria-live="polite">
+        <span>
+          <i class="pulse-dot"></i>
+          当前任务运行中 · 68% · 已发现 12 个高匹配岗位
+        </span>
+        <button class="stop-button" type="button">
+          <i class="stop-square"></i>
+          停止
+        </button>
+      </div>
+      <div class="composer">
+        <textarea id="composer" rows="2" placeholder="追加要求、输入 / 使用快捷任务，或引用当前页面…"></textarea>
+        <div class="composer-tools">
+          <button class="tool-button" type="button">
+            <svg><use href="#i-paperclip"></use></svg>
+            附件
+          </button>
+          <button class="tool-button" type="button">
+            <svg><use href="#i-sparkles"></use></svg>
+            Skills <span class="skill-count">2</span>
+          </button>
+          <button class="tool-button model" type="button">
+            <span>deepseek-chat</span>
+            <svg><use href="#i-chevron"></use></svg>
+          </button>
+          <button class="send-button" type="button" aria-label="开始或发送任务">
+            <svg><use href="#i-arrow"></use></svg>
+          </button>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <div class="config-overlay" id="config-overlay" role="dialog" aria-modal="true" aria-labelledby="config-title">
+    <section class="config-popover">
+      <div class="config-head">
+        <div>
+          <strong id="config-title">模型与 BYOK 配置</strong>
+          <small>使用你自己的模型密钥；原型不会发起网络请求或保存任何内容。</small>
+        </div>
+        <button class="icon-button" id="config-close" type="button" aria-label="关闭模型配置">
+          <svg><use href="#i-x"></use></svg>
+        </button>
+      </div>
+
+      <div class="config-body">
+        <label class="field">
+          <span class="field-label">
+            <span>模型服务商</span>
+            <span>预设官方服务地址</span>
+          </span>
+          <span class="provider-options" role="group" aria-label="模型服务商">
+            <button class="provider-option active" type="button">DeepSeek</button>
+            <button class="provider-option" type="button">OpenAI</button>
+            <button class="provider-option" type="button">Kimi</button>
+            <button class="provider-option" type="button">自定义</button>
+          </span>
+        </label>
+
+        <label class="field">
+          <span class="field-label">
+            <span>API Key</span>
+            <span>仅保存在当前浏览器</span>
+          </span>
+          <span class="input-shell">
+            <svg><use href="#i-key"></use></svg>
+            <input type="password" value="sk-demo-local-key" autocomplete="off" aria-label="API Key">
+          </span>
+        </label>
+
+        <label class="field">
+          <span class="field-label">
+            <span>默认模型</span>
+            <span>连接测试后自动获取</span>
+          </span>
+          <span class="input-shell">
+            <svg><use href="#i-sparkles"></use></svg>
+            <select aria-label="默认模型">
+              <option selected>deepseek-chat</option>
+              <option>deepseek-reasoner</option>
+              <option>deepseek-v3.1</option>
+            </select>
+          </span>
+        </label>
+
+        <div class="test-result" role="status">
+          <span><svg><use href="#i-check"></use></svg></span>
+          <span>
+            <strong>连接测试通过</strong>
+            <small>已获取 3 个可用模型 · 延迟 842ms · 工具调用能力可用</small>
+          </span>
+        </div>
+      </div>
+
+      <div class="config-foot">
+        <button class="config-button" type="button">重新测试</button>
+        <span class="privacy-note">
+          <svg><use href="#i-key"></use></svg>
+          密钥不进入报告、聊天记录或诊断日志
+        </span>
+        <button class="config-button primary" id="config-save" type="button">保存配置</button>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    (() => {
+      const tabs = document.querySelectorAll(".result-tab");
+      const panels = document.querySelectorAll(".result-panel");
+      const composer = document.querySelector("#composer");
+      const commandCards = document.querySelectorAll(".command-card");
+      const suggestionButtons = document.querySelectorAll(".suggestion");
+      const configOverlay = document.querySelector("#config-overlay");
+      const configTriggers = [
+        document.querySelector("#settings-button"),
+        document.querySelector("#model-select-button"),
+        document.querySelector("#key-config-button")
+      ];
+      const configCloseButtons = [
+        document.querySelector("#config-close"),
+        document.querySelector("#config-save")
+      ];
+      const providerOptions = document.querySelectorAll(".provider-option");
+
+      tabs.forEach((tab) => {
+        tab.addEventListener("click", () => {
+          tabs.forEach((item) => {
+            const active = item === tab;
+            item.classList.toggle("active", active);
+            item.setAttribute("aria-selected", String(active));
+          });
+
+          panels.forEach((panel) => {
+            panel.hidden = panel.id !== tab.dataset.panel;
+          });
+        });
+      });
+
+      commandCards.forEach((card) => {
+        card.addEventListener("click", () => {
+          commandCards.forEach((item) => item.classList.remove("selected"));
+          card.classList.add("selected");
+          composer.value = card.dataset.prompt || "";
+          composer.focus();
+        });
+      });
+
+      suggestionButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          composer.value = button.textContent.trim();
+          composer.focus();
+        });
+      });
+
+      const setConfigOpen = (open) => {
+        configOverlay.classList.toggle("open", open);
+      };
+
+      configTriggers.forEach((button) => {
+        button?.addEventListener("click", () => setConfigOpen(true));
+      });
+
+      configCloseButtons.forEach((button) => {
+        button?.addEventListener("click", () => setConfigOpen(false));
+      });
+
+      configOverlay.addEventListener("click", (event) => {
+        if (event.target === configOverlay) {
+          setConfigOpen(false);
+        }
+      });
+
+      providerOptions.forEach((button) => {
+        button.addEventListener("click", () => {
+          providerOptions.forEach((item) => item.classList.toggle("active", item === button));
+        });
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          setConfigOpen(false);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

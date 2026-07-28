@@ -1,0 +1,122 @@
+// ─── 领域实体模型 ───
+// BossPilot 的核心数据结构：搜索任务参数、岗位实体、打分结果。
+// 所有跨运行时（sidepanel / background / content）传输的数据都以这里为准。
+
+/** 用户自然语言意图解析后的结构化任务参数。 */
+export interface SearchTaskParams {
+  /** 搜索关键词，如「前端开发」。 */
+  keyword: string;
+  /** 城市名（中文），如「西安」。由适配层映射为 Boss 城市码。 */
+  city: string;
+  /** 薪资下限（K/月），可空。 */
+  salaryMinK?: number;
+  /** 薪资上限（K/月），可空。 */
+  salaryMaxK?: number;
+  /** 经验要求（自然语言原样保留，作为软条件参与语义过滤）。 */
+  experience?: string;
+  /**
+   * 软条件：Boss 原生筛选器表达不了、需要 LLM 对 JD 全文判断的条件。
+   * 例如「排除外包」「排除驻场」「要求双休」「不要频繁加班」。
+   */
+  softConditions: string[];
+  /** 本次任务最多采集的岗位数（风控上限，默认 20，硬上限 40）。 */
+  maxJobs: number;
+  /** 是否逐个进详情页抓完整 JD（更准但更慢、风控风险更高）。 */
+  fetchDetails: boolean;
+}
+
+/** 从列表页 / 详情页采集到的岗位实体。 */
+export interface JobPosting {
+  /** Boss 侧的职位加密 id（从链接提取），用于去重与详情页定位。 */
+  id: string;
+  title: string;
+  /** 原始薪资文本，如「15-25K·14薪」。 */
+  salaryText: string;
+  salaryMinK?: number;
+  salaryMaxK?: number;
+  companyName: string;
+  /** 公司规模文本，如「100-499人」。 */
+  companySize?: string;
+  /** 融资阶段/行业等标签。 */
+  companyTags: string[];
+  /** 经验/学历等职位标签。 */
+  jobTags: string[];
+  city?: string;
+  /** 商圈/区域，如「雁塔区 小寨」。 */
+  area?: string;
+  /** 招聘者名称与职务，如「张女士·HR」。 */
+  recruiter?: string;
+  /** 详情页 URL（站内相对或绝对）。 */
+  url: string;
+  /** 完整 JD 文本（仅 fetchDetails 时有）。 */
+  description?: string;
+  /** 详情页公司介绍（可选）。 */
+  companyIntro?: string;
+}
+
+/** LLM 对单个岗位的语义评估结果。 */
+export interface JobAssessment {
+  jobId: string;
+  /** 软条件过滤结论：true = 通过（保留）。 */
+  passed: boolean;
+  /** 未通过时命中的排除原因，如「疑似外包公司」。 */
+  excludeReason?: string;
+  /** 匹配度 0-100（结合用户档案；无档案时基于任务参数）。 */
+  matchScore: number;
+  /** 匹配亮点（1-3 条短句）。 */
+  highlights: string[];
+  /** 风险/差距点（0-3 条短句）。 */
+  risks: string[];
+}
+
+/** 评估后合并的展示行。 */
+export interface AssessedJob extends JobPosting {
+  assessment: JobAssessment;
+}
+
+/** 任务执行的阶段。 */
+export type TaskPhase =
+  | 'idle'
+  | 'parsing' // LLM 意图解析
+  | 'searching' // 打开/导航搜索页
+  | 'collecting' // 列表翻页采集
+  | 'detailing' // 详情页抓取
+  | 'assessing' // LLM 批量评估
+  | 'reporting' // 生成报告
+  | 'paused_captcha' // 遇验证码暂停，等用户手动通过
+  | 'done'
+  | 'error'
+  | 'cancelled';
+
+/** 任务运行时快照（广播给 UI）。 */
+export interface TaskSnapshot {
+  taskId: string;
+  phase: TaskPhase;
+  /** 人类可读的当前进度描述。 */
+  statusText: string;
+  params?: SearchTaskParams;
+  collected: number;
+  assessed: number;
+  jobs: AssessedJob[];
+  /** phase=done 时的 Markdown 报告全文。 */
+  reportMarkdown?: string;
+  error?: string;
+}
+
+/** 用户简历/求职偏好档案（本地存储，参与匹配打分）。 */
+export interface UserProfile {
+  /** 简历要点/技能栈自述（自由文本，用户在设置页维护）。 */
+  resumeText: string;
+  /** 长期偏好，如「只考虑双休」「倾向中大厂」。 */
+  preferences: string;
+}
+
+/** LLM Provider 配置（OpenAI 兼容端点，BYOK）。 */
+export interface LlmConfig {
+  /** 形如 https://api.deepseek.com/v1 的 OpenAI 兼容 base URL。 */
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  /** 评估批量大小（一次请求评估几个岗位），默认 10。 */
+  batchSize?: number;
+}

@@ -1,0 +1,62 @@
+{
+  "name": "bosspilot",
+  "description": "BossPilot — 面向 Boss 直聘的定制化 AI 求职副驾浏览器扩展（BYOK / 本地优先 / 开源）",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "chrome-extension",
+    "browser-extension",
+    "ai-agent",
+    "job-search",
+    "zhipin",
+    "boss-zhipin",
+    "llm",
+    "byok",
+    "wxt",
+    "react",
+    "sidepanel",
+    "mv3"
+  ],
+  "homepage": "https://github.com/little077/BossPilot#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/little077/BossPilot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/little077/BossPilot/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "wxt",
+    "dev:firefox": "wxt -b firefox",
+    "build": "wxt build",
+    "build:firefox": "wxt build -b firefox",
+    "zip": "wxt zip",
+    "compile": "tsc --noEmit",
+    "postinstall": "wxt prepare"
+  },
+  "dependencies": {
+    "dexie": "^4.0.10",
+    "lucide-react": "^0.469.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^9.0.1",
+    "remark-gfm": "^4.0.0",
+    "turndown": "^7.2.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/chrome": "^0.0.287",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/turndown": "^5.0.5",
+    "@wxt-dev/module-react": "^1.1.3",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.7.2",
+    "wxt": "^0.19.13"
+  }
+}
