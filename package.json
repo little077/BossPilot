@@ -37,9 +37,13 @@
     "build:firefox": "wxt build -b firefox",
     "zip": "wxt zip",
     "compile": "tsc --noEmit",
+    "icons": "node scripts/render-icons.mjs",
     "postinstall": "wxt prepare"
   },
   "dependencies": {
+    "@tiptap/extension-placeholder": "^3.29.2",
+    "@tiptap/react": "^3.29.2",
+    "@tiptap/starter-kit": "^3.29.2",
     "dexie": "^4.0.10",
     "lucide-react": "^0.469.0",
     "react": "^19.0.0",
@@ -55,6 +59,7 @@
     "@types/react-dom": "^19.0.0",
     "@types/turndown": "^5.0.5",
     "@wxt-dev/module-react": "^1.1.3",
+    "sharp": "^0.35.3",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.2",
     "wxt": "^0.19.13"
