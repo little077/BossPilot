@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BossPilot 扩展图标方案预览</title>
+<style>
+  :root {
+    --brand: #00a98f;
+    --ink: #17221e;
+    --paper: #f6faf8;
+    --line: #e2ece8;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    background: var(--paper);
+    color: var(--ink);
+    padding: 48px 32px 80px;
+  }
+  header { max-width: 1080px; margin: 0 auto 40px; }
+  header h1 { font-size: 26px; font-weight: 700; letter-spacing: 0.5px; }
+  header h1 span { color: var(--brand); }
+  header p { margin-top: 8px; color: #5b6b65; font-size: 14px; line-height: 1.7; }
+  .grid {
+    max-width: 1080px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
+    gap: 24px;
+  }
+  .card {
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 24px;
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+  }
+  .card:hover {
+    box-shadow: 0 8px 28px rgba(0, 68, 56, 0.1);
+    transform: translateY(-2px);
+  }
+  .card h2 {
+    font-size: 17px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .card h2 .no {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px; height: 26px;
+    border-radius: 8px;
+    background: var(--brand);
+    color: #fff;
+    font-size: 14px;
+  }
+  .card .desc { margin: 8px 0 20px; font-size: 13px; color: #5b6b65; line-height: 1.7; }
+  .sizes {
+    display: flex;
+    align-items: flex-end;
+    gap: 28px;
+    padding: 20px;
+    background: #fafcfb;
+    border: 1px dashed var(--line);
+    border-radius: 10px;
+  }
+  .size-item { text-align: center; }
+  .size-item .label { margin-top: 8px; font-size: 11px; color: #8a9a94; }
+  .size-item svg { display: block; }
+  .toolbars { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 40px;
+    border-radius: 8px;
+    padding: 0 14px;
+  }
+  .toolbar.light { background: #f1f3f4; border: 1px solid #e0e3e4; }
+  .toolbar.dark { background: #2b2d30; }
+  .addr {
+    flex: 1;
+    height: 24px;
+    border-radius: 12px;
+    font-size: 11px;
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+  }
+  .toolbar.light .addr { background: #fff; color: #9aa5a1; border: 1px solid #e0e3e4; }
+  .toolbar.dark .addr { background: #3c3f42; color: #8b9490; }
+  .dot { width: 16px; height: 16px; border-radius: 50%; }
+  .toolbar.light .dot { background: #d4d8d7; }
+  .toolbar.dark .dot { background: #55595c; }
+  footer {
+    max-width: 1080px;
+    margin: 48px auto 0;
+    font-size: 13px;
+    color: #5b6b65;
+    line-height: 1.8;
+    border-top: 1px solid var(--line);
+    padding-top: 20px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════ 图标定义（symbol 一次定义，多尺寸复用） ═══════════ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <!-- 渐变 -->
+    <linearGradient id="g-plane" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#00c9a7"/><stop offset="1" stop-color="#008068"/>
+    </linearGradient>
+    <linearGradient id="g-bubble" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#00c2a2"/><stop offset="1" stop-color="#008d75"/>
+    </linearGradient>
+    <linearGradient id="g-mono" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3fdcba"/><stop offset="1" stop-color="#00a98f"/>
+    </linearGradient>
+    <linearGradient id="g-scan" x1="0" y1="0" x2="1" y2="0.6">
+      <stop offset="0" stop-color="#2ee6c4" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#2ee6c4" stop-opacity="0.05"/>
+    </linearGradient>
+
+    <!-- 方案1：罗盘指针 -->
+    <symbol id="icon-compass" viewBox="0 0 128 128">
+      <rect width="128" height="128" rx="28" fill="#eef8f4"/>
+      <circle cx="64" cy="64" r="41" fill="none" stroke="#00a98f" stroke-width="8"/>
+      <polygon points="90,38 71,71 57,57" fill="#00a98f"/>
+      <polygon points="38,90 71,71 57,57" fill="#17221e"/>
+      <circle cx="64" cy="64" r="6" fill="#eef8f4"/>
+    </symbol>
+
+    <!-- 方案2：纸飞机 -->
+    <symbol id="icon-plane" viewBox="0 0 128 128">
+      <rect width="128" height="128" rx="28" fill="url(#g-plane)"/>
+      <polygon points="100,28 24,64 58,76" fill="#ffffff"/>
+      <polygon points="100,28 58,76 64,102" fill="#c9f2e8"/>
+      <polygon points="100,28 58,76 74,82" fill="#ffffff" opacity="0.55"/>
+    </symbol>
+
+    <!-- 方案3：飞行员徽章 B -->
+    <symbol id="icon-badge" viewBox="0 0 128 128">
+      <rect width="128" height="128" rx="28" fill="#0e2a24"/>
+      <!-- 左右羽翼：三段递减横杆 -->
+      <rect x="10" y="50" width="24" height="7" rx="3.5" fill="#00a98f"/>
+      <rect x="16" y="62" width="18" height="7" rx="3.5" fill="#00a98f" opacity="0.7"/>
+      <rect x="22" y="74" width="12" height="7" rx="3.5" fill="#00a98f" opacity="0.45"/>
+      <rect x="94" y="50" width="24" height="7" rx="3.5" fill="#00a98f"/>
+      <rect x="94" y="62" width="18" height="7" rx="3.5" fill="#00a98f" opacity="0.7"/>
+      <rect x="94" y="74" width="12" height="7" rx="3.5" fill="#00a98f" opacity="0.45"/>
+      <!-- 手绘 B monogram（描边式，避免字体依赖） -->
+      <path d="M52 32 H70 A16 16 0 0 1 70 64 H52 Z M52 64 H74 A16 16 0 0 1 74 96 H52 Z"
+            fill="none" stroke="url(#g-mono)" stroke-width="10" stroke-linejoin="round"/>
+    </symbol>
+
+    <!-- 方案4：雷达扫描 -->
+    <symbol id="icon-radar" viewBox="0 0 128 128">
+      <rect width="128" height="128" rx="28" fill="#10332c"/>
+      <circle cx="64" cy="64" r="16" fill="none" stroke="#ffffff" stroke-opacity="0.22" stroke-width="4"/>
+      <circle cx="64" cy="64" r="30" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="4"/>
+      <circle cx="64" cy="64" r="44" fill="none" stroke="#ffffff" stroke-opacity="0.14" stroke-width="4"/>
+      <path d="M64 64 L64 20 A44 44 0 0 1 102 42 Z" fill="url(#g-scan)"/>
+      <line x1="64" y1="64" x2="102" y2="42" stroke="#2ee6c4" stroke-width="5" stroke-linecap="round"/>
+      <circle cx="84" cy="82" r="12" fill="#2ee6c4" opacity="0.25"/>
+      <circle cx="84" cy="82" r="7" fill="#2ee6c4"/>
+      <circle cx="64" cy="64" r="5" fill="#ffffff"/>
+    </symbol>
+
+    <!-- 方案5：对话气泡 + 上升箭头 -->
+    <symbol id="icon-bubble" viewBox="0 0 128 128">
+      <rect width="128" height="128" rx="28" fill="#ffffff"/>
+      <rect x="0.5" y="0.5" width="127" height="127" rx="27.5" fill="none" stroke="#dcebe6"/>
+      <rect x="22" y="24" width="84" height="66" rx="20" fill="url(#g-bubble)"/>
+      <path d="M40 86 L32 106 L60 90 Z" fill="#008d75"/>
+      <polygon points="64,38 48,58 80,58" fill="#ffffff"/>
+      <rect x="58" y="56" width="12" height="22" rx="6" fill="#ffffff"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header>
+  <h1>BossPilot <span>扩展图标</span> · 5 套方案</h1>
+  <p>统一基调：几何造型 · 品牌薄荷绿 #00a98f · 22% 圆角底板 · 16px 工具栏可辨识。<br>
+     每套下方附浅色 / 深色浏览器工具栏的 16px 实际观感模拟，选好编号告诉我即可。</p>
+</header>
+
+<div class="grid">
+
+  <!-- ═══ 方案 1 ═══ -->
+  <div class="card">
+    <h2><span class="no">1</span>罗盘指针 · Compass</h2>
+    <p class="desc">圆形罗盘 + 指向右上的双色菱形指针，寓意「求职导航副驾」。浅底绿针，气质克制。</p>
+    <div class="sizes">
+      <div class="size-item"><svg width="128" height="128"><use href="#icon-compass"/></svg><div class="label">128px</div></div>
+      <div class="size-item"><svg width="48" height="48"><use href="#icon-compass"/></svg><div class="label">48px</div></div>
+      <div class="size-item"><svg width="16" height="16"><use href="#icon-compass"/></svg><div class="label">16px</div></div>
+    </div>
+    <div class="toolbars">
+      <div class="toolbar light"><div class="addr">zhipin.com</div><span class="dot"></span><svg width="16" height="16"><use href="#icon-compass"/></svg><span class="dot"></span></div>
+      <div class="toolbar dark"><div class="addr">zhipin.com</div><span class="dot"></span><svg width="16" height="16"><use href="#icon-compass"/></svg><span class="dot"></span></div>
+    </div>
+  </div>
+
+  <!-- ═══ 方案 2 ═══ -->
+  <div class="card">
+    <h2><span class="no">2</span>纸飞机 · Departure</h2>
+    <p class="desc">渐变绿底 + 白色折线纸飞机向右上方飞，寓意「投递与出发」。识别度最高的经典隐喻。</p>
+    <div class="sizes">
+      <div class="size-item"><svg width="128" height="128"><use href="#icon-plane"/></svg><div class="label">128px</div></div>
+      <div class="size-item"><svg width="48" height="48"><use href="#icon-plane"/></svg><div class="label">48px</div></div>
+      <div class="size-item"><svg width="16" height="16"><use href="#icon-plane"/></svg><div class="label">16px</div></div>
+    </div>
+    <div class="toolbars">
+      <div class="toolbar light"><div class="addr">zhipin.com</div><span class="dot"></span><svg width="16" height="16"><use href="#icon-plane"/></svg><span class="dot"></span></div>
+      <div class="toolbar dark"><div class="addr">zhipin.com</div><span class="dot"></span><svg width="16" height="16"><use href="#icon-plane"/></svg><span class="dot"></span></div>
+    </div>
+  </div>
+
+  <!-- ═══ 方案 3 ═══ -->
+  <div class="card">
+    <h2><span class="no">3</span>飞行员徽章 · Pilot B</h2>
+    <p class="desc">深墨绿底 + 描边 B monogram + 两侧递减羽翼，徽章质感，呼应「Pilot / 副驾」身份。</p>
+    <div class="sizes">
+      <div class="size-item"><svg width="128" height="128"><use href="#icon-badge"/></svg><div class="label">128px</div></div>
+      <div class="size-item"><svg width="48" height="48"><use href="#icon-badge"/></svg><div class="label">48px</div></div>
+      <div class="size-item"><svg width="16" height="16"><use href="#icon-badge"/></svg><div class="label">16px</div></div>
+    </div>
+    <div class="toolbars">
+      <div class="toolbar light"><div class="addr">zhipin.com</div><span class="dot"></span><svg width="16" height="16"><use href="#icon-badge"/></svg><span class="dot"></span></div>
+      <div class="toolbar dark"><div class="addr">zhipin.com</div><span class="dot"></span><svg width="16" height="16"><use href="#icon-badge"/></svg><span class="dot"></span></div>
+    </div>
+  </div>
+
+  <!-- ═══ 方案 4 ═══ -->
+  <div class="card">
+    <h2><span class="no">4</span>雷达扫描 · Radar</h2>
+    <p class="desc">深底同心圆弧 + 扫描扇形 + 高亮目标点，寓意「扫描筛选岗位、锁定匹配目标」。科技感最强。</p>
+    <div class="sizes">
+      <div class="size-item"><svg width="128" height="128"><use href="#icon-radar"/></svg><div class="label">128px</div></div>
+      <div class="size-item"><svg width="48" height="48"><use href="#icon-radar"/></svg><div class="label">48px</div></div>
+      <div class="size-item"><svg width="16" height="16"><use href="#icon-radar"/></svg><div class="label">16px</div></div>
+    </div>
+    <div class="toolbars">
+      <div class="toolbar light"><div class="addr">zhipin.com</div><span class="dot"></span><svg width="16" height="16"><use href="#icon-radar"/></svg><span class="dot"></span></div>
+      <div class="toolbar dark"><div class="addr">zhipin.com</div><span class="dot"></span><svg width="16" height="16"><use href="#icon-radar"/></svg><span class="dot"></span></div>
+    </div>
+  </div>
+
+  <!-- ═══ 方案 5 ═══ -->
+  <div class="card">
+    <h2><span class="no">5</span>对话 + 箭头 · Uplift</h2>
+    <p class="desc">白底 + 渐变绿对话气泡内嵌白色上升箭头，呼应「AI 对话驱动求职、助你更进一步」。亲和友好。</p>
+    <div class="sizes">
+      <div class="size-item"><svg width="128" height="128"><use href="#icon-bubble"/></svg><div class="label">128px</div></div>
+      <div class="size-item"><svg width="48" height="48"><use href="#icon-bubble"/></svg><div class="label">48px</div></div>
+      <div class="size-item"><svg width="16" height="16"><use href="#icon-bubble"/></svg><div class="label">16px</div></div>
+    </div>
+    <div class="toolbars">
+      <div class="toolbar light"><div class="addr">zhipin.com</div><span class="dot"></span><svg width="16" height="16"><use href="#icon-bubble"/></svg><span class="dot"></span></div>
+      <div class="toolbar dark"><div class="addr">zhipin.com</div><span class="dot"></span><svg width="16" height="16"><use href="#icon-bubble"/></svg><span class="dot"></span></div>
+    </div>
+  </div>
+
+</div>
+
+<footer>
+  选定方案后，将以 SVG 为源渲染 public/icon/{16, 32, 48, 96, 128}.png（WXT 自动写入 manifest）。<br>
+  可以指定微调：换配色 / 调线条粗细 / 去掉底板圆角 / 元素增删，或任意两套元素组合。
+</footer>
+
+</body>
+</html>

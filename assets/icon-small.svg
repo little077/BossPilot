@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  BossPilot 扩展图标 · 16px 专用简化变体
+  小尺寸下细节会糊：B 描边加粗、羽翼减为两根并加粗、圆角略收。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="g-mono-s" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3fdcba"/>
+      <stop offset="1" stop-color="#00a98f"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="24" fill="#0e2a24"/>
+  <!-- 羽翼简化为两根粗杆 -->
+  <rect x="6" y="50" width="28" height="10" rx="5" fill="#00a98f"/>
+  <rect x="14" y="68" width="20" height="10" rx="5" fill="#00a98f" opacity="0.65"/>
+  <rect x="94" y="50" width="28" height="10" rx="5" fill="#00a98f"/>
+  <rect x="94" y="68" width="20" height="10" rx="5" fill="#00a98f" opacity="0.65"/>
+  <!-- B monogram：描边加粗到 14 -->
+  <path d="M52 30 H70 A17 17 0 0 1 70 64 H52 Z M52 64 H74 A17 17 0 0 1 74 98 H52 Z"
+        fill="none" stroke="url(#g-mono-s)" stroke-width="14" stroke-linejoin="round"/>
+</svg>

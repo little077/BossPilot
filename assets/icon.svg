@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  BossPilot 扩展图标源文件（飞行员徽章 · Pilot B）
+  用于 32px 及以上尺寸；16px 请使用 icon-small.svg（简化变体）。
+  修改后运行 `npm run icons` 重新生成 public/icon/ 下的 PNG。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="g-mono" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3fdcba"/>
+      <stop offset="1" stop-color="#00a98f"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="#0e2a24"/>
+  <!-- 左右羽翼：三段递减横杆 -->
+  <rect x="10" y="50" width="24" height="7" rx="3.5" fill="#00a98f"/>
+  <rect x="16" y="62" width="18" height="7" rx="3.5" fill="#00a98f" opacity="0.7"/>
+  <rect x="22" y="74" width="12" height="7" rx="3.5" fill="#00a98f" opacity="0.45"/>
+  <rect x="94" y="50" width="24" height="7" rx="3.5" fill="#00a98f"/>
+  <rect x="94" y="62" width="18" height="7" rx="3.5" fill="#00a98f" opacity="0.7"/>
+  <rect x="94" y="74" width="12" height="7" rx="3.5" fill="#00a98f" opacity="0.45"/>
+  <!-- 手绘 B monogram（描边式，避免字体依赖） -->
+  <path d="M52 32 H70 A16 16 0 0 1 70 64 H52 Z M52 64 H74 A16 16 0 0 1 74 96 H52 Z"
+        fill="none" stroke="url(#g-mono)" stroke-width="10" stroke-linejoin="round"/>
+</svg>
