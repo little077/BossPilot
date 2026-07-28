@@ -78,6 +78,14 @@ Boss 直聘改版导致选择器失效是最常见的维护场景：
 
 ## 📦 发布流程（维护者）
 
-1. 更新 `package.json` 版本号（遵循 semver）。
-2. `npm run zip` 生成发布包。
-3. 打 tag 并在 GitHub Releases 附上 zip 与变更说明。
+CI 已接管打包发布（见 `.github/workflows/`）：每次 push 到 `main` 会自动做类型检查、构建并把 zip 存为 Actions Artifact；推送 `v*` 标签则自动创建 GitHub Release 并附上安装包。
+
+1. 更新 `package.json` 版本号（遵循 semver）并提交。
+2. 打 tag 并推送，剩下的交给流水线：
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+3. 稍等几分钟，到 [Releases](https://github.com/little077/BossPilot/releases) 确认自动生成的发布与 zip 附件。

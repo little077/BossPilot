@@ -1,0 +1,49 @@
+# 自动发布：推送 v* 标签（如 v0.1.0）时构建扩展 zip 并创建 GitHub Release，
+# 任何用户都可以在仓库 Releases 页面直接下载，永久保存。
+#
+# 发版操作（维护者本地执行）：
+#   git tag v0.1.0
+#   git push origin v0.1.0
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # 创建 Release 需要写权限
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run compile
+
+      - name: 生产构建并打包
+        run: npm run zip
+
+      - name: 创建 Release 并附上 zip
+        uses: softprops/action-gh-release@v2
+        with:
+          files: .output/*.zip
+          generate_release_notes: true # 自动根据提交记录生成变更说明
+          body: |
+            ## 安装方法
+
+            1. 下载下方的 `bosspilot-*-chrome.zip` 并解压
+            2. 打开 `chrome://extensions/`，开启右上角「开发者模式」
+            3. 点击「加载已解压的扩展程序」，选择解压后的文件夹
+            4. 在扩展设置页配置你自己的模型 API Key（BYOK）即可使用

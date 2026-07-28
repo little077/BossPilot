@@ -8,6 +8,9 @@
 
 BYOK（自带模型 Key）· 数据全本地 · 不自动投递 · MIT 开源
 
+[![Build](https://github.com/little077/BossPilot/actions/workflows/build.yml/badge.svg)](https://github.com/little077/BossPilot/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/little077/BossPilot?label=Release&color=00a98f)](https://github.com/little077/BossPilot/releases/latest)
+
 [快速开始](#-快速开始) · [功能特性](#-功能特性) · [工作原理](#-工作原理) · [架构文档](docs/ARCHITECTURE.md) · [参与贡献](CONTRIBUTING.md)
 
 </div>
@@ -32,7 +35,11 @@ BYOK（自带模型 Key）· 数据全本地 · 不自动投递 · MIT 开源
 - Chrome / Edge 等 Chromium 内核浏览器（支持 MV3 侧边栏）
 - 一个 OpenAI 兼容的大模型 API Key（DeepSeek / OpenAI / Kimi / 智谱 / 本地 Ollama 等均可）
 
-### 安装与构建
+### 方式一：直接下载（推荐）
+
+从 [Releases](https://github.com/little077/BossPilot/releases/latest) 下载最新的 `bosspilot-*-chrome.zip` 并解压，然后跳到下方「加载扩展」（选择解压后的文件夹即可）。
+
+### 方式二：从源码构建
 
 ```bash
 git clone https://github.com/little077/BossPilot.git

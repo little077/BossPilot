@@ -1,0 +1,39 @@
+# 持续集成：每次 push / PR 自动做类型检查 + 生产构建 + 打包，
+# 并把 zip 存为 Actions Artifact（供开发者预览，保存 90 天）。
+# 面向普通用户的正式下载包由 release.yml 在打 tag 时发布到 Releases。
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run compile
+
+      - name: 生产构建并打包
+        run: npm run zip
+
+      - name: 上传构建产物（Artifact）
+        uses: actions/upload-artifact@v4
+        with:
+          name: bosspilot-chrome-${{ github.sha }}
+          path: .output/*.zip
+          retention-days: 90
