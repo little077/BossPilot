@@ -1,5 +1,5 @@
-# 持续集成：每次 push / PR 自动做类型检查 + 生产构建 + 打包，
-# 并把 zip 存为 Actions Artifact（供开发者预览，保存 90 天）。
+# 持续集成：每次 push / PR 自动执行格式、静态检查、类型检查、
+# 覆盖率测试、安全审计、生产构建和扩展打包。
 # 面向普通用户的正式下载包由 release.yml 在打 tag 时发布到 Releases。
 name: Build
 
@@ -9,9 +9,18 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -19,17 +28,29 @@ jobs:
       - name: 安装 Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: .nvmrc
           cache: npm
 
       - name: 安装依赖
         run: npm ci
 
-      - name: 类型检查
-        run: npm run compile
+      - name: 安装扩展测试浏览器
+        run: npx playwright install --with-deps chromium
 
-      - name: 生产构建并打包
+      - name: 执行完整质量门禁
+        run: npm run verify
+
+      - name: 打包扩展
         run: npm run zip
+
+      - name: 上传覆盖率报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage/
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: 上传构建产物（Artifact）
         uses: actions/upload-artifact@v4
@@ -37,3 +58,12 @@ jobs:
           name: bosspilot-chrome-${{ github.sha }}
           path: .output/*.zip
           retention-days: 90
+
+      - name: 上传浏览器测试报告
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.sha }}
+          path: playwright-report/
+          if-no-files-found: ignore
+          retention-days: 14

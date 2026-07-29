@@ -1,7 +1,7 @@
 // ─── Background 任务编排器（三段式流水线核心） ───
 //
 // ① 意图解析（1 次 LLM）→ ② 确定性采集（0 次 LLM，适配层 + chrome.scripting）
-// → ③ 批量语义评估 + 报告（1~2 次 LLM）。
+// → ③ 批量语义评估（1~N 次 LLM）。
 //
 // 设计要点：
 // - 单例：同一时刻只允许一个任务在跑（风控 + 简化状态管理）。
@@ -10,6 +10,15 @@
 //   手动通过后点「继续」（resumeCaptcha()）。
 // - 取消：AbortController 贯穿所有 sleep / fetch / 循环检查点。
 
+import {
+  buildSearchUrl,
+  extractJobDetail,
+  extractJobList,
+  isZhipinUrl,
+  type ListExtractResult,
+  passesSalaryFilter,
+  toJobPosting,
+} from '@/lib/adapter/zhipin';
 import type {
   AssessedJob,
   JobAssessment,
@@ -17,18 +26,8 @@ import type {
   SearchTaskParams,
   TaskSnapshot,
 } from '@/lib/domain/types';
-import {
-  buildSearchUrl,
-  extractJobDetail,
-  extractJobList,
-  isZhipinUrl,
-  passesSalaryFilter,
-  toJobPosting,
-  type ListExtractResult,
-} from '@/lib/adapter/zhipin';
-import { assessJobs, parseIntent, summarizeReport } from '@/lib/llm/prompts';
+import { assessJobs, parseIntent } from '@/lib/llm/prompts';
 import { getLlmConfig, getUserProfile } from '@/lib/storage/config';
-import { buildReport, reportFileName } from '@/lib/report/markdown';
 import { detailDelay, pageDelay, renderWait, sleep } from './throttle';
 
 type SnapshotListener = (snapshot: TaskSnapshot) => void;
@@ -87,12 +86,15 @@ export class Orchestrator {
     let params: SearchTaskParams;
     try {
       const config = await getLlmConfig();
-      params = await parseIntent(config, text, this.abort!.signal);
+      params = await parseIntent(config, text, this.requireSignal());
     } catch (e) {
       this.fail(e);
       return;
     }
-    this.log('info', `解析完成：${params.keyword} @ ${params.city}，软条件 ${params.softConditions.length} 条，目标 ${params.maxJobs} 个岗位。`);
+    this.log(
+      'info',
+      `解析完成：${params.keyword} @ ${params.city}，软条件 ${params.softConditions.length} 条，目标 ${params.maxJobs} 个岗位。`,
+    );
     await this.execute(params);
   }
 
@@ -123,7 +125,7 @@ export class Orchestrator {
   // ─── 流水线主体 ───
 
   private async execute(params: SearchTaskParams): Promise<void> {
-    const signal = this.abort!.signal;
+    const signal = this.requireSignal();
     this.patch({ params });
     try {
       const config = await getLlmConfig();
@@ -134,7 +136,6 @@ export class Orchestrator {
         this.patch({
           phase: 'done',
           statusText: '没有采集到岗位——可能是搜索无结果，或站点改版导致适配层失配。',
-          reportMarkdown: undefined,
         });
         return;
       }
@@ -163,19 +164,13 @@ export class Orchestrator {
         });
       }
       const assessed = mergeAssessed(jobs, assessments);
-
-      // ── 报告 ──
-      this.patch({ phase: 'reporting', statusText: '正在生成报告…', jobs: assessed });
-      const summary = await summarizeReport(config, params, assessed, signal);
-      const report = buildReport(params, assessed, summary);
       const passedCount = assessed.filter((j) => j.assessment.passed).length;
       this.patch({
         phase: 'done',
         statusText: `完成：共 ${assessed.length} 个岗位，${passedCount} 个通过筛选。`,
         jobs: assessed,
-        reportMarkdown: report,
       });
-      this.log('info', '报告已生成，可在下方预览或下载。');
+      this.log('info', '岗位评估完成，可在「结果」页查看。');
     } catch (e) {
       if (isAbort(e)) {
         // cancel() 已把 phase 置为 cancelled；这里不覆盖
@@ -204,7 +199,10 @@ export class Orchestrator {
       const res = await this.runExtraction(page, signal);
 
       if (res.selectorMiss) {
-        this.log('warn', `第 ${page} 页未匹配到职位卡片——站点可能改版（适配层 v1），或搜索无结果。`);
+        this.log(
+          'warn',
+          `第 ${page} 页未匹配到职位卡片——站点可能改版（适配层 v1），或搜索无结果。`,
+        );
         break;
       }
 
@@ -244,10 +242,9 @@ export class Orchestrator {
   /** 详情抓取：逐个导航到详情页，注入抽取 JD 全文。 */
   private async fillDetails(jobs: JobPosting[], signal: AbortSignal): Promise<void> {
     this.patch({ phase: 'detailing', statusText: '正在读取岗位详情…' });
-    for (let i = 0; i < jobs.length; i++) {
+    for (const [index, job] of jobs.entries()) {
       throwIfAborted(signal);
-      const job = jobs[i];
-      this.patch({ statusText: `读取详情（${i + 1}/${jobs.length}）：${job.title}` });
+      this.patch({ statusText: `读取详情（${index + 1}/${jobs.length}）：${job.title}` });
       try {
         await this.navigate(job.url, signal);
         await renderWait(signal);
@@ -268,7 +265,7 @@ export class Orchestrator {
         if (isAbort(e)) throw e;
         this.log('warn', `读取「${job.title}」详情失败，按列表信息评估。`);
       }
-      if (i < jobs.length - 1) await detailDelay(signal);
+      if (index < jobs.length - 1) await detailDelay(signal);
     }
   }
 
@@ -356,25 +353,16 @@ export class Orchestrator {
   /** 由 content script 上报验证码（用户手动浏览详情时也可能触发）。 */
   notifyCaptchaFromContent(): void {
     if (this.running && this.snapshot.phase !== 'paused_captcha') {
-      this.log('warn', '页面报告出现安全验证。');
+      this.log('warn', '页面检测到安全验证。');
     }
   }
 
-  /** 下载报告（chrome.downloads，data URL 避免 SW 里 Blob URL 生命周期问题）。 */
-  async downloadReport(): Promise<void> {
-    const { reportMarkdown, params } = this.snapshot;
-    if (!reportMarkdown || !params) throw new Error('当前没有可下载的报告。');
-    const dataUrl =
-      'data:text/markdown;charset=utf-8;base64,' +
-      base64EncodeUtf8(reportMarkdown);
-    await chrome.downloads.download({
-      url: dataUrl,
-      filename: reportFileName(params),
-      saveAs: true,
-    });
-  }
-
   // ─── 内部状态 ───
+
+  private requireSignal(): AbortSignal {
+    if (!this.abort) throw new Error('任务控制器尚未初始化。');
+    return this.abort.signal;
+  }
 
   private reset(): void {
     this.abort?.abort();
@@ -422,9 +410,10 @@ function emptySnapshot(): TaskSnapshot {
 
 function mergeAssessed(jobs: JobPosting[], assessments: JobAssessment[]): AssessedJob[] {
   const byId = new Map(assessments.map((a) => [a.jobId, a]));
-  return jobs
-    .filter((j) => byId.has(j.id))
-    .map((j) => ({ ...j, assessment: byId.get(j.id)! }));
+  return jobs.flatMap((job) => {
+    const assessment = byId.get(job.id);
+    return assessment ? [{ ...job, assessment }] : [];
+  });
 }
 
 function throwIfAborted(signal: AbortSignal): void {
@@ -433,17 +422,6 @@ function throwIfAborted(signal: AbortSignal): void {
 
 function isAbort(e: unknown): boolean {
   return e instanceof DOMException && e.name === 'AbortError';
-}
-
-/** UTF-8 安全的 base64 编码（btoa 只支持 Latin-1）。 */
-function base64EncodeUtf8(s: string): string {
-  const bytes = new TextEncoder().encode(s);
-  let bin = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(bin);
 }
 
 /** background 全局单例。 */

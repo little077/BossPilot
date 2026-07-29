@@ -6,7 +6,7 @@
 
 | 通道 | 机制 | 用途 |
 | --- | --- | --- |
-| Sidepanel ↔ Background | `chrome.runtime.connect` 长连接 Port（名称 `bosspilot-agent`） | 指令下发 + 任务快照/日志流式广播 |
+| Sidepanel ↔ Background | `chrome.runtime.connect` 长连接 Port（名称 `bosspilot-agent`） | 对话流、任务指令、快照与日志 |
 | Content Script → Background | `chrome.runtime.sendMessage` | 验证码检测上报（单向、无应答） |
 | Background → 页面 | `chrome.scripting.executeScript` | 注入自包含抽取函数（非消息，见 [ADAPTER.md](ADAPTER.md)） |
 
@@ -15,26 +15,42 @@
 | 消息 | 载荷 | 语义 |
 | --- | --- | --- |
 | `subscribe` | — | 连接后声明订阅；后台立即回放当前 `TaskSnapshot`（断线重连恢复现场的关键） |
+| `chat` | `messages: ChatMessage[]` | 发起流式对话；携带完整本地历史，Background 无需持久化会话 |
 | `parse_only` | `text` | 仅做意图解析不执行；结果以 `parsed` 返回，UI 渲染成可编辑任务卡片 |
 | `run_params` | `params: SearchTaskParams` | 用确认后的结构化参数执行任务（**推荐路径**，人机协同） |
 | `run_nl` | `text` | 自然语言直接跑（解析后不经确认立即执行） |
-| `cancel` | — | 取消当前任务（AbortController 全链路生效） |
+| `cancel` | — | 取消当前流式对话或搜索任务（AbortController 全链路生效） |
 | `resume_captcha` | — | 用户宣布已手动通过验证码，释放验证码门 |
-| `download_report` | — | 后台经 `chrome.downloads` 下载当前报告 |
+| `download_diagnostics` | — | 导出已脱敏的本地执行日志 |
 
 ## 3. Background → Client（`ServerMessage`）
 
 | 消息 | 载荷 | 语义 |
 | --- | --- | --- |
 | `connected` | — | Port 建立成功的握手信号；客户端收到后应立刻发 `subscribe` |
-| `snapshot` | `snapshot: TaskSnapshot` | 任务快照全量广播（phase/进度文本/已采集数/岗位数组/报告） |
+| `snapshot` | `snapshot: TaskSnapshot` | 任务快照全量广播（phase/进度文本/已采集数/岗位数组） |
 | `parsed` | `params: SearchTaskParams` | `parse_only` 的解析结果 |
 | `log` | `level, text` | 面向用户的日志（追加到对话流；warn=验证码/改版提示） |
+| `stream_start` | `messageId` | 流式回复开始，UI 创建空的 assistant 消息 |
+| `stream_delta` | `messageId, delta` | 把文本增量追加到对应 assistant 消息 |
+| `stream_end` | `messageId, content` | 流式回复完成并持久化最终文本 |
+| `stream_error` | `messageId, text` | 流式回复失败，保留错误信息和已生成现场 |
 | `error` | `text` | 指令处理失败（如未配置 API Key） |
 
 ## 4. 典型时序
 
-### 标准任务（人机协同路径）
+### 流式对话
+
+```
+Sidepanel                          Background
+   │ ── chat(messages[]) ─────────► │
+   │ ◄──────────── stream_start ─── │
+   │ ◄──────────── stream_delta ─── │（重复 0..N 次）
+   │ ◄──────────── stream_end ───── │
+   │   （最终消息写入 IndexedDB）       │
+```
+
+### 搜索任务（人机协同路径）
 
 ```
 Sidepanel                          Background
@@ -45,12 +61,11 @@ Sidepanel                          Background
    │ ── parse_only("找西安前端…") ──► │ ①意图解析（1 次 LLM）
    │ ◄─────────────── parsed ────── │
    │   （用户编辑/确认任务卡片）        │
-   │ ── run_params ────────────────► │ ②采集 → ③评估 → 报告
+   │ ── run_params ────────────────► │ ②采集 → ③评估
    │ ◄── snapshot(searching…) ───── │（每次状态变化都会广播）
    │ ◄── snapshot(collecting…) ──── │
    │ ◄── snapshot(assessing…) ───── │
-   │ ◄── snapshot(done+report) ──── │
-   │ ── download_report ───────────► │ chrome.downloads
+   │ ◄──────── snapshot(done) ───── │（结果页读取 jobs）
 ```
 
 ### 验证码人机协同

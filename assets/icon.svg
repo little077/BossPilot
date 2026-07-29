@@ -5,6 +5,7 @@
   修改后运行 `npm run icons` 重新生成 public/icon/ 下的 PNG。
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <title>BossPilot 应用图标</title>
   <defs>
     <linearGradient id="g-mono" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#3fdcba"/>

@@ -9,8 +9,8 @@
  * - public/icon/{size}.png 是 WXT 的约定路径，构建时会自动写入 manifest 的 icons / action.default_icon。
  */
 import { mkdir } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));

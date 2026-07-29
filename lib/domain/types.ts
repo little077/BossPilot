@@ -82,7 +82,6 @@ export type TaskPhase =
   | 'collecting' // 列表翻页采集
   | 'detailing' // 详情页抓取
   | 'assessing' // LLM 批量评估
-  | 'reporting' // 生成报告
   | 'paused_captcha' // 遇验证码暂停，等用户手动通过
   | 'done'
   | 'error'
@@ -98,8 +97,6 @@ export interface TaskSnapshot {
   collected: number;
   assessed: number;
   jobs: AssessedJob[];
-  /** phase=done 时的 Markdown 报告全文。 */
-  reportMarkdown?: string;
   error?: string;
 }
 

@@ -16,6 +16,8 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -23,16 +25,19 @@ jobs:
       - name: 安装 Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: .nvmrc
           cache: npm
 
       - name: 安装依赖
         run: npm ci
 
-      - name: 类型检查
-        run: npm run compile
+      - name: 安装扩展测试浏览器
+        run: npx playwright install --with-deps chromium
 
-      - name: 生产构建并打包
+      - name: 执行完整质量门禁
+        run: npm run verify
+
+      - name: 打包扩展
         run: npm run zip
 
       - name: 创建 Release 并附上 zip

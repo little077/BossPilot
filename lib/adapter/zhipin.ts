@@ -124,15 +124,13 @@ export function extractJobList(): ListExtractResult {
 
     const title = text(card.querySelector('.job-name, .job-title .job-name, .job-title'));
     const salaryText = text(card.querySelector('.salary, .job-salary'));
-    const companyName = text(
-      card.querySelector('.company-name a, .company-name, .boss-name'),
-    );
+    const companyName = text(card.querySelector('.company-name a, .company-name, .boss-name'));
     const area = text(card.querySelector('.job-area, .company-location'));
 
     // 职位标签（经验/学历）与公司标签（融资/规模/行业）分属两个 tag 容器
-    const jobTags = Array.from(
-      card.querySelectorAll('.job-info .tag-list li, ul.tag-list li'),
-    ).map((el) => text(el)).filter(Boolean);
+    const jobTags = Array.from(card.querySelectorAll('.job-info .tag-list li, ul.tag-list li'))
+      .map((el) => text(el))
+      .filter(Boolean);
     const companyTagEls = Array.from(
       card.querySelectorAll('.company-tag-list li, .company-info .tag-list li'),
     );
@@ -153,7 +151,7 @@ export function extractJobList(): ListExtractResult {
       jobTags,
       area,
       recruiter,
-      url: href.startsWith('http') ? href : 'https://www.zhipin.com' + href,
+      url: href.startsWith('http') ? href : `https://www.zhipin.com${href}`,
     });
   }
 
@@ -201,7 +199,10 @@ export function extractJobDetail(): DetailExtractResult {
   }
 
   const text = (el: Element | null): string =>
-    (el?.textContent ?? '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+    (el?.textContent ?? '')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
 
   const desc = document.querySelector(
     '.job-sec-text, .job-detail-section .job-sec-text, .job-detail .text',

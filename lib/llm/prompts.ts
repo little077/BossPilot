@@ -1,16 +1,28 @@
-// ─── 领域 Prompt：意图解析 / 批量评估 / 报告生成 ───
+// ─── 领域 Prompt：意图解析 / 批量评估 ───
 // 三段式流水线中所有 LLM 调用的提示词集中于此，便于迭代与评测。
 
+import { knownCities } from '@/lib/adapter/city-codes';
 import type {
-  AssessedJob,
   JobAssessment,
   JobPosting,
+  LlmConfig,
   SearchTaskParams,
   UserProfile,
 } from '@/lib/domain/types';
 import { chat, extractJson } from './client';
-import type { LlmConfig } from '@/lib/domain/types';
-import { knownCities } from '@/lib/adapter/city-codes';
+
+// ─── ⓪ 对话助手（自由多轮咨询） ───
+
+export const CHAT_SYSTEM = `你是 BossPilot——一个内置在浏览器侧边栏、专门服务 Boss 直聘求职者的 AI 助手。
+
+你的定位：
+- 面向求职者，围绕找工作、投递、简历、面试、行业与薪资行情等话题提供专业、务实、可执行的建议。
+- 回答用中文，简洁直接、有条理；能用短列表就不写大段文字；给建议要具体到「怎么做」。
+- 诚实：不清楚就说不清楚，不编造岗位数据或公司信息。
+
+当前能力边界（据实告知用户，不要吹嘘）：
+- 你目前处于纯对话阶段，还不能直接读取网页、搜索岗位或操作页面；这些能力会在后续版本里逐步开放。
+- 如果用户希望你「读当前这个职位」「帮我搜岗位」，礼貌说明该能力尚在开发中，先用对话方式尽力帮他分析或给方法。`;
 
 // ─── ① 意图解析 ───
 
@@ -42,11 +54,16 @@ export async function parseIntent(
     config,
     [
       { role: 'system', content: PARSE_SYSTEM },
-      { role: 'user', content: `已收录可精确筛选的城市：${knownCities().join('、')}\n\n用户需求：${text}` },
+      {
+        role: 'user',
+        content: `已收录可精确筛选的城市：${knownCities().join('、')}\n\n用户需求：${text}`,
+      },
     ],
     { responseFormatJson: true, signal },
   );
-  const parsed = extractJson<Partial<SearchTaskParams> & { salaryMinK?: number | null; salaryMaxK?: number | null }>(raw);
+  const parsed = extractJson<
+    Partial<SearchTaskParams> & { salaryMinK?: number | null; salaryMaxK?: number | null }
+  >(raw);
   // 归一化 + 防御性默认值 + 风控硬上限
   return {
     keyword: String(parsed.keyword ?? '').trim() || '前端开发',
@@ -121,7 +138,9 @@ export async function assessJobs(
   if (profile?.preferences?.trim()) {
     userParts.push(`用户长期偏好：${profile.preferences.slice(0, 500)}`);
   }
-  userParts.push(`待评估岗位（共${jobs.length}个）：\n\n${jobs.map(jobToPromptBlock).join('\n\n---\n\n')}`);
+  userParts.push(
+    `待评估岗位（共${jobs.length}个）：\n\n${jobs.map(jobToPromptBlock).join('\n\n---\n\n')}`,
+  );
 
   const raw = await chat(
     config,
@@ -155,42 +174,4 @@ export async function assessJobs(
       risks: Array.isArray(a.risks) ? a.risks.map(String).slice(0, 3) : [],
     };
   });
-}
-
-// ─── ③ 报告总结（报告主体由确定性代码生成，LLM 只写「总评与建议」段） ───
-
-const SUMMARY_SYSTEM = `你是资深职业顾问。基于筛选结果，为用户写一段简明的「总评与建议」（Markdown，200-400字）：
-- 先一句话总结本次搜索的整体供给情况（数量、薪资带、公司类型分布）。
-- 给出 2-3 条具体行动建议（优先投哪几家、注意什么风险）。
-- 直接输出 Markdown 正文，不要标题、不要代码块。`;
-
-export async function summarizeReport(
-  config: LlmConfig,
-  params: SearchTaskParams,
-  jobs: AssessedJob[],
-  signal?: AbortSignal,
-): Promise<string> {
-  const brief = jobs
-    .slice(0, 30)
-    .map(
-      (j) =>
-        `${j.title}|${j.companyName}|${j.salaryText}|匹配${j.assessment.matchScore}|${j.assessment.passed ? '通过' : `排除:${j.assessment.excludeReason ?? ''}`}`,
-    )
-    .join('\n');
-  try {
-    return await chat(
-      config,
-      [
-        { role: 'system', content: SUMMARY_SYSTEM },
-        {
-          role: 'user',
-          content: `搜索需求：${params.keyword} @ ${params.city}；软条件：${params.softConditions.join('；') || '无'}\n\n结果概览（职位|公司|薪资|匹配分|结论）：\n${brief}`,
-        },
-      ],
-      { signal },
-    );
-  } catch {
-    // 总评失败不阻塞报告主体
-    return '（总评生成失败，以下为结构化结果。）';
-  }
 }

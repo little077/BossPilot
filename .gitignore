@@ -2,6 +2,9 @@
 node_modules/
 .output/
 .wxt/
+coverage/
+playwright-report/
+test-results/
 stats.html
 stats-*.json
 

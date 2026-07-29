@@ -27,7 +27,9 @@ export function JobList({ jobs }: { jobs: AssessedJob[] }) {
         <div
           key={j.id}
           className={`rounded-2xl border p-3 shadow-sm ${
-            j.assessment.passed ? 'border-line bg-surface' : 'border-line bg-surface-soft opacity-70'
+            j.assessment.passed
+              ? 'border-line bg-surface'
+              : 'border-line bg-surface-soft opacity-70'
           }`}
         >
           <div className="flex items-start justify-between gap-2">
@@ -51,20 +53,24 @@ export function JobList({ jobs }: { jobs: AssessedJob[] }) {
               <div className={`text-base font-bold ${scoreColor(j.assessment.matchScore)}`}>
                 {j.assessment.matchScore}
               </div>
-              <div className="text-[10px] font-medium text-brand-strong">{j.salaryText || '薪资未知'}</div>
+              <div className="text-[10px] font-medium text-brand-strong">
+                {j.salaryText || '薪资未知'}
+              </div>
             </div>
           </div>
 
           {(j.jobTags.length > 0 || j.companyTags.length > 0) && (
             <div className="mt-1.5 flex flex-wrap gap-1">
-              {[...j.jobTags, ...j.companyTags].slice(0, 6).map((t, i) => (
-                <span
-                  key={i}
-                  className="rounded-md bg-surface-soft px-1.5 py-0.5 text-[10px] text-ink-soft"
-                >
-                  {t}
-                </span>
-              ))}
+              {Array.from(new Set([...j.jobTags, ...j.companyTags]))
+                .slice(0, 6)
+                .map((t) => (
+                  <span
+                    key={t}
+                    className="rounded-md bg-surface-soft px-1.5 py-0.5 text-[10px] text-ink-soft"
+                  >
+                    {t}
+                  </span>
+                ))}
             </div>
           )}
 

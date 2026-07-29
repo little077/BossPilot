@@ -2,11 +2,11 @@
 // 交互参考 RedScope 的 AgentComposer：卡片容器 + 聚焦光晕 + Enter 发送。
 // 使用 tiptap 而非 textarea：占位符体验更好、自动增高、后续可扩展 @提及/斜杠命令。
 
-import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react';
+import Placeholder from '@tiptap/extension-placeholder';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
-import Placeholder from '@tiptap/extension-placeholder';
 import { ArrowUp, Square } from 'lucide-react';
+import { type Ref, useEffect, useImperativeHandle, useRef, useState } from 'react';
 
 export interface ComposerHandle {
   /** 外部填入文本（示例 chips 用），并聚焦到末尾 */
@@ -39,9 +39,7 @@ export function Composer({
   // 回调与状态放进 ref，让 editor 只创建一次也能拿到最新值
   const submitRef = useRef<() => void>(() => {});
   const placeholderRef = useRef('');
-  placeholderRef.current = running
-    ? '任务执行中，可点击右侧停止…'
-    : '描述你要找的岗位，Enter 发送';
+  placeholderRef.current = running ? '任务执行中，可点击右侧停止…' : '描述你要找的岗位，Enter 发送';
 
   const editor = useEditor({
     extensions: [
@@ -94,12 +92,7 @@ export function Composer({
   useImperativeHandle(ref, () => ({
     setText: (text: string) => {
       if (!editor) return;
-      editor
-        .chain()
-        .clearContent()
-        .insertContent({ type: 'text', text })
-        .focus('end')
-        .run();
+      editor.chain().clearContent().insertContent({ type: 'text', text }).focus('end').run();
     },
     focus: () => editor?.commands.focus('end'),
   }));
@@ -109,15 +102,13 @@ export function Composer({
       className={`composer-card rounded-2xl border border-line bg-surface transition-all duration-200 focus-within:border-brand/60 focus-within:shadow-[0_0_0_4px_color-mix(in_srgb,var(--color-brand)_10%,transparent)] ${
         running ? 'border-brand/40' : ''
       } ${className}`}
-      onClick={() => editor?.commands.focus()}
     >
       <EditorContent editor={editor} className="composer-editor" />
       <footer className="flex items-center justify-between gap-2 px-2.5 pb-2">
-        <span className="text-[10px] text-ink-faint">
-          Enter 发送 · Shift+Enter 换行
-        </span>
+        <span className="text-[10px] text-ink-faint">Enter 发送 · Shift+Enter 换行</span>
         {running ? (
           <button
+            type="button"
             className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-danger/10 text-danger transition-all duration-200 hover:bg-danger/20 hover:shadow-sm active:scale-95"
             title="停止任务"
             onClick={onCancel}
@@ -126,6 +117,7 @@ export function Composer({
           </button>
         ) : (
           <button
+            type="button"
             className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-brand text-white transition-all duration-200 hover:bg-brand-strong hover:shadow-[0_4px_12px_color-mix(in_srgb,var(--color-brand)_35%,transparent)] active:scale-95 disabled:opacity-40 disabled:hover:shadow-none"
             disabled={empty}
             title="发送"

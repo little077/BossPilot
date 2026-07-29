@@ -28,17 +28,32 @@
     "url": "https://github.com/little077/BossPilot/issues"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "scripts": {
     "dev": "wxt",
     "dev:firefox": "wxt -b firefox",
     "build": "wxt build",
     "build:firefox": "wxt build -b firefox",
+    "bundle:check": "node scripts/check-bundle-size.mjs",
     "zip": "wxt zip",
     "compile": "tsc --noEmit",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "check": "biome check .",
+    "check:ci": "biome ci .",
+    "check:fix": "biome check --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
+    "test:e2e:install": "playwright install chromium",
+    "security:audit": "npm audit --audit-level=high",
+    "quality": "npm run check:ci && npm run compile && npm run test:coverage && npm run security:audit",
+    "verify": "npm run quality && npm run build && npm run bundle:check && npm run test:e2e",
     "icons": "node scripts/render-icons.mjs",
-    "postinstall": "wxt prepare"
+    "postinstall": "wxt prepare && simple-git-hooks"
   },
   "dependencies": {
     "@tiptap/extension-placeholder": "^3.29.2",
@@ -53,15 +68,37 @@
     "turndown": "^7.2.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.6",
+    "@playwright/test": "1.62.0",
     "@tailwindcss/vite": "^4.0.0",
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/jest-dom": "7.0.0",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.1",
     "@types/chrome": "^0.0.287",
+    "@types/node": "24.13.3",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@types/turndown": "^5.0.5",
-    "@wxt-dev/module-react": "^1.1.3",
+    "@vitest/coverage-v8": "4.1.10",
+    "@wxt-dev/module-react": "1.2.2",
+    "jsdom": "26.1.0",
+    "lint-staged": "16.4.0",
     "sharp": "^0.35.3",
+    "simple-git-hooks": "2.13.1",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.2",
-    "wxt": "^0.19.13"
+    "vitest": "4.1.10",
+    "wxt": "0.21.2"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "npx lint-staged",
+    "pre-push": "npm run quality"
+  },
+  "allowScripts": {
+    "simple-git-hooks@2.13.1": true
+  },
+  "lint-staged": {
+    "*.{js,mjs,cjs,ts,tsx,json,jsonc,css}": "biome check --write"
   }
 }

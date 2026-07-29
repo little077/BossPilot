@@ -18,10 +18,10 @@ BossPilot 的核心决策：**Boss 直聘的页面结构是已知的**。把选�
 ② 确定性采集 ── 0 次 LLM ───► JobPosting[]（适配层：搜索/翻页/详情抽取）
      │
      ▼
-③ 批量语义评估 ─ 1~2 次 LLM ─► JobAssessment[]（软条件过滤 + 打分）+ 报告总评
+③ 批量语义评估 ─ 1~N 次 LLM ─► JobAssessment[]（软条件过滤 + 打分）
      │
      ▼
-Markdown 报告（主体由确定性代码渲染，LLM 只写总评段）
+结构化结果页（通过/排除、匹配分、亮点与风险）
 ```
 
 ## 2. 运行时分层（Chrome MV3）
@@ -43,7 +43,7 @@ Markdown 报告（主体由确定性代码渲染，LLM 只写总评段）
 
 | 运行时 | 入口 | 职责 | 明确不做 |
 | --- | --- | --- | --- |
-| Sidepanel | `entrypoints/sidepanel/` | 对话/任务卡片/结果/报告/设置 UI | 不直接碰页面、不调 LLM |
+| Sidepanel | `entrypoints/sidepanel/` | 对话/任务卡片/结果/设置 UI | 不直接碰页面、不调 LLM |
 | Background | `entrypoints/background.ts` | Port 服务端；编排流水线；调 LLM；控制标签页 | 不持有 UI 状态以外的持久数据 |
 | Content Script | `entrypoints/zhipin.content.ts` | 验证码检测上报（30s 后停止观察） | 不抽取数据、不注册长期监听 |
 
@@ -59,7 +59,7 @@ entrypoints/sidepanel ──► lib/ipc/protocol ◄── entrypoints/backgroun
   （设置页直读直写）                                   │
         │              ┌───────────────┬──────────────┼──────────────┐
         ▼              ▼               ▼              ▼              ▼
-  lib/domain/types  lib/adapter/*  lib/llm/*   lib/pipeline/throttle  lib/report/markdown
+  lib/domain/types  lib/adapter/*  lib/llm/*   lib/pipeline/throttle
   （所有模块的底座，不依赖任何其他模块）
 ```
 
@@ -83,7 +83,7 @@ idle → parsing → searching → collecting ↔ paused_captcha
                              detailing ↔ paused_captcha
                                   │
                                   ▼
-                             assessing → reporting → done
+                             assessing → done
 （任意阶段可 → error / cancelled）
 ```
 
@@ -96,7 +96,7 @@ idle → parsing → searching → collecting ↔ paused_captcha
 ## 5. LLM 层
 
 - `lib/llm/client.ts`：仅依赖标准 Chat Completions 协议（BYOK），运行在 Background（扩展 host 权限，无 CORS）。`extractJson` 容忍代码块围栏与前后杂文。
-- `lib/llm/prompts.ts`：三段式的全部 Prompt。批量评估做了防御性合并——模型漏答的岗位补保守默认值（passed=true, score=50），保证「每个输入岗位都有输出」。
+- `lib/llm/prompts.ts`：意图解析与批量评估 Prompt。批量评估做了防御性合并——模型漏答的岗位补保守默认值（passed=true, score=50），保证「每个输入岗位都有输出」。
 - 批量大小 `batchSize`（默认 10）可在设置页调整，兼容小上下文模型。
 
 ## 6. 存储分层
@@ -105,8 +105,9 @@ idle → parsing → searching → collecting ↔ paused_captcha
 | --- | --- | --- |
 | LLM 配置（BYOK） | `chrome.storage.local` | `lib/storage/config.ts`，key 前缀 `bosspilot:` |
 | 用户简历档案 | `chrome.storage.local` | 参与匹配打分，可为空 |
-| 任务快照 | Background 内存 | 会话级，SW 回收即失；报告可下载沉淀 |
-| 报告产物 | `chrome.downloads` | UTF-8 → base64 data URL（规避 SW 中 Blob URL 生命周期问题） |
+| 任务快照 | Background 内存 | 会话级，SW 回收即失 |
+| 对话历史 | IndexedDB（Dexie） | 侧边栏冷启动回放；发送时携带完整历史 |
+| 诊断日志 | Background 内存 → `chrome.downloads` | 导出前统一脱敏，仅供本地排障 |
 
 ## 7. 安全与合规设计
 
@@ -118,5 +119,5 @@ idle → parsing → searching → collecting ↔ paused_captcha
 ## 8. 已知局限与演进方向
 
 - 适配层选择器基于 2026-07 的页面观察（v1），改版需按 [ADAPTER.md](ADAPTER.md) 流程更新。
-- 无自动化测试；纯函数（`parseSalary`/`buildSearchUrl`/`extractJson`/`buildReport`）是最适合先补单测的部分。
-- 任务状态不持久化，SW 被强杀后任务丢失（报告除外）——P1 计划引入 Dexie 台账。
+- 已建立 Vitest + Testing Library 测试基线，并对适配器、LLM 客户端、脱敏与关键顶部导航行为设置覆盖；Playwright 会加载生产构建后的 MV3 扩展，执行侧边栏启动与新会话冒烟测试。后续仍需随真实搜索能力稳定，补充脱敏页面 fixture 驱动的完整流水线端到端场景。
+- 任务状态不持久化，SW 被强杀后搜索任务丢失——P1 计划引入 Dexie 台账。

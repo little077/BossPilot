@@ -1,14 +1,14 @@
-import { defineConfig } from 'wxt';
 import tailwindcss from '@tailwindcss/vite';
+import { defineConfig } from 'wxt';
 
 // BossPilot 扩展配置。
-// 权限最小化原则：host_permissions 只收敛到 Boss 直聘域名，不申请 <all_urls>。
+// 权限最小化原则：页面操作权限只收敛到 Boss 直聘域名，不申请 <all_urls>。
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
   manifest: {
     name: 'BossPilot — Boss直聘 AI 求职副驾',
     description:
-      '在侧边栏用自然语言搜索岗位、批量采集 JD、语义过滤（排除外包等）、匹配度打分并生成 Markdown 报告。BYOK，数据全本地。',
+      '在侧边栏用自然语言搜索岗位、批量采集 JD、语义过滤（排除外包等）并进行匹配度打分。BYOK，数据全本地。',
     permissions: ['sidePanel', 'tabs', 'scripting', 'storage', 'downloads'],
     host_permissions: ['https://www.zhipin.com/*'],
     action: {
