@@ -96,10 +96,11 @@ export default function App() {
 
   const pipelineRunning = RUNNING_PHASES.has(snapshot.phase);
 
-  // 回放后已有对话时跳过首页
+  // 回放后已有对话时跳过首页；首页发送动画期间先保持当前 DOM，
+  // 避免乐观消息写入后提前切屏，让输入框能够完整落到会话区。
   useEffect(() => {
-    if (ready && messages.length > 0) setStarted(true);
-  }, [ready, messages.length]);
+    if (ready && messages.length > 0 && !launching) setStarted(true);
+  }, [launching, ready, messages.length]);
 
   // 消息/流式更新时对话区滚到底
   useEffect(() => {
@@ -119,9 +120,12 @@ export default function App() {
     setStarted(false);
   };
 
-  // 首页发送：先播沉底动画，动画结束后切会话屏并真正派发。
+  // 首页发送：先同步占用本轮请求，再播放沉底动画。
+  // 发送被拒绝时不启动动画，避免输入框下沉后又回弹到首页。
   const homeSend = (text: string) => {
     if (!text || chatRunning || launching || !connected) return;
+    if (!submit(text)) return;
+
     const wrap = homeWrapRef.current;
     if (wrap) {
       const rect = wrap.getBoundingClientRect();
@@ -131,7 +135,7 @@ export default function App() {
     setLaunching(true);
     window.setTimeout(() => {
       setLaunching(false);
-      if (submit(text)) setStarted(true);
+      setStarted(true);
     }, LAUNCH_MS);
   };
 

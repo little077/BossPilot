@@ -1,6 +1,7 @@
-import { render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ChatMessage } from '@/lib/domain/chat';
 import App from './App';
 
 const { useAgentPortMock } = vi.hoisted(() => ({
@@ -14,17 +15,21 @@ vi.mock('./usePort', () => ({
 vi.mock('./Composer', async () => {
   const React = await import('react');
   return {
-    Composer: React.forwardRef<{ setText: (value: string) => void }, { className?: string }>(
-      function MockComposer({ className }, ref) {
-        const [text, setText] = React.useState('');
-        React.useImperativeHandle(ref, () => ({ setText }));
-        return (
-          <div className={className} data-testid="composer">
-            <output data-testid="composer-text">{text}</output>
-          </div>
-        );
-      },
-    ),
+    Composer: React.forwardRef<
+      { setText: (value: string) => void },
+      { className?: string; onSend: (value: string) => void }
+    >(function MockComposer({ className, onSend }, ref) {
+      const [text, setText] = React.useState('');
+      React.useImperativeHandle(ref, () => ({ setText }));
+      return (
+        <div className={className} data-testid="composer">
+          <output data-testid="composer-text">{text}</output>
+          <button type="button" onClick={() => onSend(text)}>
+            触发发送
+          </button>
+        </div>
+      );
+    }),
   };
 });
 
@@ -45,11 +50,13 @@ const basePort = {
     assessed: 0,
     jobs: [],
   },
-  messages: [],
+  messages: [] as ChatMessage[],
   chatRunning: false,
   ready: true,
+  connected: true,
   send: vi.fn(),
   sendChat: vi.fn(),
+  cancelChat: vi.fn(),
   downloadDiagnostics: vi.fn(),
   clearChat: vi.fn(),
 };
@@ -61,6 +68,65 @@ beforeEach(() => {
   });
   vi.stubGlobal('cancelAnimationFrame', vi.fn());
   useAgentPortMock.mockReturnValue({ ...basePort });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe('首页发送过渡', () => {
+  it('发送被拒绝时不启动沉底动画，输入框保持在首页', () => {
+    vi.useFakeTimers();
+    const sendChat = vi.fn(() => false);
+    useAgentPortMock.mockReturnValue({ ...basePort, sendChat });
+    render(<App />);
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: '西安的前端行情怎么样？15K 现实吗？',
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '触发发送' }));
+
+    expect(sendChat).toHaveBeenCalledOnce();
+    expect(screen.getByTestId('composer')).not.toHaveClass('home-composer-launching');
+    act(() => vi.advanceTimersByTime(520));
+    expect(screen.getByRole('heading', { name: /聊两句/ })).toBeInTheDocument();
+  });
+
+  it('发送成功后保留完整沉底动画，再切换到会话输入区', () => {
+    vi.useFakeTimers();
+    const sendChat = vi.fn(() => true);
+    let portState = { ...basePort, sendChat };
+    useAgentPortMock.mockImplementation(() => portState);
+    const view = render(<App />);
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: '西安的前端行情怎么样？15K 现实吗？',
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '触发发送' }));
+    expect(screen.getByTestId('composer')).toHaveClass('home-composer-launching');
+
+    portState = {
+      ...portState,
+      messages: [
+        {
+          id: 'optimistic-user',
+          role: 'user',
+          content: '西安的前端行情怎么样？15K 现实吗？',
+          createdAt: 1,
+        },
+      ],
+    };
+    view.rerender(<App />);
+    expect(screen.getByTestId('composer')).toHaveClass('home-composer-launching');
+
+    act(() => vi.advanceTimersByTime(520));
+    expect(screen.queryByRole('heading', { name: /聊两句/ })).not.toBeInTheDocument();
+    expect(screen.getByText('西安的前端行情怎么样？15K 现实吗？')).toBeInTheDocument();
+  });
 });
 
 describe('顶部导航', () => {
