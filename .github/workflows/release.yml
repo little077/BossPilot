@@ -41,7 +41,7 @@ jobs:
         run: npm run zip
 
       - name: 创建 Release 并附上 zip
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: .output/*.zip
           generate_release_notes: true # 自动根据提交记录生成变更说明
