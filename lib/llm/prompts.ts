@@ -2,6 +2,7 @@
 // 三段式流水线中所有 LLM 调用的提示词集中于此，便于迭代与评测。
 
 import { knownCities } from '@/lib/adapter/city-codes';
+import { recorder } from '@/lib/diagnostics/recorder';
 import type {
   JobAssessment,
   JobPosting,
@@ -10,6 +11,28 @@ import type {
   UserProfile,
 } from '@/lib/domain/types';
 import { chat, extractJson } from './client';
+
+/** 流水线 LLM 调用统一走这里：调用 + 往任务轨落一条含原文的诊断记录。 */
+async function chatWithDiagnostics(
+  config: LlmConfig,
+  purpose: string,
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+  signal?: AbortSignal,
+): Promise<string> {
+  const startedAt = Date.now();
+  const raw = await chat(config, messages, { responseFormatJson: true, signal });
+  recorder.logLlm('task', {
+    model: config.model,
+    purpose,
+    messageCount: messages.length,
+    promptChars: messages.reduce((n, m) => n + m.content.length, 0),
+    outputChars: raw.length,
+    messages,
+    outputText: raw,
+    latencyMs: Date.now() - startedAt,
+  });
+  return raw;
+}
 
 // ─── ⓪ 对话助手（自由多轮咨询） ───
 
@@ -50,8 +73,9 @@ export async function parseIntent(
   text: string,
   signal?: AbortSignal,
 ): Promise<SearchTaskParams> {
-  const raw = await chat(
+  const raw = await chatWithDiagnostics(
     config,
+    '意图解析',
     [
       { role: 'system', content: PARSE_SYSTEM },
       {
@@ -59,7 +83,7 @@ export async function parseIntent(
         content: `已收录可精确筛选的城市：${knownCities().join('、')}\n\n用户需求：${text}`,
       },
     ],
-    { responseFormatJson: true, signal },
+    signal,
   );
   const parsed = extractJson<
     Partial<SearchTaskParams> & { salaryMinK?: number | null; salaryMaxK?: number | null }
@@ -142,13 +166,14 @@ export async function assessJobs(
     `待评估岗位（共${jobs.length}个）：\n\n${jobs.map(jobToPromptBlock).join('\n\n---\n\n')}`,
   );
 
-  const raw = await chat(
+  const raw = await chatWithDiagnostics(
     config,
+    '岗位评估',
     [
       { role: 'system', content: ASSESS_SYSTEM },
       { role: 'user', content: userParts.join('\n\n') },
     ],
-    { responseFormatJson: true, signal },
+    signal,
   );
   const parsed = extractJson<{ assessments?: JobAssessment[] }>(raw);
   const list = Array.isArray(parsed.assessments) ? parsed.assessments : [];

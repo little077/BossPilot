@@ -63,6 +63,8 @@ export interface ListExtractResult {
   }>;
   /** 是否存在「下一页」（用于翻页终止判断）。 */
   hasNextPage: boolean;
+  /** 仅 selectorMiss 时填充：页面 DOM 结构骨架（供 AI 分析改版原因）。 */
+  domOutline?: string;
 }
 
 /**
@@ -95,6 +97,26 @@ export function extractJobList(): ListExtractResult {
   const text = (el: Element | null | undefined): string =>
     (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
 
+  // DOM 骨架快照（仅 selectorMiss 时采集）。注入函数必须自包含，故内联定义。
+  const domOutline = (): string => {
+    const lines: string[] = [];
+    const skip = /^(SCRIPT|STYLE|LINK|META|NOSCRIPT|SVG|IFRAME)$/;
+    const walk = (el: Element, depth: number): void => {
+      if (lines.length >= 120 || skip.test(el.tagName)) return;
+      const cls = Array.from(el.classList).slice(0, 2).join('.');
+      const childCount = el.children.length;
+      const preview =
+        childCount === 0 ? (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 40) : '';
+      lines.push(
+        `${'  '.repeat(depth)}${el.tagName.toLowerCase()}${cls ? `.${cls}` : ''}${childCount ? ` (${childCount}子)` : ''}${preview ? ` "${preview}"` : ''}`,
+      );
+      if (depth >= 3) return;
+      for (const child of Array.from(el.children)) walk(child, depth + 1);
+    };
+    if (document.body) walk(document.body, 0);
+    return `URL: ${location.href}\n${lines.join('\n')}`.slice(0, 4000);
+  };
+
   // 多候选卡片选择器（新旧版式）
   const cardSelectors = [
     'li.job-card-wrapper',
@@ -109,6 +131,7 @@ export function extractJobList(): ListExtractResult {
   }
   if (cards.length === 0) {
     result.selectorMiss = true;
+    result.domOutline = domOutline();
     return result;
   }
 
@@ -155,7 +178,10 @@ export function extractJobList(): ListExtractResult {
     });
   }
 
-  if (result.jobs.length === 0) result.selectorMiss = true;
+  if (result.jobs.length === 0) {
+    result.selectorMiss = true;
+    result.domOutline = domOutline();
+  }
 
   // 下一页检测：分页器里未禁用的「下一页」按钮
   const nextBtn = document.querySelector(
@@ -177,6 +203,8 @@ export interface DetailExtractResult {
   description: string;
   companyIntro: string;
   city: string;
+  /** 仅 selectorMiss 时填充：页面 DOM 结构骨架（供 AI 分析改版原因）。 */
+  domOutline?: string;
 }
 
 /** 在职位详情页内执行：抽取完整 JD 与公司介绍。 */
@@ -217,7 +245,26 @@ export function extractJobDetail(): DetailExtractResult {
   const cityEl = document.querySelector('.text-city, .job-primary .text-city');
   result.city = text(cityEl);
 
-  if (!result.description) result.selectorMiss = true;
+  if (!result.description) {
+    result.selectorMiss = true;
+    // DOM 骨架快照。注入函数必须自包含，与列表页版本刻意重复。
+    const lines: string[] = [];
+    const skip = /^(SCRIPT|STYLE|LINK|META|NOSCRIPT|SVG|IFRAME)$/;
+    const walk = (el: Element, depth: number): void => {
+      if (lines.length >= 120 || skip.test(el.tagName)) return;
+      const cls = Array.from(el.classList).slice(0, 2).join('.');
+      const childCount = el.children.length;
+      const preview =
+        childCount === 0 ? (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 40) : '';
+      lines.push(
+        `${'  '.repeat(depth)}${el.tagName.toLowerCase()}${cls ? `.${cls}` : ''}${childCount ? ` (${childCount}子)` : ''}${preview ? ` "${preview}"` : ''}`,
+      );
+      if (depth >= 3) return;
+      for (const child of Array.from(el.children)) walk(child, depth + 1);
+    };
+    if (document.body) walk(document.body, 0);
+    result.domOutline = `URL: ${location.href}\n${lines.join('\n')}`.slice(0, 4000);
+  }
   return result;
 }
 

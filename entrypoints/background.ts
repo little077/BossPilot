@@ -23,6 +23,8 @@ interface ActiveDiagnostic {
   requestId: string;
   messageCount: number;
   promptChars: number;
+  /** 本轮发送的完整消息（含 system prompt），供诊断日志记录原文。 */
+  messages: Array<{ role: string; content: string }>;
   startedAt: number;
   targetResolved: boolean;
 }
@@ -48,7 +50,7 @@ export default defineBackground({
         const target = await resolveActiveGenerationTarget();
         if (activeDiagnostic && !activeDiagnostic.targetResolved) {
           activeDiagnostic.targetResolved = true;
-          recorder.beginRun(latestUserText(activeDiagnostic.requestId), {
+          recorder.beginRun('chat', latestUserText(activeDiagnostic.requestId), {
             model: target.identity.modelId,
             baseUrl: target.baseUrl,
           });
@@ -201,6 +203,10 @@ export default defineBackground({
         promptChars:
           CHAT_SYSTEM.length +
           history.reduce((total, message) => total + message.content.length, 0),
+        messages: [
+          { role: 'system', content: CHAT_SYSTEM },
+          ...history.map((message) => ({ role: message.role, content: message.content })),
+        ],
         startedAt: Date.now(),
         targetResolved: false,
       };
@@ -227,24 +233,27 @@ export default defineBackground({
       if (!diagnostic || diagnostic.requestId !== event.requestId) return;
 
       const usage = event.message.usage;
-      recorder.logLlm({
+      recorder.logLlm('chat', {
         model: event.message.modelIdentity?.modelId ?? 'unknown',
+        purpose: '对话',
         messageCount: diagnostic.messageCount,
         promptChars: diagnostic.promptChars,
         outputChars: event.message.content.length,
+        messages: diagnostic.messages,
+        outputText: event.message.content,
         promptTokens: usage?.inputTokens,
         completionTokens: usage?.outputTokens,
         latencyMs: Date.now() - diagnostic.startedAt,
       });
 
       if (event.type === 'error') {
-        recorder.logError(event.message.errorMessage ?? '模型请求失败。');
-        recorder.finishRun('error');
+        recorder.logError('chat', event.message.errorMessage ?? '模型请求失败。');
+        recorder.finishRun('chat', 'error');
       } else if (event.message.status === 'cancelled') {
-        recorder.step('note', '用户停止了本轮生成。');
-        recorder.finishRun('cancelled');
+        recorder.step('chat', 'note', '用户停止了本轮生成。');
+        recorder.finishRun('chat', 'cancelled');
       } else {
-        recorder.finishRun('completed');
+        recorder.finishRun('chat', 'completed');
       }
       activeDiagnostic = null;
     }

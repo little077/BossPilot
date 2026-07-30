@@ -26,7 +26,9 @@ export default defineConfig({
       include: [
         'lib/adapter/city-codes.ts',
         'lib/adapter/zhipin.ts',
+        'lib/diagnostics/recorder.ts',
         'lib/diagnostics/redaction.ts',
+        'lib/diagnostics/report.ts',
         'lib/domain/chat.ts',
         'lib/generation/errors.ts',
         'lib/generation/manager.ts',

@@ -112,7 +112,41 @@ describe('列表与详情抽取', () => {
     expect(extractJobList()).toMatchObject({ captcha: true, jobs: [] });
 
     document.body.innerHTML = '<main>搜索无结果</main>';
-    expect(extractJobList()).toMatchObject({ selectorMiss: true, jobs: [] });
+    const missed = extractJobList();
+    expect(missed).toMatchObject({ selectorMiss: true, jobs: [] });
+    expect(missed.domOutline).toContain('URL: https://www.zhipin.com');
+    expect(missed.domOutline).toContain('main "搜索无结果"');
+  });
+
+  it('卡片存在但无有效职位时也标记失配并附带 DOM 骨架', () => {
+    document.body.innerHTML = `
+      <ul class="job-list-box"><li><span class="salary">面议</span></li></ul>
+    `;
+
+    const res = extractJobList();
+
+    expect(res).toMatchObject({ selectorMiss: true, jobs: [] });
+    expect(res.domOutline).toContain('ul.job-list-box');
+  });
+
+  it('DOM 骨架跳过脚本、截断文本预览并限制遍历深度', () => {
+    document.body.innerHTML = `
+      <script>var x = 1;</script>
+      <div class="a b c">
+        <section class="wrap"><article><p>深层内容不展开</p></article></section>
+      </div>
+      <span>${'长'.repeat(60)}</span>
+    `;
+
+    const outline = extractJobList().domOutline ?? '';
+
+    expect(outline).not.toContain('script');
+    expect(outline).toContain('div.a.b'); // class 最多保留 2 个
+    expect(outline).not.toContain('div.a.b.c');
+    expect(outline).toContain('article'); // 深度 3 可见
+    expect(outline).not.toContain('深层内容'); // 深度 4 不再展开
+    expect(outline).toContain(`"${'长'.repeat(40)}"`); // 文本预览截断到 40 字
+    expect(outline).not.toContain('长'.repeat(41));
   });
 
   it('读取详情页正文、公司介绍和城市', () => {
@@ -132,8 +166,18 @@ describe('列表与详情抽取', () => {
   });
 
   it('标记详情选择器失配和验证码页面', () => {
-    document.body.innerHTML = '<main>职位已下线</main>';
-    expect(extractJobDetail()).toMatchObject({ selectorMiss: true, captcha: false });
+    document.body.innerHTML = `
+      <script>var y = 2;</script>
+      <div class="page shell extra"><section><article><p>深层</p></article></section></div>
+      <main>职位已下线</main>
+    `;
+    const missed = extractJobDetail();
+    expect(missed).toMatchObject({ selectorMiss: true, captcha: false });
+    expect(missed.domOutline).toContain('URL: https://www.zhipin.com');
+    expect(missed.domOutline).toContain('main "职位已下线"');
+    expect(missed.domOutline).toContain('div.page.shell'); // class 最多保留 2 个
+    expect(missed.domOutline).not.toContain('script');
+    expect(missed.domOutline).not.toContain('深层'); // 深度 4 不再展开
 
     document.body.innerText = '异常访问，请完成验证';
     expect(extractJobDetail()).toMatchObject({ captcha: true, description: '' });

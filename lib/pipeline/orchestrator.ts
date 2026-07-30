@@ -19,6 +19,7 @@ import {
   passesSalaryFilter,
   toJobPosting,
 } from '@/lib/adapter/zhipin';
+import { recorder } from '@/lib/diagnostics/recorder';
 import type {
   AssessedJob,
   JobAssessment,
@@ -86,6 +87,7 @@ export class Orchestrator {
     let params: SearchTaskParams;
     try {
       const config = await getLlmConfig();
+      recorder.beginRun('task', text, config);
       params = await parseIntent(config, text, this.requireSignal());
     } catch (e) {
       this.fail(e);
@@ -102,6 +104,12 @@ export class Orchestrator {
   async runWithParams(params: SearchTaskParams): Promise<void> {
     if (this.running) throw new Error('已有任务在执行中，请先取消。');
     this.reset();
+    // 配置缺失时也先开诊断轨；execute 内部会再次取配置并把失败落进记录
+    const config = await getLlmConfig().catch(() => null);
+    recorder.beginRun('task', `结构化任务：${params.keyword} @ ${params.city}`, {
+      model: config?.model ?? 'unknown',
+      baseUrl: config?.baseUrl ?? '',
+    });
     await this.execute(params);
   }
 
@@ -137,6 +145,8 @@ export class Orchestrator {
           phase: 'done',
           statusText: '没有采集到岗位——可能是搜索无结果，或站点改版导致适配层失配。',
         });
+        recorder.step('task', 'note', '没有采集到岗位，任务提前结束。');
+        recorder.finishRun('task', 'completed');
         return;
       }
 
@@ -171,12 +181,15 @@ export class Orchestrator {
         jobs: assessed,
       });
       this.log('info', '岗位评估完成，可在「结果」页查看。');
+      recorder.finishRun('task', 'completed');
     } catch (e) {
       if (isAbort(e)) {
         // cancel() 已把 phase 置为 cancelled；这里不覆盖
         if (this.snapshot.phase !== 'cancelled') {
           this.patch({ phase: 'cancelled', statusText: '任务已取消。' });
         }
+        recorder.step('task', 'note', '任务被用户取消。');
+        recorder.finishRun('task', 'cancelled');
         return;
       }
       this.fail(e);
@@ -199,12 +212,23 @@ export class Orchestrator {
       const res = await this.runExtraction(page, signal);
 
       if (res.selectorMiss) {
+        recorder.step(
+          'task',
+          'page',
+          `第 ${page} 页职位卡片选择器失配（captcha=${res.captcha === true}）`,
+          res.domOutline,
+        );
         this.log(
           'warn',
           `第 ${page} 页未匹配到职位卡片——站点可能改版（适配层 v1），或搜索无结果。`,
         );
         break;
       }
+      recorder.step(
+        'task',
+        'page',
+        `第 ${page} 页抽取到 ${res.jobs.length} 张职位卡片，hasNextPage=${res.hasNextPage}`,
+      );
 
       for (const raw of res.jobs) {
         if (seen.has(raw.id)) continue;
@@ -260,6 +284,13 @@ export class Orchestrator {
           job.companyIntro = res.companyIntro || undefined;
           if (!job.city && res.city) job.city = res.city;
           // 详情页薪资可能比列表更准——不覆盖，列表数据已够用
+        } else {
+          recorder.step(
+            'task',
+            'page',
+            `详情页抽取失败（captcha=${res.captcha === true}，selectorMiss=${res.selectorMiss === true}）：${job.title}`,
+            res.domOutline,
+          );
         }
       } catch (e) {
         if (isAbort(e)) throw e;
@@ -274,6 +305,7 @@ export class Orchestrator {
   /** 获取（或创建）专用工作标签页并导航到目标 URL。 */
   private async navigate(url: string, signal: AbortSignal): Promise<void> {
     throwIfAborted(signal);
+    recorder.step('task', 'page', `导航到 ${url}`);
     let tab: chrome.tabs.Tab | undefined;
     if (this.workTabId != null) {
       tab = await chrome.tabs.get(this.workTabId).catch(() => undefined);
@@ -386,12 +418,15 @@ export class Orchestrator {
 
   private log(level: 'info' | 'warn' | 'error', text: string): void {
     for (const fn of this.logListeners) fn(level, text);
+    // 同步镜像到诊断任务轨（没有进行中的任务轨时为 no-op）
+    recorder.step('task', level === 'error' ? 'error' : 'note', text);
   }
 
   private fail(e: unknown): void {
     const msg = e instanceof Error ? e.message : String(e);
     this.patch({ phase: 'error', statusText: `任务失败：${msg}`, error: msg });
     this.log('error', msg);
+    recorder.finishRun('task', isAbort(e) ? 'cancelled' : 'error', msg);
   }
 }
 
