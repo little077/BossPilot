@@ -57,7 +57,7 @@
     "postinstall": "wxt prepare && simple-git-hooks"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.80.6",
+    "@earendil-works/pi-ai": "0.83.0",
     "@mistralai/mistralai": "2.2.6",
     "@tiptap/extension-placeholder": "^3.29.2",
     "@tiptap/react": "^3.29.2",
