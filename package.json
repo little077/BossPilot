@@ -73,7 +73,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.6",
     "@commitlint/cli": "19.6.1",
-    "@commitlint/config-conventional": "19.6.0",
+    "@commitlint/config-conventional": "21.2.0",
     "@playwright/test": "1.62.0",
     "@tailwindcss/vite": "^4.0.0",
     "acorn": "8.18.0",
