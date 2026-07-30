@@ -1,9 +1,12 @@
-import { readdir, stat } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { gzipSync } from 'node:zlib';
 
 const outputDirectory = path.resolve('.output/chrome-mv3');
 const maximumJavaScriptBytes = 850 * 1024;
-const maximumExtensionBytes = 950 * 1024;
+const maximumBackgroundEntryBytes = 100 * 1024;
+const maximumExtensionBytes = 3 * 1024 * 1024;
+const maximumCompressedExtensionBytes = 950 * 1024;
 
 async function listFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -22,10 +25,15 @@ function formatKib(bytes) {
 
 const files = await listFiles(outputDirectory);
 const sizedFiles = await Promise.all(
-  files.map(async (file) => ({
-    file,
-    bytes: (await stat(file)).size,
-  })),
+  files.map(async (file) => {
+    const bytes = (await stat(file)).size;
+    const content = await readFile(file);
+    return {
+      file,
+      bytes,
+      compressedBytes: gzipSync(content, { level: 9 }).length,
+    };
+  }),
 );
 const javascriptFiles = sizedFiles.filter(({ file }) => file.endsWith('.js'));
 const largestJavaScriptFile = javascriptFiles.reduce(
@@ -33,6 +41,10 @@ const largestJavaScriptFile = javascriptFiles.reduce(
   { file: '', bytes: 0 },
 );
 const totalBytes = sizedFiles.reduce((sum, file) => sum + file.bytes, 0);
+const compressedTotalBytes = sizedFiles.reduce((sum, file) => sum + file.compressedBytes, 0);
+const backgroundEntry = sizedFiles.find(
+  ({ file }) => path.relative(outputDirectory, file) === 'background.js',
+);
 
 const failures = [];
 if (largestJavaScriptFile.bytes > maximumJavaScriptBytes) {
@@ -40,9 +52,19 @@ if (largestJavaScriptFile.bytes > maximumJavaScriptBytes) {
     `最大 JavaScript 文件 ${path.relative(outputDirectory, largestJavaScriptFile.file)} 为 ${formatKib(largestJavaScriptFile.bytes)}，超过 ${formatKib(maximumJavaScriptBytes)}。`,
   );
 }
+if (backgroundEntry && backgroundEntry.bytes > maximumBackgroundEntryBytes) {
+  failures.push(
+    `Background 入口为 ${formatKib(backgroundEntry.bytes)}，超过 ${formatKib(maximumBackgroundEntryBytes)}。`,
+  );
+}
 if (totalBytes > maximumExtensionBytes) {
   failures.push(
     `扩展总大小为 ${formatKib(totalBytes)}，超过 ${formatKib(maximumExtensionBytes)}。`,
+  );
+}
+if (compressedTotalBytes > maximumCompressedExtensionBytes) {
+  failures.push(
+    `扩展压缩体积估算为 ${formatKib(compressedTotalBytes)}，超过 ${formatKib(maximumCompressedExtensionBytes)}。`,
   );
 }
 
@@ -51,5 +73,5 @@ if (failures.length > 0) {
 }
 
 console.log(
-  `构建体积符合预算：最大 JS ${formatKib(largestJavaScriptFile.bytes)}，扩展总计 ${formatKib(totalBytes)}。`,
+  `构建体积符合预算：Background ${formatKib(backgroundEntry?.bytes ?? 0)}，最大 JS ${formatKib(largestJavaScriptFile.bytes)}，未压缩 ${formatKib(totalBytes)}，压缩估算 ${formatKib(compressedTotalBytes)}。`,
 );

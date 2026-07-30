@@ -4,12 +4,16 @@
 // 保留最近若干次任务，避免内存无限增长。
 
 import { ADAPTER_VERSION } from '@/lib/adapter/zhipin';
-import type { LlmConfig } from '@/lib/domain/types';
 import { hostOf, redact } from './redaction';
 import type { DiagnosticLlmCall, DiagnosticRun, DiagnosticRunStatus } from './types';
 
 /** 内存里保留的历史任务上限。 */
 const MAX_RUNS = 50;
+
+interface DiagnosticModelContext {
+  model: string;
+  baseUrl: string;
+}
 
 function extensionVersion(): string {
   try {
@@ -24,7 +28,7 @@ class DiagnosticsRecorder {
   private current: DiagnosticRun | null = null;
 
   /** 开一个新任务；同时把上一个未结束的任务标记为异常收尾（防泄漏 current）。 */
-  beginRun(userInput: string, config: LlmConfig): DiagnosticRun {
+  beginRun(userInput: string, config: DiagnosticModelContext): DiagnosticRun {
     if (this.current) this.finishRun('error', '上一个任务未正常结束');
     const run: DiagnosticRun = {
       runId: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,

@@ -27,24 +27,23 @@ BossPilot 的核心决策：**Boss 直聘的页面结构是已知的**。把选�
 ## 2. 运行时分层（Chrome MV3）
 
 ```
-┌─────────────────┐   Port 长连接（流式快照广播）   ┌──────────────────────┐
-│  Sidepanel (UI)  │ ◄──────────────────────────► │ Background SW (大脑)   │
-│  React 19        │   ClientMessage/ServerMessage │  Orchestrator 单例     │
-└─────────────────┘                               └──────┬───────────────┘
-                                                          │ chrome.tabs（导航）
-                                                          │ chrome.scripting（注入抽取函数）
-                                                          ▼
-                                              ┌──────────────────────┐
-                                              │  zhipin.com 工作标签页  │
-                                              │  Content Script       │──► runtime.sendMessage
-                                              │ （仅验证码检测上报）      │    （验证码上报）
-                                              └──────────────────────┘
+┌─────────────────┐   Port 长连接（全量快照）     ┌────────────────────────┐
+│  Sidepanel (UI)  │ ◄────────────────────────► │ Background Module SW   │
+│  React 19        │ ClientMessage/ServerMessage │ ├─ ChatGenerationManager│
+│  IndexedDB       │                             │ └─ Orchestrator         │
+└─────────────────┘                             └──────┬─────────┬───────┘
+                                                      │         │
+                                      五协议流式生成 ──┘         │ tabs/scripting
+                                                      ▼         ▼
+                                                模型厂商     zhipin.com 标签页
+                                                               │
+                                                    Content Script（仅验证码上报）
 ```
 
 | 运行时 | 入口 | 职责 | 明确不做 |
 | --- | --- | --- | --- |
-| Sidepanel | `entrypoints/sidepanel/` | 对话/任务卡片/结果/设置 UI | 不直接碰页面、不调 LLM |
-| Background | `entrypoints/background.ts` | Port 服务端；编排流水线；调 LLM；控制标签页 | 不持有 UI 状态以外的持久数据 |
+| Sidepanel | `entrypoints/sidepanel/` | 对话/任务卡片/结果/设置 UI；会话 IndexedDB | 不直接碰页面、不直接调模型 |
+| Background | `entrypoints/background.ts` | Port 服务端；聊天生成；编排流水线；控制标签页 | 不把凭据放进 IPC/诊断 |
 | Content Script | `entrypoints/zhipin.content.ts` | 验证码检测上报（30s 后停止观察） | 不抽取数据、不注册长期监听 |
 
 抽取逻辑为什么不放 content script？——`chrome.scripting.executeScript` 注入**自包含函数**按需执行，让抽取函数与适配层代码放在同一文件、同一次代码审查里，避免「常驻脚本 + 消息桥」的复杂度。代价是注入函数内不能引用闭包变量（契约见 [ADAPTER.md](ADAPTER.md)）。
@@ -54,16 +53,20 @@ BossPilot 的核心决策：**Boss 直聘的页面结构是已知的**。把选�
 ```
 entrypoints/sidepanel ──► lib/ipc/protocol ◄── entrypoints/background
         │                                              │
-        ▼                                              ▼
-  lib/storage/config                          lib/pipeline/orchestrator
-  （设置页直读直写）                                   │
-        │              ┌───────────────┬──────────────┼──────────────┐
-        ▼              ▼               ▼              ▼              ▼
-  lib/domain/types  lib/adapter/*  lib/llm/*   lib/pipeline/throttle
-  （所有模块的底座，不依赖任何其他模块）
+        ├─► lib/storage/db                             ├─► lib/generation/manager
+        └─► lib/providers/client                       │      │
+                                                       │      ├─► generation/resolve
+                                                       │      └─► generation/pi-adapter
+                                                       └─► lib/pipeline/orchestrator
+                                                              ├─► lib/adapter/*
+                                                              └─► lib/llm/*（旧任务链）
+
+lib/domain/chat.ts + lib/domain/types.ts
+  （跨运行时实体底座，不依赖入口）
 ```
 
-规则：依赖只能**向下**；`lib/domain/types.ts` 是唯一的实体事实源；`lib/ipc/protocol.ts` 是唯一的消息事实源。
+规则：依赖只能**向下**；聊天实体归 `lib/domain/chat.ts`，任务与 Provider 视图实体归
+`lib/domain/types.ts`；`lib/ipc/protocol.ts` 是唯一的跨运行时消息事实源。
 
 ## 4. 任务生命周期（Orchestrator）
 
@@ -93,31 +96,71 @@ idle → parsing → searching → collecting ↔ paused_captcha
 - **验证码门**：检测到验证码 → 挂起一个 Promise（`captchaGate`），phase 置 `paused_captcha`；用户点「继续」resolve；取消任务 reject。
 - **风控**：`MAX_PAGES=5`、`maxJobs≤40` 硬上限；翻页 2.5~5s、进详情 1.8~4s 随机延迟（`lib/pipeline/throttle.ts`）。
 
-## 5. LLM 层
+## 5. 模型生成层
 
-- `lib/llm/client.ts`：仅依赖标准 Chat Completions 协议（BYOK），运行在 Background（扩展 host 权限，无 CORS）。`extractJson` 容忍代码块围栏与前后杂文。
-- `lib/llm/prompts.ts`：意图解析与批量评估 Prompt。批量评估做了防御性合并——模型漏答的岗位补保守默认值（passed=true, score=50），保证「每个输入岗位都有输出」。
-- 批量大小 `batchSize`（默认 10）可在设置页调整，兼容小上下文模型。
+普通聊天与旧任务流水线目前是两条明确分开的调用链。
+
+### 5.1 普通聊天（v0.2）
+
+```text
+activeModel
+  → resolveActiveGenerationTarget()
+  → ResolvedGenerationTarget（仅 Background 含 Key）
+  → createPiGenerationAdapter()
+  → start / text-delta / finish
+  → ChatGenerationManager 完整 ChatMessage 快照
+```
+
+- `lib/providers/registry.ts` 分开声明目录发现协议和生成协议。
+- `lib/generation/resolve.ts` 校验活动模型、实时目录、密钥、URL 和精确 Host Permission。
+- `lib/generation/pi-adapter.ts` 静态链接 `@earendil-works/pi-ai@0.80.6` 的五个公开
+  非 lazy API 流和 `providers/*.models` 元数据，兼容 MV3 Service Worker 禁止运行时
+  `import()` 的约束；支持 OpenAI Completions、OpenAI Responses、Anthropic Messages、
+  Google Generative AI 与 Mistral Conversations。
+- `lib/generation/manager.ts` 固定单轮模型、保证唯一终态、精确取消、全量快照和密钥脱敏；
+  输出受 100,000 字符硬上限保护，中间快照按 50ms 最小间隔合并广播。
+- 失败不自动换模型，SDK 自动重试关闭；当前模型的选择只影响下一轮。
+
+完整设计、安全边界和验证结果见
+[多模型二期实施报告](multi-model-phase-2-report.md)。
+
+### 5.2 岗位任务流水线（待迁移）
+
+- `lib/llm/client.ts` 仍依赖旧 `LlmConfig` 和 Chat Completions 协议。
+- `lib/llm/prompts.ts` 提供意图解析与批量评估 Prompt。
+- 该链路本期没有偷偷改用活动模型；后续迁移必须单独评审和测试。
 
 ## 6. 存储分层
 
 | 数据 | 位置 | 说明 |
 | --- | --- | --- |
-| LLM 配置（BYOK） | `chrome.storage.local` | `lib/storage/config.ts`，key 前缀 `bosspilot:` |
-| 用户简历档案 | `chrome.storage.local` | 参与匹配打分，可为空 |
+| Provider 连接、密钥、活动模型 | `chrome.storage.local` | `bosspilot:providers:v1`；UI 快照不含明文 Key |
+| 旧任务 LLM 配置 | `chrome.storage.local` | `lib/storage/config.ts`；仅旧流水线仍使用 |
+| 用户简历档案 | `chrome.storage.local` | 旧任务评估可读取，设置页当前不展示 |
 | 任务快照 | Background 内存 | 会话级，SW 回收即失 |
+| 活跃聊天快照 | Background 内存 | Port 重连回放当前或最近终态 |
 | 对话历史 | IndexedDB（Dexie） | 侧边栏冷启动回放；发送时携带完整历史 |
-| 诊断日志 | Background 内存 → `chrome.downloads` | 导出前统一脱敏，仅供本地排障 |
+| 诊断日志 | Background 内存 → `chrome.downloads` | 只记录脱敏端点主机和无凭据指标 |
 
 ## 7. 安全与合规设计
 
-- 权限最小化：`host_permissions` 仅 `https://www.zhipin.com/*`。
+- 常驻权限最小化：`host_permissions` 仅 `https://www.zhipin.com/*`；模型端点使用
+  `optional_host_permissions`，在用户点击开通时按具体 origin 申请。
+- Background 启动时立即把 `chrome.storage.local` 限制为 `TRUSTED_CONTEXTS`；若浏览器无法建立该隔离，Provider 配置与模型调用会失败关闭，内容脚本不能在降级状态下读取模型密钥。
+- 内置生成地址只信注册表；SDK 精确模型必须与已授权目标同源，防止密钥外发。
+- Provider Runtime Message 和 Agent Port 都校验发送方扩展 ID 与扩展 URL；
+  验证码上报只接受 zhipin.com 内容脚本。
 - 外发最小化：只把结构化岗位字段 + 用户档案发给用户自己配置的端点；JD 截 1500 字、公司介绍截 400 字。
 - 合规红线：不自动投递/不自动发消息；验证码永远交给人。
 - 无遥测、无云端、无账号体系。
+- OAuth Provider 不属于 API Key 流程，必须作为独立安全里程碑实现。
 
 ## 8. 已知局限与演进方向
 
 - 适配层选择器基于 2026-07 的页面观察（v1），改版需按 [ADAPTER.md](ADAPTER.md) 流程更新。
-- 已建立 Vitest + Testing Library 测试基线，并对适配器、LLM 客户端、脱敏与关键顶部导航行为设置覆盖；Playwright 会加载生产构建后的 MV3 扩展，执行侧边栏启动与新会话冒烟测试。后续仍需随真实搜索能力稳定，补充脱敏页面 fixture 驱动的完整流水线端到端场景。
+- Vitest 覆盖模型解析、五协议适配、会话管理、IPC、Sidepanel 重连和 Provider 基座；
+  Playwright 加载生产 MV3 扩展验证设置、聊天闭环、主题和 Manifest 权限。
+- 精确厂商目录随锁定的 `pi-ai` 版本更新；升级依赖必须重新通过协议、覆盖率、
+  构建体积和真实扩展 E2E。
+- 普通聊天不支持工具调用、图片、语音和断点续传。
 - 任务状态不持久化，SW 被强杀后搜索任务丢失——P1 计划引入 Dexie 台账。

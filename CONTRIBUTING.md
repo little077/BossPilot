@@ -18,7 +18,7 @@ npm run test:e2e:install # 首次安装扩展冒烟测试所需的 Chromium
 npm run dev          # 热更新开发（自动打开带扩展的浏览器）
 ```
 
-要求 Node.js ≥ 22。仓库根目录的 `.nvmrc` 可用于切换统一版本。
+要求 Node.js ≥ 22.19.0。仓库根目录的 `.nvmrc` 可用于切换统一版本。
 
 提交前必须通过完整门禁：
 
@@ -83,7 +83,9 @@ Boss 直聘改版导致选择器失效是最常见的维护场景：
 - V8 coverage：覆盖率统计；
 - Playwright Chromium：加载 `.output/chrome-mv3`，验证真实扩展启动、导航与关键会话行为。
 
-当前覆盖率硬门槛为：语句 80%、分支 75%、函数 80%、行 80%。不得通过排除新增业务文件来绕过门槛；新增核心模块时应同步加入 `vitest.config.ts` 的覆盖范围。
+当前全局覆盖率硬门槛为：语句 95%、分支 89%、函数 95%、行 97%。
+不得通过排除新增业务文件来绕过门槛；新增核心模块时必须同步加入
+`vitest.config.ts` 的覆盖范围，并为失败、取消和边界路径补测试。
 
 常用命令：
 
@@ -93,6 +95,8 @@ npm run test:watch      # 开发时监听
 npm run test:coverage   # 测试 + 覆盖率门槛
 npm run test:e2e        # 需先构建；真实 Chromium 扩展冒烟测试
 npm run quality         # CI 质量链，不含生产构建
+npm run mv3:check       # Background 静态模块闭包与 runtime import() 门禁
+npm run bundle:check    # MV3 安全检查 + 构建体积预算
 ```
 
 适配层变更必须附脱敏 DOM fixture；缺陷修复必须先补能复现问题的回归测试。
@@ -104,7 +108,10 @@ npm run quality         # CI 质量链，不含生产构建
 - 依赖安装脚本通过 `package.json#allowScripts` 显式审核；不得使用“允许全部脚本”的逃生配置。
 - Dependabot 每周检查 npm 与 GitHub Actions 更新；合并升级前必须通过 `npm run verify`。
 - 高危及严重漏洞由 `npm audit --audit-level=high` 阻断合并与发版。
-- 生产构建设置体积预算：单个 JavaScript 文件不超过 850 KiB，完整扩展不超过 950 KiB；超限需先拆包或说明并审议预算调整。
+- 生产构建设置分层体积预算：Background 入口不超过 100 KiB，任一 JavaScript
+  chunk 不超过 850 KiB，完整扩展未压缩不超过 3 MiB、压缩估算不超过 950 KiB。
+  多模型 SDK 必须在构建期拆成静态 ESM chunk，并通过零运行时 `import()` 门禁；
+  超限需先拆包或说明并审议预算调整。
 
 ## 🧪 手动验证清单
 

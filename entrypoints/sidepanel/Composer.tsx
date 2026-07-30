@@ -17,6 +17,7 @@ export interface ComposerHandle {
 interface ComposerProps {
   onSend: (text: string) => void;
   running?: boolean;
+  disabled?: boolean;
   onCancel?: () => void;
   autoFocus?: boolean;
   /** 发送后是否清空内容（首页沉底期间保留文字，切屏时随组件卸载） */
@@ -28,6 +29,7 @@ interface ComposerProps {
 export function Composer({
   onSend,
   running = false,
+  disabled = false,
   onCancel,
   autoFocus = false,
   clearOnSend = true,
@@ -39,7 +41,11 @@ export function Composer({
   // 回调与状态放进 ref，让 editor 只创建一次也能拿到最新值
   const submitRef = useRef<() => void>(() => {});
   const placeholderRef = useRef('');
-  placeholderRef.current = running ? '任务执行中，可点击右侧停止…' : '描述你要找的岗位，Enter 发送';
+  placeholderRef.current = running
+    ? '正在生成，可点击右侧停止…'
+    : disabled
+      ? '正在连接 BossPilot…'
+      : '输入消息，Enter 发送';
 
   const editor = useEditor({
     extensions: [
@@ -77,7 +83,7 @@ export function Composer({
   });
 
   submitRef.current = () => {
-    if (!editor || running) return;
+    if (!editor || running || disabled) return;
     const text = editor.getText({ blockSeparator: '\n' }).trim();
     if (!text) return;
     onSend(text);
@@ -86,8 +92,8 @@ export function Composer({
 
   // 任务执行中锁定编辑
   useEffect(() => {
-    editor?.setEditable(!running);
-  }, [editor, running]);
+    editor?.setEditable(!running && !disabled);
+  }, [disabled, editor, running]);
 
   useImperativeHandle(ref, () => ({
     setText: (text: string) => {
@@ -110,8 +116,10 @@ export function Composer({
           <button
             type="button"
             className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-danger/10 text-danger transition-all duration-200 hover:bg-danger/20 hover:shadow-sm active:scale-95"
-            title="停止任务"
+            title="停止生成"
+            aria-label="停止生成"
             onClick={onCancel}
+            disabled={disabled}
           >
             <Square size={12} className="fill-current" />
           </button>
@@ -119,7 +127,7 @@ export function Composer({
           <button
             type="button"
             className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-brand text-white transition-all duration-200 hover:bg-brand-strong hover:shadow-[0_4px_12px_color-mix(in_srgb,var(--color-brand)_35%,transparent)] active:scale-95 disabled:opacity-40 disabled:hover:shadow-none"
-            disabled={empty}
+            disabled={empty || disabled}
             title="发送"
             onClick={() => submitRef.current()}
           >

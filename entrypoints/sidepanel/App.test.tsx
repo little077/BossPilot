@@ -14,9 +14,17 @@ vi.mock('./usePort', () => ({
 vi.mock('./Composer', async () => {
   const React = await import('react');
   return {
-    Composer: React.forwardRef(function MockComposer() {
-      return <div data-testid="composer" />;
-    }),
+    Composer: React.forwardRef<{ setText: (value: string) => void }, { className?: string }>(
+      function MockComposer({ className }, ref) {
+        const [text, setText] = React.useState('');
+        React.useImperativeHandle(ref, () => ({ setText }));
+        return (
+          <div className={className} data-testid="composer">
+            <output data-testid="composer-text">{text}</output>
+          </div>
+        );
+      },
+    ),
   };
 });
 
@@ -56,6 +64,39 @@ beforeEach(() => {
 });
 
 describe('顶部导航', () => {
+  it('整个应用统一使用 RedScope 主题，并保留原导航与首页交互', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const shell = screen.getByTestId('app-shell');
+    expect(shell).toHaveClass('redscope-app');
+    expect(screen.getByRole('banner')).toHaveClass('redscope-topbar');
+    expect(shell).toContainElement(screen.getByRole('banner'));
+
+    const home = screen.getByRole('main');
+    expect(home).toHaveClass('redscope-view', 'redscope-home');
+    expect(screen.getByTestId('composer')).toHaveClass('redscope-home-composer');
+    expect(screen.queryByRole('button', { name: '报告' })).not.toBeInTheDocument();
+
+    const example = screen.getByRole('button', {
+      name: '西安的前端行情怎么样？15K 现实吗？',
+    });
+    await user.click(example);
+    expect(screen.getByTestId('composer-text')).toHaveTextContent(
+      '西安的前端行情怎么样？15K 现实吗？',
+    );
+
+    await user.click(screen.getByRole('button', { name: '结果' }));
+    expect(screen.getByText('岗位结果').closest('main')).toHaveClass('redscope-view');
+
+    await user.click(screen.getByRole('button', { name: '设置' }));
+    const settingsMain = (await screen.findByText('设置内容')).closest('main');
+    expect(settingsMain).toHaveClass('redscope-view');
+    expect(settingsMain).not.toHaveClass('redscope-home');
+    expect(shell).toContainElement(settingsMain);
+    expect(screen.getByRole('navigation', { name: '主导航' })).toBeInTheDocument();
+  });
+
   it('只展示对话、结果和设置，不再展示报告入口', () => {
     render(<App />);
 

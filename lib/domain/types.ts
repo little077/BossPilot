@@ -117,3 +117,33 @@ export interface LlmConfig {
   /** 评估批量大小（一次请求评估几个岗位），默认 10。 */
   batchSize?: number;
 }
+
+/** 模型的轻量身份；一期只负责配置与选择，消息调用在后续版本接入。 */
+export interface ModelIdentity {
+  providerId: string;
+  modelId: string;
+}
+
+/** 厂商模型目录中的一项。 */
+export interface ProviderModel {
+  id: string;
+  name: string;
+}
+
+/** 返回给侧边栏的脱敏厂商连接状态，不包含 API Key 明文。 */
+export interface ProviderConnectionView {
+  providerId: string;
+  baseUrl: string;
+  hasApiKey: boolean;
+  apiKeyLastFour: string;
+  models: ProviderModel[];
+  selectedModelId?: string;
+  configuredAt?: number;
+}
+
+/** 多模型配置的脱敏快照。 */
+export interface ProviderStateView {
+  version: 1;
+  connections: ProviderConnectionView[];
+  activeModel?: ModelIdentity;
+}

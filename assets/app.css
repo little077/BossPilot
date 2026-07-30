@@ -1,28 +1,48 @@
 /* ─── BossPilot 全局样式（Tailwind v4） ─── */
 @import "tailwindcss";
 
-/* 设计令牌来自 design-prototype/bosspilot-sidebar.html 的品牌体系 */
+/* RedScope Light 全局设计令牌。
+   顶部、首页、会话、结果与设置共享同一套蓝灰语义色，不再做页面级换肤。 */
 @theme {
-  --color-canvas: #e9efec;
-  --color-app: #f7faf8;
+  --color-canvas: #eef2f6;
+  --color-app: #f7f9fb;
   --color-surface: #ffffff;
-  --color-surface-soft: #f0f5f2;
-  --color-surface-mint: #e8f8f3;
-  --color-surface-warm: #fff8ec;
-  --color-ink: #17221e;
-  --color-ink-soft: #617069;
-  --color-ink-faint: #8d9a94;
-  --color-line: #dce6e1;
-  --color-line-strong: #c9d8d1;
-  --color-brand: #00a98f;
-  --color-brand-strong: #007f6e;
-  --color-brand-deep: #064f46;
-  --color-lime: #b6e36b;
-  --color-success: #178764;
-  --color-warning: #c47b18;
-  --color-danger: #c94c4c;
+  --color-surface-elevated: rgb(255 255 255 / 82%);
+  --color-surface-soft: #eef3f7;
+  --color-surface-mint: rgb(63 112 143 / 11%);
+  --color-surface-warm: #f7f2ea;
+  --color-ink: #162331;
+  --color-ink-soft: #637383;
+  /* 8–11px 辅助文字也满足普通文本 4.5:1 对比度，不以低对比度制造层级。 */
+  --color-ink-faint: #657481;
+  --color-line: rgb(29 55 76 / 12%);
+  --color-line-strong: rgb(29 55 76 / 20%);
+  --color-brand: #315f7c;
+  --color-brand-strong: #214b67;
+  --color-brand-deep: #214b67;
+  --color-lime: #8da979;
+  --color-success: #4a7666;
+  --color-warning: #8a6634;
+  --color-danger: #b0554e;
 
-  --font-sans: Inter, "SF Pro Display", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  /* 模型卡只使用项目设计令牌，不在组件中内联厂商品牌色。 */
+  --color-provider-blue: #315f7c;
+  --color-provider-blue-deep: #214b67;
+  --color-provider-ink: #263441;
+  --color-provider-ink-deep: #162331;
+  --color-provider-violet: #655f91;
+  --color-provider-violet-deep: #47436d;
+  --color-provider-teal: #397467;
+  --color-provider-teal-deep: #28584f;
+  --color-provider-amber: #8a6634;
+  --color-provider-amber-deep: #6f502b;
+  --color-provider-slate: #60717f;
+  --color-provider-slate-deep: #42535f;
+
+  --font-sans:
+    "Aptos", "Segoe UI", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-serif:
+    "Iowan Old Style", "Palatino Linotype", "Noto Serif SC", "Songti SC", "SimSun", serif;
 }
 
 html,
@@ -33,10 +53,780 @@ body,
 }
 
 body {
-  background: var(--color-app);
+  background: var(--color-canvas);
   color: var(--color-ink);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+}
+
+/* ─── RedScope 全局应用骨架 ─── */
+.redscope-app {
+  min-width: 0;
+  background: var(--color-app);
+  color: var(--color-ink);
+}
+
+.redscope-topbar {
+  position: relative;
+  z-index: 5;
+  flex-shrink: 0;
+  border-color: var(--color-line);
+  background: color-mix(in srgb, var(--color-surface-elevated) 94%, transparent);
+  box-shadow: 0 1px 0 rgb(29 55 76 / 3%);
+}
+
+.redscope-brand-mark {
+  border: 1px solid var(--color-line-strong);
+  background: var(--color-surface-mint);
+  color: var(--color-brand);
+}
+
+.redscope-brand-name {
+  color: var(--color-ink);
+  font-family: var(--font-serif);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.redscope-status-dot {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success) 14%, transparent);
+}
+
+.redscope-view {
+  background: var(--color-app);
+  scrollbar-color: var(--color-line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.redscope-home {
+  background: var(--color-app);
+}
+
+.redscope-home-inner {
+  padding: 30px 18px 24px;
+}
+
+.redscope-eyebrow {
+  color: var(--color-brand);
+}
+
+.redscope-home-title {
+  max-width: 300px;
+  color: var(--color-ink);
+  font-family: var(--font-serif);
+  font-weight: 500;
+  letter-spacing: -0.03em;
+}
+
+.redscope-home-copy {
+  color: var(--color-ink-soft);
+  line-height: 1.75;
+}
+
+.redscope-home-composer {
+  border-color: var(--color-line-strong);
+  background: var(--color-surface-elevated);
+  box-shadow: 0 8px 26px rgb(24 45 62 / 6%);
+  backdrop-filter: blur(16px);
+}
+
+.redscope-home-composer:focus-within {
+  border-color: var(--color-brand);
+  box-shadow:
+    0 0 0 4px var(--color-surface-mint),
+    0 8px 26px rgb(24 45 62 / 6%);
+}
+
+.redscope-example {
+  border-color: var(--color-line);
+  background: color-mix(in srgb, var(--color-surface) 66%, transparent);
+  color: var(--color-ink-soft);
+}
+
+.redscope-example:hover {
+  border-color: var(--color-line-strong);
+  background: var(--color-surface);
+  color: var(--color-ink);
+  box-shadow: 0 8px 26px rgb(24 45 62 / 6%);
+}
+
+/* ─── 全局 Composer 与会话 ─── */
+.composer-card {
+  border-color: var(--color-line-strong);
+  background: var(--color-surface-elevated);
+  box-shadow: 0 8px 26px rgb(24 45 62 / 6%);
+  backdrop-filter: blur(16px);
+}
+
+.composer-card:focus-within {
+  border-color: var(--color-brand);
+  box-shadow:
+    0 0 0 4px var(--color-surface-mint),
+    0 8px 26px rgb(24 45 62 / 6%);
+}
+
+.redscope-user-message,
+.redscope-ai-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  box-shadow: 0 8px 26px rgb(24 45 62 / 6%);
+}
+
+.redscope-dock {
+  background: var(--color-app);
+  box-shadow: 0 -1px 0 rgb(29 55 76 / 3%);
+}
+
+.chat-md h1,
+.chat-md h2,
+.chat-md h3 {
+  margin: 0.6em 0 0.3em;
+  color: var(--color-brand-strong);
+  font-weight: 600;
+}
+
+.chat-md h1 {
+  font-family: var(--font-serif);
+  font-size: 14px;
+}
+
+.chat-md h2,
+.chat-md h3 {
+  font-size: 12.5px;
+}
+
+.chat-md p {
+  margin: 0.35em 0;
+}
+
+.chat-md ul,
+.chat-md ol {
+  margin: 0.3em 0;
+  padding-left: 1.25em;
+}
+
+.chat-md ul {
+  list-style: disc;
+}
+
+.chat-md ol {
+  list-style: decimal;
+}
+
+.chat-md li {
+  margin: 0.15em 0;
+}
+
+.chat-md a {
+  color: var(--color-brand);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.chat-md code {
+  border-radius: 5px;
+  background: var(--color-surface-soft);
+  padding: 1px 4px;
+  color: var(--color-brand-strong);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.chat-md :not(pre) > code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.chat-md pre,
+.chat-md table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-color: var(--color-line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.chat-md pre {
+  margin: 0.5em 0;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-surface-soft);
+  padding: 8px;
+}
+
+.chat-md pre code {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+  background: transparent;
+  padding: 0;
+  white-space: pre;
+}
+
+.chat-md table {
+  margin: 0.5em 0;
+  border-collapse: collapse;
+}
+
+.chat-md th,
+.chat-md td {
+  border: 1px solid var(--color-line);
+  padding: 4px 6px;
+  white-space: nowrap;
+}
+
+.chat-md th {
+  background: var(--color-surface-soft);
+  font-weight: 600;
+}
+
+.chat-md img {
+  max-width: 100%;
+  height: auto;
+}
+
+.chat-md strong {
+  font-weight: 600;
+}
+
+/* ─── 结果与设置视图 ─── */
+.redscope-jobs-empty {
+  padding: 0 24px;
+  color: var(--color-ink-faint);
+  line-height: 1.8;
+  text-align: center;
+}
+
+.redscope-job-card {
+  border-color: var(--color-line);
+  background: var(--color-surface);
+  box-shadow: 0 8px 26px rgb(24 45 62 / 6%);
+  transition:
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms ease;
+}
+
+.redscope-job-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--color-line-strong);
+  box-shadow: 0 14px 32px rgb(24 45 62 / 8%);
+}
+
+.redscope-job-card-excluded {
+  background: var(--color-surface-soft);
+}
+
+.redscope-settings {
+  gap: 12px;
+  padding: 14px;
+  background: var(--color-app);
+}
+
+/* ─── 设置页：模型卡包 ─── */
+.provider-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.provider-section-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.provider-section-title h2,
+.provider-section-title h3 {
+  color: var(--color-brand-deep);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.provider-section-title span {
+  color: var(--color-ink-faint);
+  font-size: 9px;
+}
+
+.provider-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  background: var(--color-surface-soft);
+  padding: 7px 9px;
+  color: var(--color-ink-soft);
+  font-size: 9.5px;
+  line-height: 1.5;
+}
+
+.provider-notice svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--color-brand);
+}
+
+.provider-wallet {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.provider-wallet-empty {
+  border: 1.5px dashed var(--color-line-strong);
+  border-radius: 16px;
+  padding: 25px 16px;
+  color: var(--color-ink-faint);
+  font-size: 11px;
+  line-height: 1.9;
+  text-align: center;
+}
+
+.provider-wallet-empty strong {
+  color: var(--color-brand);
+}
+
+.provider-card {
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  border-radius: 16px;
+  background: var(--color-surface);
+  box-shadow: 0 8px 24px rgb(24 45 62 / 6%);
+  transition:
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms ease;
+}
+
+.provider-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 32px rgb(24 45 62 / 9%);
+}
+
+.provider-card-active {
+  border-color: color-mix(in srgb, var(--color-brand) 55%, transparent);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--color-brand) 10%, transparent),
+    0 8px 24px rgb(24 45 62 / 6%);
+}
+
+.provider-card-band,
+.provider-logo {
+  --provider-start: var(--color-provider-slate);
+  --provider-end: var(--color-provider-slate-deep);
+}
+
+.provider-card-band[data-tone="blue"],
+.provider-logo[data-tone="blue"] {
+  --provider-start: var(--color-provider-blue);
+  --provider-end: var(--color-provider-blue-deep);
+}
+
+.provider-card-band[data-tone="ink"],
+.provider-logo[data-tone="ink"] {
+  --provider-start: var(--color-provider-ink);
+  --provider-end: var(--color-provider-ink-deep);
+}
+
+.provider-card-band[data-tone="violet"],
+.provider-logo[data-tone="violet"] {
+  --provider-start: var(--color-provider-violet);
+  --provider-end: var(--color-provider-violet-deep);
+}
+
+.provider-card-band[data-tone="teal"],
+.provider-logo[data-tone="teal"] {
+  --provider-start: var(--color-provider-teal);
+  --provider-end: var(--color-provider-teal-deep);
+}
+
+.provider-card-band[data-tone="amber"],
+.provider-logo[data-tone="amber"] {
+  --provider-start: var(--color-provider-amber);
+  --provider-end: var(--color-provider-amber-deep);
+}
+
+.provider-card-band {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px 14px;
+  background: linear-gradient(135deg, var(--provider-start), var(--provider-end));
+  color: white;
+}
+
+.provider-card-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.provider-card-heading strong {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-pass {
+  margin-left: auto;
+  font-size: 7.5px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  opacity: 0.72;
+}
+
+.provider-active-flag {
+  border: 1px solid rgb(255 255 255 / 46%);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 17%);
+  padding: 2px 7px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.provider-key-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.provider-key-chip {
+  display: grid;
+  width: 34px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid rgb(255 255 255 / 35%);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 18%);
+}
+
+.provider-key-mask {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  opacity: 0.82;
+}
+
+.provider-model-line {
+  overflow: hidden;
+  font-size: 9px;
+  opacity: 0.78;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-stamp {
+  position: absolute;
+  top: 31px;
+  right: 14px;
+  display: flex;
+  width: 52px;
+  height: 52px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  border: 2px solid rgb(255 255 255 / 82%);
+  border-radius: 50%;
+  color: white;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  opacity: 0.88;
+  pointer-events: none;
+  transform: rotate(-13deg);
+}
+
+.provider-stamp small {
+  font-size: 6.5px;
+  letter-spacing: 0.04em;
+  opacity: 0.8;
+}
+
+.provider-card-config {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 11px 14px 12px;
+}
+
+.provider-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--color-ink-soft);
+  font-size: 9.5px;
+  font-weight: 600;
+}
+
+.provider-field-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.provider-field-label a {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--color-brand);
+  font-size: 9px;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.provider-field input,
+.provider-key-form input,
+.provider-manual-model input {
+  min-width: 0;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-app);
+  padding: 7px 9px;
+  color: var(--color-ink);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  outline: none;
+}
+
+.provider-field input:focus,
+.provider-key-form input:focus,
+.provider-manual-model input:focus {
+  border-color: var(--color-brand);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand) 10%, transparent);
+}
+
+.provider-key-form,
+.provider-manual-model > div {
+  display: flex;
+  gap: 6px;
+}
+
+.provider-key-form input,
+.provider-manual-model input {
+  flex: 1;
+}
+
+.provider-key-form button,
+.provider-manual-model button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--color-brand);
+  padding: 0 12px;
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: background 160ms ease;
+}
+
+.provider-key-form button:hover,
+.provider-manual-model button:hover {
+  background: var(--color-brand-strong);
+}
+
+.provider-key-form button:disabled,
+.provider-manual-model button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.provider-status {
+  min-height: 14px;
+  color: var(--color-ink-faint);
+  font-size: 9.5px;
+  line-height: 1.5;
+}
+
+.provider-status-ok {
+  color: var(--color-success);
+}
+
+.provider-status-error {
+  color: var(--color-danger);
+}
+
+.provider-models {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--color-line-strong);
+}
+
+.provider-models-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.provider-models-title strong {
+  color: var(--color-brand-deep);
+  font-size: 9.5px;
+}
+
+.provider-models-title span {
+  color: var(--color-ink-faint);
+  font-size: 8.5px;
+}
+
+.provider-model-list {
+  display: flex;
+  max-height: 148px;
+  flex-wrap: wrap;
+  gap: 5px;
+  overflow-y: auto;
+}
+
+.provider-model-list button {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  border-radius: 9px;
+  background: var(--color-surface);
+  padding: 5px 8px;
+  color: var(--color-ink-soft);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-model-list button:hover {
+  border-color: var(--color-brand);
+  color: var(--color-brand);
+}
+
+.provider-model-list button.provider-model-selected {
+  border-color: var(--color-brand);
+  background: color-mix(in srgb, var(--color-brand) 9%, transparent);
+  color: var(--color-brand-strong);
+  font-weight: 700;
+}
+
+.provider-manual-model {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--color-ink-soft);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.provider-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.provider-card-footer > span {
+  color: var(--color-ink-faint);
+  font-size: 8px;
+}
+
+.provider-card-footer button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 0;
+  background: transparent;
+  color: var(--color-ink-faint);
+  font-size: 8.5px;
+  text-decoration: underline dotted;
+}
+
+.provider-card-footer button:hover {
+  color: var(--color-danger);
+}
+
+.provider-deck {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding-top: 12px;
+  border-top: 1.5px dashed var(--color-line-strong);
+}
+
+.provider-capsules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.provider-capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1.5px solid var(--color-line);
+  border-radius: 999px;
+  background: var(--color-surface);
+  padding: 6px 10px 6px 7px;
+  color: var(--color-ink-soft);
+  font-size: 10px;
+  font-weight: 700;
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    color 150ms ease,
+    transform 150ms ease;
+}
+
+.provider-capsule:hover {
+  transform: translateY(-1px);
+  border-color: var(--color-brand);
+  color: var(--color-brand);
+  box-shadow: 0 4px 12px rgb(24 45 62 / 8%);
+}
+
+.provider-capsule:disabled {
+  cursor: wait;
+  opacity: 0.55;
+  transform: none;
+}
+
+.provider-capsule-more {
+  border-style: dashed;
+  background: var(--color-surface-soft);
+  color: var(--color-brand);
+  font-weight: 600;
+}
+
+.provider-logo {
+  display: grid;
+  min-width: 19px;
+  height: 19px;
+  place-items: center;
+  border-radius: 6px;
+  background: linear-gradient(135deg, var(--provider-start), var(--provider-end));
+  color: white;
+  font-size: 7.5px;
+  font-weight: 800;
 }
 
 /* ─── Composer（tiptap 输入框） ───

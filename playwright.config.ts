@@ -5,7 +5,8 @@ export default defineConfig({
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
-  workers: process.env.CI ? 1 : undefined,
+  // 扩展 E2E 使用持久化 Chromium 上下文；固定串行可避免多个扩展实例争用状态。
+  workers: 1,
   reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : 'list',
   outputDir: 'test-results',
   use: {

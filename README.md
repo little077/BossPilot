@@ -4,14 +4,15 @@
 
 **面向 Boss 直聘的定制化 AI 求职副驾 · 浏览器侧边栏扩展**
 
-用一句话描述你要找的岗位，AI 自动搜索、批量采集、语义过滤、匹配打分，并在结果页给出推荐清单。
+选择自己的模型，在侧边栏流式对话；也可以用一句话发起岗位搜索、批量采集、
+语义过滤和匹配打分。
 
 BYOK（自带模型 Key）· 数据全本地 · 不自动投递 · MIT 开源
 
 [![Build](https://github.com/little077/BossPilot/actions/workflows/build.yml/badge.svg)](https://github.com/little077/BossPilot/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/little077/BossPilot?label=Release&color=00a98f)](https://github.com/little077/BossPilot/releases/latest)
 
-[快速开始](#-快速开始) · [功能特性](#-功能特性) · [产品立项书](docs/PRODUCT_INITIATION.md) · [架构文档](docs/ARCHITECTURE.md) · [参与贡献](CONTRIBUTING.md)
+[快速开始](#-快速开始) · [功能特性](#-功能特性) · [架构文档](docs/ARCHITECTURE.md) · [多模型二期报告](docs/multi-model-phase-2-report.md) · [参与贡献](CONTRIBUTING.md)
 
 </div>
 
@@ -19,6 +20,10 @@ BYOK（自带模型 Key）· 数据全本地 · 不自动投递 · MIT 开源
 
 ## ✨ 功能特性
 
+- **真实多模型流式聊天** — 配置并选中模型后，普通聊天会固定使用该模型，
+  支持流式回复、停止生成、错误现场保留、会话持久化和侧边栏断线恢复。
+- **多厂商 BYOK** — 提供 27 个厂商、本地或自定义端点入口，覆盖 OpenAI、
+  Anthropic、Gemini、Mistral 与 OpenAI-compatible 模型协议。
 - **自然语言发起任务** — 「帮我找西安的前端岗位，15K 以上，排除外包和驻场」，AI 解析为结构化搜索参数，确认后执行。
 - **确定性批量采集** — 站点适配层直接结构化抽取列表页/详情页，秒级采集数十条岗位，不靠 LLM 逐步猜页面，快且省 token。
 - **语义软条件过滤** — 「排除外包」「要求双休」这类原生筛选器表达不了的条件，交给 LLM 阅读 JD 全文批量判断。
@@ -31,9 +36,9 @@ BYOK（自带模型 Key）· 数据全本地 · 不自动投递 · MIT 开源
 
 ### 环境要求
 
-- Node.js ≥ 22
+- Node.js ≥ 22.19.0
 - Chrome / Edge 等 Chromium 内核浏览器（支持 MV3 侧边栏）
-- 一个 OpenAI 兼容的大模型 API Key（DeepSeek / OpenAI / Kimi / 智谱 / 本地 Ollama 等均可）
+- 一个受支持厂商的 API Key，或本地 Ollama / 自定义 OpenAI-compatible 端点
 
 ### 方式一：直接下载（推荐）
 
@@ -56,10 +61,11 @@ npm run build        # 产物在 .output/chrome-mv3/
 
 ### 首次配置
 
-1. 进入侧边栏「设置」页，填入模型 **Base URL**（如 `https://api.deepseek.com/v1`）、**API Key** 与**模型名**。
-2. （推荐）填写「简历要点」和「长期偏好」，匹配打分会显著更准。
-3. 在浏览器中登录 [Boss 直聘](https://www.zhipin.com)（扩展复用你的登录态，不采集账号密码）。
-4. 回到「对话」页，输入需求 → 确认任务卡片 → 在「结果」页查看推荐清单。
+1. 进入侧边栏「设置」，从「发卡台」领取一个模型厂商。
+2. 填写 API Key 后开通；BossPilot 会读取厂商模型目录，再由你明确选择当前模型。
+3. 回到「对话」即可流式聊天。停止或失败时已生成内容会保留。
+4. 若要执行岗位搜索任务，请先在浏览器登录
+   [Boss 直聘](https://www.zhipin.com)；扩展复用现有登录态，不采集账号密码。
 
 ### 开发模式
 
@@ -70,7 +76,8 @@ npm run test         # Vitest 单元与组件测试
 npm run test:e2e:install # 首次安装 Playwright Chromium
 npm run test:e2e     # 在真实 MV3 扩展环境运行冒烟测试
 npm run quality      # Biome + 类型 + 覆盖率 + 依赖审计
-npm run bundle:check # 检查最大 JS 与扩展总体积预算
+npm run mv3:check    # 检查 Background 静态模块闭包，不允许运行时 import()
+npm run bundle:check # MV3 安全检查 + Background/chunk/总体积预算
 npm run verify       # 完整质量门禁 + 生产构建 + 扩展端到端测试
 npm run zip          # 打包发布 zip
 ```
@@ -91,14 +98,16 @@ npm run zip          # 打包发布 zip
 
 ```
 ├─ entrypoints/            # WXT 入口
-│  ├─ background.ts        #   后台 SW：Port 服务端 + 编排调度
+│  ├─ background.ts        #   模块化后台 SW：流式生成 + Port + 编排
 │  ├─ zhipin.content.ts    #   内容脚本：验证码检测上报（职责极小）
 │  └─ sidepanel/           #   侧边栏 React UI（对话/结果/设置）
 ├─ lib/
-│  ├─ domain/types.ts      # 领域实体模型（单一事实源）
+│  ├─ domain/              # 聊天、Provider 与任务实体
 │  ├─ ipc/protocol.ts      # Sidepanel ↔ Background 消息协议
 │  ├─ adapter/             # 站点适配层：URL 规则 + 选择器 + 抽取函数
-│  ├─ llm/                 # OpenAI 兼容客户端 + 三段式 Prompt
+│  ├─ generation/          # 活动模型解析、统一适配、会话状态机与错误
+│  ├─ providers/           # 厂商注册表、目录、权限、存储与配置状态机
+│  ├─ llm/                 # 旧任务流水线客户端 + 三段式 Prompt
 │  ├─ pipeline/            # 编排器（三段式流水线）+ 拟人化节流
 │  └─ storage/             # BYOK 配置与用户档案（chrome.storage.local）
 ├─ assets/app.css          # Tailwind v4 + 设计令牌
@@ -113,24 +122,26 @@ npm run zip          # 打包发布 zip
 ## 🔐 隐私与合规
 
 - **不做全自动投递、不自动打招呼、不自动发消息** —— 这是本项目的合规红线。
-- 扩展权限最小化：`host_permissions` 仅 `https://www.zhipin.com/*`，不申请 `<all_urls>`。
+- 常驻 `host_permissions` 仅 `https://www.zhipin.com/*`；模型端点只在用户点击
+  「开通」时按具体 origin 申请可选权限。
 - 数据仅在本机与**你自己配置的**模型端点之间流动，项目方没有任何服务器。
+- API Key 不进入 UI 快照、诊断和导出；本地存储被限制为可信扩展上下文。
 - 内建拟人化节流与单次采集上限。请合理控制使用频率，遵守目标网站的用户协议；因过度使用导致的账号风控由使用者自行承担。
 - 本项目仅供个人求职效率场景的学习与研究使用。
 
 ## 🗺️ 路线图
 
-- [x] MVP：三段式流水线 / 语义过滤 / 匹配打分 / 结构化结果 / 验证码人机协同
-- [ ] v0.2：附件解析 / 职业事实档案 / 单岗位证据化决策
-- [ ] v0.3：AI 代浏览 / 模拟点击 / 详情验证 / 暂停恢复
-- [ ] v0.4：多岗位比较 / 风险识别 / 推荐投递顺序
-- [ ] v0.5：岗位专属简历 / 打招呼文案 / 真实性检查
-- [ ] v0.6：投递队列 / 页面预填 / 用户确认 / 失败恢复
-- [ ] v0.7：投递台账 / 沟通摘要 / 跟进提醒
-- [ ] v0.8：面试副驾 / 结果反馈 / 个性化学习
+- [x] v0.1：任务流水线与多模型配置基座
+- [x] v0.2：真实多协议流式聊天、停止、错误与断线恢复
+- [ ] v0.3：求职者档案、上下文个性化与任务流水线迁移
+- [ ] v0.4：岗位工作台与结果沉淀
+- [ ] v0.5：Agent 工具循环与智能化
+- [ ] v0.6：求职 Skills 与提示词模板
+- [ ] v0.7：求职记忆与长期陪跑
 - [ ] v1.0：隐私、诊断、测试、迁移与 Chrome Web Store 发布
 
-完整的用户问题、AI 能力和逐版本验收标准见[产品立项书](docs/PRODUCT_INITIATION.md)。
+OAuth Provider 不在 v0.2 范围内，将作为独立安全里程碑评审。完整范围与验收标准见
+[产品路线图](docs/ROADMAP.md)。
 
 ## 🤝 参与贡献
 

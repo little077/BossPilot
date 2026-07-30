@@ -28,14 +28,15 @@
     "url": "https://github.com/little077/BossPilot/issues"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "scripts": {
     "dev": "wxt",
     "dev:firefox": "wxt -b firefox",
     "build": "wxt build",
     "build:firefox": "wxt build -b firefox",
-    "bundle:check": "node scripts/check-bundle-size.mjs",
+    "mv3:check": "node scripts/check-mv3-background.mjs",
+    "bundle:check": "npm run mv3:check && node scripts/check-bundle-size.mjs",
     "zip": "wxt zip",
     "compile": "tsc --noEmit",
     "format": "biome format --write .",
@@ -56,6 +57,8 @@
     "postinstall": "wxt prepare && simple-git-hooks"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "0.80.6",
+    "@mistralai/mistralai": "2.2.6",
     "@tiptap/extension-placeholder": "^3.29.2",
     "@tiptap/react": "^3.29.2",
     "@tiptap/starter-kit": "^3.29.2",
@@ -73,6 +76,7 @@
     "@commitlint/config-conventional": "19.6.0",
     "@playwright/test": "1.62.0",
     "@tailwindcss/vite": "^4.0.0",
+    "acorn": "8.18.0",
     "@testing-library/dom": "10.4.1",
     "@testing-library/jest-dom": "7.0.0",
     "@testing-library/react": "16.3.2",

@@ -12,16 +12,19 @@ import {
   Settings,
   Sparkles,
 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { TaskPhase } from '@/lib/domain/types';
 import { Composer, type ComposerHandle } from './Composer';
 import { JobList } from './JobList';
-import { SettingsView } from './SettingsView';
 import { useAgentPort } from './usePort';
 
 type Tab = 'chat' | 'jobs' | 'settings';
+
+const SettingsView = lazy(() =>
+  import('./SettingsView').then((module) => ({ default: module.SettingsView })),
+);
 
 const PHASE_LABEL: Record<TaskPhase, string> = {
   idle: '就绪',
@@ -71,8 +74,17 @@ const EXAMPLES = [
 const LAUNCH_MS = 520;
 
 export default function App() {
-  const { snapshot, messages, chatRunning, ready, send, sendChat, downloadDiagnostics, clearChat } =
-    useAgentPort();
+  const {
+    snapshot,
+    messages,
+    chatRunning,
+    ready,
+    connected,
+    sendChat,
+    cancelChat,
+    downloadDiagnostics,
+    clearChat,
+  } = useAgentPort();
   const [tab, setTab] = useState<Tab>('chat');
   // started=false 时展示首页英雄屏；launching 期间执行沉底动画
   const [started, setStarted] = useState(false);
@@ -98,10 +110,7 @@ export default function App() {
     return () => cancelAnimationFrame(frame);
   }, [messages]);
 
-  const submit = (text: string) => {
-    if (!text || chatRunning) return;
-    sendChat(text);
-  };
+  const submit = (text: string) => Boolean(text) && !chatRunning && sendChat(text);
 
   const startNewChat = () => {
     if (chatRunning || messages.length === 0) return;
@@ -112,7 +121,7 @@ export default function App() {
 
   // 首页发送：先播沉底动画，动画结束后切会话屏并真正派发。
   const homeSend = (text: string) => {
-    if (!text || chatRunning || launching) return;
+    if (!text || chatRunning || launching || !connected) return;
     const wrap = homeWrapRef.current;
     if (wrap) {
       const rect = wrap.getBoundingClientRect();
@@ -121,9 +130,8 @@ export default function App() {
     }
     setLaunching(true);
     window.setTimeout(() => {
-      setStarted(true);
       setLaunching(false);
-      submit(text);
+      if (submit(text)) setStarted(true);
     }, LAUNCH_MS);
   };
 
@@ -136,14 +144,14 @@ export default function App() {
         : Math.round(((progressIndex + 1) / (PROGRESS_PHASES.length + 1)) * 100);
 
   return (
-    <div className="flex h-full flex-col bg-app">
+    <div className="redscope-app flex h-full flex-col bg-app" data-testid="app-shell">
       {/* ── 头部（左：品牌与状态 / 右：页签图标） ── */}
-      <header className="flex items-center gap-2 border-b border-line bg-app/90 px-3 py-2 backdrop-blur-xl">
-        <div className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-brand to-brand-strong text-white">
+      <header className="redscope-topbar flex items-center gap-2 border-b px-3 py-2 backdrop-blur-xl">
+        <div className="redscope-brand-mark grid h-7 w-7 shrink-0 place-items-center rounded-[10px]">
           <Bot size={15} />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-bold leading-tight">BossPilot</div>
+          <div className="redscope-brand-name text-[14px] leading-tight">BossPilot</div>
           {chatRunning ? (
             <div className="flex items-center gap-1 truncate text-[10px] font-medium text-brand-strong">
               <Loader2 size={9} className="shrink-0 animate-spin" />
@@ -155,7 +163,10 @@ export default function App() {
               {PHASE_LABEL[snapshot.phase]}
             </div>
           ) : (
-            <div className="truncate text-[10px] text-ink-faint">AI 求职副驾 · 本地隐私</div>
+            <div className="flex items-center gap-1.5 truncate text-[9.5px] text-ink-faint">
+              <span className="redscope-status-dot" aria-hidden />
+              AI 求职副驾 · 本地隐私
+            </div>
           )}
         </div>
         {messages.length > 0 && (
@@ -180,7 +191,7 @@ export default function App() {
               aria-pressed={tab === key}
               className={`relative grid h-7 w-7 place-items-center rounded-lg transition-all duration-200 ${
                 tab === key
-                  ? 'bg-surface-mint text-brand-strong'
+                  ? 'bg-surface-mint text-brand'
                   : 'text-ink-faint hover:bg-surface-soft hover:text-ink-soft'
               }`}
               onClick={() => setTab(key)}
@@ -216,18 +227,22 @@ export default function App() {
 
       {/* ── 对话页 · 首屏（英雄区 + 大输入框，发送后沉底） ── */}
       {tab === 'chat' && !started && (
-        <main className={`min-h-0 flex-1 overflow-y-auto ${launching ? 'is-launching' : ''}`}>
-          <div className="flex min-h-full flex-col px-4 pb-6 pt-8">
+        <main
+          className={`redscope-view redscope-home min-h-0 flex-1 overflow-y-auto ${
+            launching ? 'is-launching' : ''
+          }`}
+        >
+          <div className="redscope-home-inner flex min-h-full flex-col">
             <div className="home-hero mb-4">
-              <div className="mb-2 flex items-center gap-2 text-[9px] font-semibold uppercase tracking-[0.16em] text-brand-strong before:h-px before:w-4 before:bg-brand-strong">
+              <div className="redscope-eyebrow mb-2 flex items-center gap-2 text-[9px] font-semibold uppercase tracking-[0.16em] before:h-px before:w-4 before:bg-current">
                 AI Job Copilot
               </div>
-              <h1 className="text-[clamp(20px,6vw,26px)] font-bold leading-[1.2] tracking-tight text-ink">
+              <h1 className="redscope-home-title text-[clamp(22px,6.5vw,27px)] leading-[1.22]">
                 聊两句，
                 <br />
                 让求职这件事更省心
               </h1>
-              <p className="mt-2 max-w-[320px] text-[11px] leading-5 text-ink-soft">
+              <p className="redscope-home-copy mt-2 max-w-[320px] text-[11px] leading-5">
                 改简历方向、面试准备、行业与薪资行情……有什么想问的，直接开聊。回复会逐字蹦出，随时可下载执行日志。
               </p>
             </div>
@@ -237,8 +252,9 @@ export default function App() {
                 ref={homeComposerRef}
                 autoFocus
                 clearOnSend={false}
+                disabled={!connected}
                 onSend={homeSend}
-                className={`home-composer shadow-[0_14px_40px_rgba(6,79,70,0.08)] ${
+                className={`home-composer redscope-home-composer ${
                   launching ? 'home-composer-launching' : ''
                 }`}
               />
@@ -254,7 +270,7 @@ export default function App() {
                   <button
                     key={ex}
                     type="button"
-                    className="rounded-xl border border-line bg-surface px-3 py-2 text-left text-[11px] text-ink-soft transition-all duration-200 hover:-translate-y-px hover:border-brand hover:text-ink hover:shadow-[0_4px_14px_rgba(6,79,70,0.08)] active:translate-y-0"
+                    className="redscope-example rounded-xl border px-3 py-2 text-left text-[11px] transition-all duration-200 hover:-translate-y-px active:translate-y-0"
                     onClick={() => homeComposerRef.current?.setText(ex)}
                   >
                     {ex}
@@ -269,7 +285,7 @@ export default function App() {
       {/* ── 主内容（会话/结果/设置） ── */}
       {(tab !== 'chat' || started) && (
         <main
-          className="min-h-0 flex-1 overflow-y-auto"
+          className="redscope-view min-h-0 flex-1 overflow-y-auto"
           ref={tab === 'chat' ? scrollRef : undefined}
         >
           {tab === 'chat' && (
@@ -287,12 +303,12 @@ export default function App() {
               </div>
 
               {messages.map((m) => {
-                const streaming = m.role === 'assistant' && m.content === '' && chatRunning;
+                const streaming = m.role === 'assistant' && m.status === 'streaming';
                 if (m.role === 'user') {
                   return (
                     <div
                       key={m.id}
-                      className="msg-in max-w-[92%] self-end whitespace-pre-wrap rounded-[16px_16px_5px_16px] bg-brand px-3 py-2 text-xs leading-relaxed text-white"
+                      className="redscope-user-message msg-in max-w-[92%] self-end whitespace-pre-wrap rounded-[16px_16px_5px_16px] bg-brand px-3 py-2 text-xs leading-relaxed text-white"
                     >
                       {m.content}
                     </div>
@@ -301,19 +317,42 @@ export default function App() {
                 return (
                   <div
                     key={m.id}
-                    className={`msg-in chat-md max-w-[92%] self-start rounded-[16px_16px_16px_5px] border px-3 py-2 text-xs leading-relaxed ${
+                    className={`redscope-ai-message msg-in chat-md max-w-[92%] self-start rounded-[16px_16px_16px_5px] border px-3 py-2 text-xs leading-relaxed ${
                       m.error
-                        ? 'border-danger/30 bg-surface text-danger'
+                        ? 'border-danger/30 bg-surface text-ink'
                         : 'border-line bg-surface text-ink'
                     }`}
                   >
-                    {streaming ? (
+                    {streaming && !m.content ? (
                       <span className="inline-flex items-center gap-1 text-ink-faint">
                         <Loader2 size={12} className="animate-spin text-brand" />
                         正在思考…
                       </span>
                     ) : (
-                      <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS}>{m.content}</ReactMarkdown>
+                      <>
+                        {m.content && (
+                          <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS}>
+                            {m.content}
+                          </ReactMarkdown>
+                        )}
+                        {streaming && (
+                          <span
+                            className="ml-1 inline-block h-3 w-0.5 animate-pulse rounded-full bg-brand align-middle"
+                            role="status"
+                            aria-label="正在生成"
+                          />
+                        )}
+                        {m.status === 'cancelled' && (
+                          <div className="mt-1.5 border-t border-line pt-1.5 text-[10px] text-ink-faint">
+                            已停止生成
+                          </div>
+                        )}
+                        {m.errorMessage && (
+                          <div className="mt-1.5 border-t border-danger/20 pt-1.5 text-[10px] leading-4 text-danger">
+                            {m.errorMessage}
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 );
@@ -323,18 +362,23 @@ export default function App() {
 
           {tab === 'jobs' && <JobList jobs={snapshot.jobs} />}
 
-          {tab === 'settings' && <SettingsView />}
+          {tab === 'settings' && (
+            <Suspense fallback={<div className="p-4 text-xs text-ink-faint">加载中…</div>}>
+              <SettingsView />
+            </Suspense>
+          )}
         </main>
       )}
 
       {/* ── 会话底部输入区（仅对话页 · 已进入会话） ── */}
       {tab === 'chat' && started && (
-        <div className="border-t border-line bg-app p-2.5">
+        <div className="redscope-dock border-t border-line bg-app p-2.5">
           <Composer
             autoFocus
             running={chatRunning}
+            disabled={!connected}
             onSend={submit}
-            onCancel={() => send({ type: 'cancel' })}
+            onCancel={cancelChat}
           />
         </div>
       )}

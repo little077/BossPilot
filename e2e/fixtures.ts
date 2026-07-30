@@ -20,9 +20,24 @@ export const test = base.extend<{
   },
 
   extensionId: async ({ context }, use) => {
-    let [serviceWorker] = context.serviceWorkers();
-    serviceWorker ??= await context.waitForEvent('serviceworker');
-    await use(new URL(serviceWorker.url()).host);
+    const [serviceWorker] = context.serviceWorkers();
+    if (serviceWorker) {
+      await use(new URL(serviceWorker.url()).host);
+      return;
+    }
+
+    /*
+     * 体积较大的 MV3 Background 可能保持休眠，不能把 serviceworker 事件当作
+     * 获取扩展 ID 的前置条件。扩展管理页能稳定给出当前唯一加载的待测扩展。
+     */
+    const extensionsPage = await context.newPage();
+    await extensionsPage.goto('chrome://extensions/');
+    const extension = extensionsPage.locator('extensions-item').first();
+    await extension.waitFor({ state: 'attached' });
+    const extensionId = await extension.getAttribute('id');
+    await extensionsPage.close();
+    if (!extensionId) throw new Error('无法从 chrome://extensions 读取 BossPilot 扩展 ID。');
+    await use(extensionId);
   },
 });
 

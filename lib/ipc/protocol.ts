@@ -3,7 +3,7 @@
 // 采用长连接 Port（chrome.runtime.connect），后台以流式方式广播任务快照。
 
 import type { ChatMessage } from '@/lib/domain/chat';
-import type { SearchTaskParams, TaskSnapshot } from '@/lib/domain/types';
+import type { ProviderStateView, SearchTaskParams, TaskSnapshot } from '@/lib/domain/types';
 
 export const AGENT_PORT_NAME = 'bosspilot-agent';
 
@@ -13,13 +13,15 @@ export type ClientMessage =
   /** 侧边栏连接后先声明订阅，后台回放当前任务快照（若有）。 */
   | { type: 'subscribe' }
   /** 流式对话：发送完整会话历史（由侧边栏持有并持久化，SW 无状态更健壮）。 */
-  | { type: 'chat'; messages: ChatMessage[] }
+  | { type: 'chat'; requestId: string; messages: ChatMessage[] }
   /** 直接用自然语言发起一次任务（后台先做意图解析再执行）。 */
   | { type: 'run_nl'; text: string }
   /** 用已确认的结构化参数发起任务（任务卡片/编辑后确认走这条）。 */
   | { type: 'run_params'; params: SearchTaskParams }
   /** 取消当前任务（含流式对话）。 */
-  | { type: 'cancel' }
+  | { type: 'cancel'; scope?: 'chat' | 'task'; requestId?: string }
+  /** 清空会话历史时同时清掉 Background 中用于断线恢复的最后一轮快照。 */
+  | { type: 'clear_chat' }
   /** 验证码已手动通过，请求继续。 */
   | { type: 'resume_captcha' }
   /** 下载执行日志（诊断记录，经 chrome.downloads 落盘）。 */
@@ -31,6 +33,7 @@ export type ClientMessage =
 
 export type ServerMessage =
   | { type: 'connected' }
+  | { type: 'chat_state'; running: boolean; requestId?: string }
   /** 任务快照全量广播（phase/进度/已采集岗位）。 */
   | { type: 'snapshot'; snapshot: TaskSnapshot }
   /** parse_only 的结果：解析出的参数，交 UI 渲染成可编辑任务卡片。 */
@@ -38,12 +41,132 @@ export type ServerMessage =
   /** 一条面向用户的日志/提示（追加到对话流）。 */
   | { type: 'log'; level: 'info' | 'warn' | 'error'; text: string }
   /** 流式对话开始：UI 追加一条空的 assistant 消息占位（messageId 用于对齐）。 */
-  | { type: 'stream_start'; messageId: string }
-  /** 流式对话增量：把 delta 追加到末条 assistant 消息。 */
-  | { type: 'stream_delta'; messageId: string; delta: string }
-  /** 流式对话结束：定稿最终文本。 */
-  | { type: 'stream_end'; messageId: string; content: string }
-  /** 流式对话出错：附最终（部分）文本，便于保留已产出内容。 */
-  | { type: 'stream_error'; messageId: string; text: string }
+  | { type: 'stream_start'; requestId: string; message: ChatMessage }
+  /**
+   * 每次发送当前 assistant 全量快照，而不是让 UI 依赖从未丢失过任何 delta。
+   * 断线重连后可以安全地用同一 message.id 覆盖恢复。
+   */
+  | { type: 'stream_update'; requestId: string; message: ChatMessage }
+  | { type: 'stream_end'; requestId: string; message: ChatMessage }
+  | { type: 'stream_error'; requestId: string; message: ChatMessage }
   /** 出错。 */
-  | { type: 'error'; text: string };
+  | { type: 'error'; text: string; requestId?: string };
+
+const MAX_CHAT_MESSAGES = 200;
+const MAX_MESSAGE_CHARS = 100_000;
+const MAX_CHAT_CHARS = 500_000;
+
+export function isClientMessage(value: unknown): value is ClientMessage {
+  if (!isRecord(value) || typeof value.type !== 'string') return false;
+
+  switch (value.type) {
+    case 'subscribe':
+    case 'resume_captcha':
+    case 'download_diagnostics':
+    case 'clear_chat':
+      return true;
+    case 'chat':
+      return (
+        isBoundedString(value.requestId, 128) &&
+        Array.isArray(value.messages) &&
+        value.messages.length > 0 &&
+        value.messages.length <= MAX_CHAT_MESSAGES &&
+        value.messages.every(isChatMessage) &&
+        value.messages.reduce(
+          (total, message) =>
+            total +
+            (isRecord(message) && typeof message.content === 'string' ? message.content.length : 0),
+          0,
+        ) <= MAX_CHAT_CHARS
+      );
+    case 'run_nl':
+    case 'parse_only':
+      return isBoundedString(value.text, 20_000);
+    case 'run_params':
+      return isRecord(value.params);
+    case 'cancel':
+      return (
+        (value.scope === undefined || value.scope === 'chat' || value.scope === 'task') &&
+        (value.requestId === undefined || isBoundedString(value.requestId, 128))
+      );
+    default:
+      return false;
+  }
+}
+
+// ─── 多模型配置：一次性 Runtime Message ───
+// 密钥只允许出现在 Sidepanel → Background 的 connect 命令中，任何响应都不得回传明文。
+
+export type ProviderCommand =
+  | { type: 'providers:get' }
+  | { type: 'providers:issue'; providerId: string }
+  | {
+      type: 'providers:connect';
+      providerId: string;
+      apiKey: string;
+      baseUrl?: string;
+    }
+  | { type: 'providers:select'; providerId: string; modelId: string }
+  | {
+      type: 'providers:add-manual-model';
+      providerId: string;
+      modelId: string;
+      apiKey: string;
+      baseUrl?: string;
+    }
+  | { type: 'providers:remove'; providerId: string };
+
+export type ProviderCommandResponse =
+  | { ok: true; state: ProviderStateView }
+  | { ok: false; error: string };
+
+export function isProviderCommand(value: unknown): value is ProviderCommand {
+  if (!isRecord(value) || typeof value.type !== 'string') return false;
+
+  switch (value.type) {
+    case 'providers:get':
+      return true;
+    case 'providers:issue':
+    case 'providers:remove':
+      return isBoundedString(value.providerId, 64);
+    case 'providers:select':
+      return isBoundedString(value.providerId, 64) && isBoundedString(value.modelId, 256);
+    case 'providers:connect':
+      return (
+        isBoundedString(value.providerId, 64) &&
+        typeof value.apiKey === 'string' &&
+        value.apiKey.length <= 16_384 &&
+        (value.baseUrl === undefined || isBoundedString(value.baseUrl, 2_048))
+      );
+    case 'providers:add-manual-model':
+      return (
+        isBoundedString(value.providerId, 64) &&
+        isBoundedString(value.modelId, 256) &&
+        typeof value.apiKey === 'string' &&
+        value.apiKey.length <= 16_384 &&
+        (value.baseUrl === undefined || isBoundedString(value.baseUrl, 2_048))
+      );
+    default:
+      return false;
+  }
+}
+
+function isChatMessage(value: unknown): value is ChatMessage {
+  return (
+    isRecord(value) &&
+    isBoundedString(value.id, 256) &&
+    (value.role === 'user' || value.role === 'assistant') &&
+    typeof value.content === 'string' &&
+    value.content.length <= MAX_MESSAGE_CHARS &&
+    typeof value.createdAt === 'number' &&
+    Number.isFinite(value.createdAt)
+  );
+}
+
+function isBoundedString(value: unknown, maxLength: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maxLength;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
