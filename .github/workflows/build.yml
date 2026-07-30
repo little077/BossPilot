@@ -45,7 +45,7 @@ jobs:
 
       - name: 上传覆盖率报告
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ github.sha }}
           path: coverage/
@@ -53,7 +53,7 @@ jobs:
           retention-days: 14
 
       - name: 上传构建产物（Artifact）
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bosspilot-chrome-${{ github.sha }}
           path: .output/*.zip
@@ -61,7 +61,7 @@ jobs:
 
       - name: 上传浏览器测试报告
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report-${{ github.sha }}
           path: playwright-report/
