@@ -27,6 +27,7 @@ export default defineConfig({
         'lib/adapter/city-codes.ts',
         'lib/adapter/zhipin.ts',
         'lib/diagnostics/recorder.ts',
+        'lib/diagnostics/page-structure.ts',
         'lib/diagnostics/redaction.ts',
         'lib/diagnostics/report.ts',
         'lib/domain/chat.ts',
@@ -43,6 +44,9 @@ export default defineConfig({
         'lib/providers/service.ts',
         'lib/providers/store.ts',
         'lib/storage/access.ts',
+        'lib/tools/read-current-job.ts',
+        'lib/tools/read-visible-jobs.ts',
+        'entrypoints/sidepanel/ChatFlowStatus.tsx',
         'entrypoints/sidepanel/usePort.ts',
       ],
       thresholds: {

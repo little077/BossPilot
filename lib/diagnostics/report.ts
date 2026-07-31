@@ -3,6 +3,8 @@
 // 分析指引 + 任务概览 + 异常高亮 + 步骤时间线 + LLM 调用明细（含提示词/输出原文）
 // + 步骤详情附录（DOM outline 等超长内容）。数据在入库时已脱敏。
 
+import type { DiagnosticPageStructureSnapshot } from '@/lib/domain/types';
+import { redact } from './redaction';
 import type { DiagnosticLlmCall, DiagnosticRun, DiagnosticStep } from './types';
 
 const STATUS_LABEL: Record<DiagnosticRun['status'], string> = {
@@ -25,6 +27,13 @@ const KIND_LABEL: Record<DiagnosticStep['kind'], string> = {
   tool: '工具',
 };
 
+const PAGE_KIND_LABEL: Record<NonNullable<DiagnosticPageStructureSnapshot['pageKind']>, string> = {
+  standalone_detail: '独立岗位详情页',
+  embedded_detail: '列表页内展开的岗位详情',
+  job_list: '岗位列表页（未识别到展开详情）',
+  unknown: '未知 Boss 页面结构',
+};
+
 /** 时间线表格里 detail 的内联上限，超过移入「步骤详情附录」。 */
 const INLINE_DETAIL_CHARS = 160;
 
@@ -38,6 +47,8 @@ const ANALYSIS_GUIDE = `## 分析指引（给 AI 分析者）
   用于判断：提示词是否给足信息、模型是否理解错、输出是否被解析错；
 - 「步骤详情附录」存放超长细节。选择器失配（selectorMiss）时这里有页面
   DOM 结构 outline——对照适配层的候选选择器可直接判断站点是否改版、如何修；
+- 「当前页面结构诊断」是在下载瞬间重新采集的活动 Boss 标签页，包含候选选择器
+  命中数、固定文案的 DOM 祖先路径与限量可见 DOM 骨架；优先用它修复当前页面适配；
 - 「适配器 v 版本号」是选择器契约版本；同版本下 selectorMiss 多发即提示需要升级适配层。`;
 
 function fmtTime(ms: number | undefined): string {
@@ -150,8 +161,123 @@ function renderRun(run: DiagnosticRun, index: number): string {
   return lines.join('\n');
 }
 
-/** 生成完整诊断报告 Markdown。runs 为空时给出占位说明。 */
-export function buildDiagnosticsReport(runs: DiagnosticRun[]): string {
+function visibleMatches(snapshot: DiagnosticPageStructureSnapshot, group: string): number {
+  return (snapshot.selectorProbes ?? [])
+    .filter((probe) => probe.group === group)
+    .reduce((total, probe) => total + probe.visibleMatches, 0);
+}
+
+function renderPageFindings(snapshot: DiagnosticPageStructureSnapshot): string[] {
+  const findings: string[] = [];
+  const jobCards = visibleMatches(snapshot, '职位列表卡片');
+  const detailRoots = visibleMatches(snapshot, '详情面板根节点');
+  const descriptions = visibleMatches(snapshot, '岗位正文');
+  const hasDescriptionLandmark = (snapshot.landmarks ?? []).some(({ label }) =>
+    /职位描述|岗位描述|职位详情/.test(label),
+  );
+
+  if (jobCards > 0 && descriptions === 0) {
+    findings.push(
+      '已识别到职位列表卡片，但现有“岗位正文”候选选择器全部未命中；需要从 DOM 骨架中为真实 JD 容器追加候选选择器。',
+    );
+  }
+  if (hasDescriptionLandmark && detailRoots === 0) {
+    findings.push(
+      '页面存在“职位描述/岗位描述”可见文字，但详情面板根节点未命中；需要根据“关键文案路径”补充详情根节点选择器。',
+    );
+  }
+  if (hasDescriptionLandmark && descriptions === 0) {
+    findings.push(
+      '页面肉眼存在岗位正文入口，但正文选择器未命中；优先沿关键文案路径向上定位正文容器，并为该结构增加脱敏 DOM 回归测试。',
+    );
+  }
+  if (descriptions > 0) {
+    findings.push(
+      '现有岗位正文选择器已命中；若工具仍失败，应重点检查详情根节点范围、隐藏面板过滤和当前活动标签页选择。',
+    );
+  }
+  if (snapshot.truncated) {
+    findings.push(
+      'DOM 骨架达到安全上限并被截断；如关键详情结构未出现在报告中，应进一步收敛到“职位描述”关键文案附近采集。',
+    );
+  }
+  if (findings.length === 0) {
+    findings.push(
+      '当前候选选择器和关键文案均未提供足够信号；请结合 DOM 骨架确认页面是否尚未加载完成、处于验证码页或使用了全新结构。',
+    );
+  }
+  return findings;
+}
+
+function renderPageStructure(snapshot: DiagnosticPageStructureSnapshot): string {
+  const lines: string[] = ['## 当前页面结构诊断', ''];
+  if (snapshot.status !== 'captured') {
+    lines.push(
+      `> ${snapshot.status === 'skipped' ? 'ℹ️ 未采集' : '⚠️ 采集失败'}：${redact(snapshot.reason) || '未知原因'}`,
+    );
+    if (snapshot.pageUrl) lines.push(`- 页面：\`${redact(snapshot.pageUrl)}\``);
+    lines.push('');
+    return lines.join('\n');
+  }
+
+  lines.push(`- 页面：\`${redact(snapshot.pageUrl) || '未知页面'}\``);
+  lines.push(
+    `- 类型：${snapshot.pageKind ? PAGE_KIND_LABEL[snapshot.pageKind] : '未知'}；readyState=${snapshot.readyState ?? '未知'}`,
+  );
+  lines.push(
+    `- 视口：${snapshot.viewport ? `${snapshot.viewport.width}×${snapshot.viewport.height}` : '未知'}；记录节点 ${snapshot.nodeCount ?? 0}${snapshot.truncated ? '（已达安全上限并截断）' : ''}`,
+  );
+  lines.push('');
+  lines.push(
+    '> 隐私说明：页面诊断不包含表单值、Cookie、Storage、链接地址和查询参数；DOM 骨架仅保留 class、层级及最多 48 字的脱敏可见文本片段。',
+  );
+  lines.push('');
+
+  lines.push('### 自动分析出的改进点');
+  lines.push('');
+  for (const finding of renderPageFindings(snapshot)) lines.push(`- ${finding}`);
+  lines.push('');
+
+  const probes = snapshot.selectorProbes ?? [];
+  if (probes.length > 0) {
+    lines.push('### 当前适配器选择器命中');
+    lines.push('');
+    lines.push('| 字段 | 候选选择器 | 全部命中 | 可见命中 |');
+    lines.push('| --- | --- | ---: | ---: |');
+    for (const probe of probes) {
+      lines.push(
+        `| ${probe.group} | \`${probe.selector}\` | ${probe.matches} | ${probe.visibleMatches} |`,
+      );
+    }
+    lines.push('');
+  }
+
+  const landmarks = snapshot.landmarks ?? [];
+  if (landmarks.length > 0) {
+    lines.push('### 关键文案路径');
+    lines.push('');
+    lines.push('| 文案 | DOM 祖先路径 |');
+    lines.push('| --- | --- |');
+    for (const landmark of landmarks) {
+      lines.push(`| ${landmark.label} | \`${redact(landmark.path)}\` |`);
+    }
+    lines.push('');
+  }
+
+  if (snapshot.outline) {
+    lines.push('### 限量可见 DOM 骨架');
+    lines.push('');
+    lines.push(fence(redact(snapshot.outline)));
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+/** 生成完整诊断报告 Markdown；即使没有运行记录，也可以只导出当前页面结构。 */
+export function buildDiagnosticsReport(
+  runs: DiagnosticRun[],
+  pageStructure?: DiagnosticPageStructureSnapshot,
+): string {
   const head: string[] = [];
   head.push('# BossPilot 执行日志');
   head.push('');
@@ -161,17 +287,27 @@ export function buildDiagnosticsReport(runs: DiagnosticRun[]): string {
   if (errorCount > 0) head.push(`- ⚠️ 含 ${errorCount} 个异常任务（见下方高亮）`);
   head.push('');
   head.push(
-    '> 本日志仅记录在本机、导出前已擦除密钥/凭据；用于定位真实页面上的异常，可直接发出分析。',
+    '> 本日志仅记录在本机、导出前已擦除密钥/凭据；如包含页面结构，分享前仍建议快速检查可见文本片段。',
   );
   head.push('');
 
-  if (runs.length === 0) {
+  if (runs.length === 0 && !pageStructure) {
     head.push('_暂无可导出的任务记录。先和 AI 对话一轮后再下载。_');
     return head.join('\n');
   }
 
+  if (pageStructure) {
+    head.push(renderPageStructure(pageStructure));
+    head.push('');
+  }
+
   head.push(ANALYSIS_GUIDE);
   head.push('');
+
+  if (runs.length === 0) {
+    head.push('_本次没有执行记录，已仅导出当前页面结构诊断。_');
+    return head.join('\n');
+  }
 
   const body = runs.map((r, i) => renderRun(r, i)).join('\n---\n\n');
   return `${head.join('\n')}\n${body}`;

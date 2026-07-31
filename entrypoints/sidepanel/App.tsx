@@ -16,6 +16,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { TaskPhase } from '@/lib/domain/types';
+import { ChatFlowStatus } from './ChatFlowStatus';
 import { Composer, type ComposerHandle } from './Composer';
 import { JobList } from './JobList';
 import { useAgentPort } from './usePort';
@@ -95,6 +96,14 @@ export default function App() {
   const homeWrapRef = useRef<HTMLDivElement>(null);
 
   const pipelineRunning = RUNNING_PHASES.has(snapshot.phase);
+  const lastMessage = messages.at(-1);
+  const activeAssistant = lastMessage?.role === 'assistant' ? lastMessage : undefined;
+  const chatStatusText =
+    activeAssistant?.toolActivity?.status === 'running'
+      ? '执行工具 · 读取当前岗位'
+      : activeAssistant?.toolActivity
+        ? '回复生成中…'
+        : '思考中…';
 
   // 回放后已有对话时跳过首页；首页发送动画期间先保持当前 DOM，
   // 避免乐观消息写入后提前切屏，让输入框能够完整落到会话区。
@@ -159,7 +168,7 @@ export default function App() {
           {chatRunning ? (
             <div className="flex items-center gap-1 truncate text-[10px] font-medium text-brand-strong">
               <Loader2 size={9} className="shrink-0 animate-spin" />
-              思考中…
+              {chatStatusText}
             </div>
           ) : pipelineRunning ? (
             <div className="flex items-center gap-1 truncate text-[10px] font-medium text-brand-strong">
@@ -300,9 +309,9 @@ export default function App() {
                   type="button"
                   className="flex items-center gap-1 rounded-lg border border-line bg-surface px-2 py-1 text-[10px] font-medium text-ink-soft transition-all duration-200 hover:border-brand hover:text-brand-strong active:scale-[0.98]"
                   onClick={downloadDiagnostics}
-                  title="把本次会话的执行日志导出为 Markdown（已脱敏）"
+                  title="导出执行日志和当前 Boss 页面 DOM 结构（已限量脱敏）"
                 >
-                  <ScrollText size={11} /> 下载执行日志
+                  <ScrollText size={11} /> 下载诊断日志
                 </button>
               </div>
 
@@ -327,37 +336,36 @@ export default function App() {
                         : 'border-line bg-surface text-ink'
                     }`}
                   >
-                    {streaming && !m.content ? (
-                      <span className="inline-flex items-center gap-1 text-ink-faint">
+                    <ChatFlowStatus message={m} />
+                    {streaming &&
+                    !m.content &&
+                    m.reasoningActivity?.status !== 'running' &&
+                    m.toolActivity?.status !== 'running' ? (
+                      <span className="chat-answer-wait">
                         <Loader2 size={12} className="animate-spin text-brand" />
-                        正在思考…
+                        正在组织回答…
                       </span>
-                    ) : (
-                      <>
-                        {m.content && (
-                          <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS}>
-                            {m.content}
-                          </ReactMarkdown>
-                        )}
-                        {streaming && (
-                          <span
-                            className="ml-1 inline-block h-3 w-0.5 animate-pulse rounded-full bg-brand align-middle"
-                            role="status"
-                            aria-label="正在生成"
-                          />
-                        )}
-                        {m.status === 'cancelled' && (
-                          <div className="mt-1.5 border-t border-line pt-1.5 text-[10px] text-ink-faint">
-                            已停止生成
-                          </div>
-                        )}
-                        {m.errorMessage && (
-                          <div className="mt-1.5 border-t border-danger/20 pt-1.5 text-[10px] leading-4 text-danger">
-                            {m.errorMessage}
-                          </div>
-                        )}
-                      </>
-                    )}
+                    ) : null}
+                    {m.content ? (
+                      <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS}>{m.content}</ReactMarkdown>
+                    ) : null}
+                    {streaming && m.content ? (
+                      <span
+                        className="ml-1 inline-block h-3 w-0.5 animate-pulse rounded-full bg-brand align-middle"
+                        role="status"
+                        aria-label="正在生成"
+                      />
+                    ) : null}
+                    {m.status === 'cancelled' ? (
+                      <div className="mt-1.5 border-t border-line pt-1.5 text-[10px] text-ink-faint">
+                        已停止生成
+                      </div>
+                    ) : null}
+                    {m.errorMessage ? (
+                      <div className="mt-1.5 border-t border-danger/20 pt-1.5 text-[10px] leading-4 text-danger">
+                        {m.errorMessage}
+                      </div>
+                    ) : null}
                   </div>
                 );
               })}

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { DiagnosticPageStructureSnapshot } from '@/lib/domain/types';
 import { buildDiagnosticsReport, diagnosticsFileName } from './report';
 import type { DiagnosticRun } from './types';
 
@@ -16,6 +17,49 @@ function makeRun(overrides: Partial<DiagnosticRun> = {}): DiagnosticRun {
     status: 'completed',
     steps: [],
     llmCalls: [],
+    ...overrides,
+  };
+}
+
+function makePageStructure(
+  overrides: Partial<DiagnosticPageStructureSnapshot> = {},
+): DiagnosticPageStructureSnapshot {
+  return {
+    status: 'captured',
+    capturedAt: 1700000000000,
+    pageUrl: 'https://www.zhipin.com/web/geek/job',
+    pageKind: 'job_list',
+    readyState: 'complete',
+    viewport: { width: 1440, height: 900 },
+    nodeCount: 88,
+    truncated: false,
+    selectorProbes: [
+      {
+        group: '职位列表卡片',
+        selector: 'li.job-card-wrapper',
+        matches: 4,
+        visibleMatches: 4,
+      },
+      {
+        group: '详情面板根节点',
+        selector: '.job-detail-box',
+        matches: 0,
+        visibleMatches: 0,
+      },
+      {
+        group: '岗位正文',
+        selector: '.job-sec-text',
+        matches: 0,
+        visibleMatches: 0,
+      },
+    ],
+    landmarks: [
+      {
+        label: '职位描述',
+        path: 'body > main.search-layout > section.actual-detail-panel',
+      },
+    ],
+    outline: 'body\n  main.search-layout\n    section.actual-detail-panel "sk-abcdef123456"',
     ...overrides,
   };
 }
@@ -38,6 +82,85 @@ describe('buildDiagnosticsReport', () => {
     expect(md).toContain('`test-model` @ `api.example.com`');
     expect(md).toContain('耗时：5.0s');
     expect(md).toContain('扩展 v0.2.0 / 适配器 v1');
+  });
+
+  it('没有运行记录时也能单独导出当前页面结构和自动改进点', () => {
+    const md = buildDiagnosticsReport([], makePageStructure());
+
+    expect(md).toContain('## 当前页面结构诊断');
+    expect(md).toContain('岗位列表页（未识别到展开详情）');
+    expect(md).toContain('### 自动分析出的改进点');
+    expect(md).toContain('已识别到职位列表卡片');
+    expect(md).toContain('详情面板根节点未命中');
+    expect(md).toContain('### 当前适配器选择器命中');
+    expect(md).toContain('| 岗位正文 | `.job-sec-text` | 0 | 0 |');
+    expect(md).toContain('section.actual-detail-panel');
+    expect(md).toContain('sk-***');
+    expect(md).not.toContain('sk-abcdef123456');
+    expect(md).toContain('已仅导出当前页面结构诊断');
+  });
+
+  it.each([
+    ['skipped', '当前不是 Boss 页面'],
+    ['failed', 'site access denied'],
+  ] as const)('页面结构为 %s 时仍生成可分析报告', (status, reason) => {
+    const md = buildDiagnosticsReport([makeRun()], {
+      status,
+      capturedAt: 1,
+      pageUrl: 'https://www.zhipin.com/web/geek/job',
+      reason,
+    });
+
+    expect(md).toContain('## 当前页面结构诊断');
+    expect(md).toContain(status === 'skipped' ? '未采集' : '采集失败');
+    expect(md).toContain(reason);
+    expect(md).toContain('## 任务 1');
+  });
+
+  it('正文选择器命中和骨架截断时给出对应维护建议', () => {
+    const md = buildDiagnosticsReport(
+      [makeRun()],
+      makePageStructure({
+        truncated: true,
+        selectorProbes: [
+          {
+            group: '岗位正文',
+            selector: '.job-sec-text',
+            matches: 1,
+            visibleMatches: 1,
+          },
+        ],
+        landmarks: [],
+      }),
+    );
+
+    expect(md).toContain('现有岗位正文选择器已命中');
+    expect(md).toContain('DOM 骨架达到安全上限');
+  });
+
+  it('页面信号和可选字段均为空时给出保守诊断', () => {
+    const md = buildDiagnosticsReport([makeRun()], {
+      status: 'captured',
+      capturedAt: 1,
+    });
+
+    expect(md).toContain('页面：`未知页面`');
+    expect(md).toContain('类型：未知；readyState=未知');
+    expect(md).toContain('视口：未知；记录节点 0');
+    expect(md).toContain('当前候选选择器和关键文案均未提供足够信号');
+    expect(md).not.toContain('### 当前适配器选择器命中');
+    expect(md).not.toContain('### 关键文案路径');
+    expect(md).not.toContain('### 限量可见 DOM 骨架');
+  });
+
+  it('采集跳过且没有原因时使用安全占位', () => {
+    const md = buildDiagnosticsReport([], {
+      status: 'skipped',
+      capturedAt: 1,
+    });
+
+    expect(md).toContain('ℹ️ 未采集：未知原因');
+    expect(md).not.toContain('- 页面：');
   });
 
   it('统计并高亮异常任务；取消与空输入有占位', () => {

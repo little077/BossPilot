@@ -147,3 +147,67 @@ export interface ProviderStateView {
   connections: ProviderConnectionView[];
   activeModel?: ModelIdentity;
 }
+
+/** 单轮对话里可见的安全思考状态；只描述阶段，不暴露模型内部推理原文。 */
+export interface ReasoningActivity {
+  status: 'running' | 'completed' | 'cancelled' | 'error';
+  summary: string;
+  startedAt: number;
+  finishedAt?: number;
+}
+
+/** 一次只读领域工具的 UI/IPC 快照，不携带抓取到的岗位原文。 */
+export type DomainToolName = 'read_current_job' | 'read_visible_jobs';
+
+export interface ToolActivity {
+  callId: string;
+  name: DomainToolName;
+  label: string;
+  status: 'running' | 'succeeded' | 'failed' | 'cancelled';
+  statusText: string;
+  startedAt: number;
+  finishedAt?: number;
+  detail?: string;
+  errorCode?:
+    | 'NOT_ON_JOB_PAGE'
+    | 'NO_JOB_SELECTED'
+    | 'NO_JOB_LIST'
+    | 'CAPTCHA_DETECTED'
+    | 'SELECTOR_MISS'
+    | 'NO_PERMISSION'
+    | 'EXTRACTION_FAILED'
+    | 'CANCELLED';
+}
+
+/** 当前网页结构诊断中的单个选择器命中结果。 */
+export interface DiagnosticSelectorProbe {
+  group: string;
+  selector: string;
+  matches: number;
+  visibleMatches: number;
+}
+
+/** 通过固定页面文案定位到的脱敏 DOM 祖先路径，不包含链接、id 或表单值。 */
+export interface DiagnosticPageLandmark {
+  label: string;
+  path: string;
+}
+
+/**
+ * 下载诊断日志时即时采集的页面结构快照。
+ * captured 只可能来自 www.zhipin.com；skipped/failed 仍允许生成执行日志。
+ */
+export interface DiagnosticPageStructureSnapshot {
+  status: 'captured' | 'skipped' | 'failed';
+  capturedAt: number;
+  pageUrl?: string;
+  pageKind?: 'standalone_detail' | 'embedded_detail' | 'job_list' | 'unknown';
+  readyState?: 'loading' | 'interactive' | 'complete';
+  viewport?: { width: number; height: number };
+  nodeCount?: number;
+  truncated?: boolean;
+  selectorProbes?: DiagnosticSelectorProbe[];
+  landmarks?: DiagnosticPageLandmark[];
+  outline?: string;
+  reason?: string;
+}

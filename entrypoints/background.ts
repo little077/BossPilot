@@ -1,3 +1,4 @@
+import { captureCurrentPageStructure } from '@/lib/diagnostics/page-structure';
 import { recorder } from '@/lib/diagnostics/recorder';
 import { redact } from '@/lib/diagnostics/redaction';
 import { buildDiagnosticsReport, diagnosticsFileName } from '@/lib/diagnostics/report';
@@ -18,6 +19,8 @@ import { CHAT_SYSTEM } from '@/lib/llm/prompts';
 import { orchestrator } from '@/lib/pipeline/orchestrator';
 import { ProviderService } from '@/lib/providers/service';
 import { createTrustedStorageGate } from '@/lib/storage/access';
+import { READ_CURRENT_JOB_TOOL, readCurrentJob } from '@/lib/tools/read-current-job';
+import { READ_VISIBLE_JOBS_TOOL, readVisibleJobs } from '@/lib/tools/read-visible-jobs';
 
 interface ActiveDiagnostic {
   requestId: string;
@@ -45,6 +48,16 @@ export default defineBackground({
       adapter: createPiGenerationAdapter(),
       systemPrompt: CHAT_SYSTEM,
       maxOutputTokens: 8_192,
+      tools: [READ_CURRENT_JOB_TOOL, READ_VISIBLE_JOBS_TOOL],
+      executeTool: async (call, signal) => {
+        recorder.step('chat', 'tool', `模型调用 ${call.name}`);
+        const result =
+          call.name === READ_VISIBLE_JOBS_TOOL.name
+            ? await readVisibleJobs(signal)
+            : await readCurrentJob(signal);
+        recorder.step('chat', result.isError ? 'error' : 'tool', result.statusText, result.detail);
+        return result;
+      },
       resolveTarget: async () => {
         await requireTrustedStorage();
         const target = await resolveActiveGenerationTarget();
@@ -259,7 +272,8 @@ export default defineBackground({
     }
 
     async function downloadDiagnostics(): Promise<void> {
-      const markdown = buildDiagnosticsReport(recorder.snapshotRuns());
+      const pageStructure = await captureCurrentPageStructure();
+      const markdown = buildDiagnosticsReport(recorder.snapshotRuns(), pageStructure);
       const dataUrl = `data:text/markdown;charset=utf-8;base64,${base64EncodeUtf8(markdown)}`;
       await chrome.downloads.download({
         url: dataUrl,

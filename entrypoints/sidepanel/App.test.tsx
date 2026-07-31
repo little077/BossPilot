@@ -217,4 +217,28 @@ describe('顶部导航', () => {
 
     expect(await screen.findByRole('button', { name: '新对话' })).toBeDisabled();
   });
+
+  it('会话工具栏下载包含当前页面结构的诊断日志', async () => {
+    const downloadDiagnostics = vi.fn();
+    useAgentPortMock.mockReturnValue({
+      ...basePort,
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: '读取当前岗位',
+          createdAt: 1,
+        },
+      ],
+      downloadDiagnostics,
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    const button = await screen.findByRole('button', { name: '下载诊断日志' });
+    expect(button).toHaveAttribute('title', '导出执行日志和当前 Boss 页面 DOM 结构（已限量脱敏）');
+    await user.click(button);
+
+    expect(downloadDiagnostics).toHaveBeenCalledOnce();
+  });
 });

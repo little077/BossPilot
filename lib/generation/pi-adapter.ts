@@ -9,6 +9,7 @@ import type {
   Model,
   StopReason,
   StreamOptions,
+  TSchema,
   Usage,
 } from '@earendil-works/pi-ai';
 import { stream as streamAnthropicMessages } from '@earendil-works/pi-ai/api/anthropic-messages';
@@ -172,6 +173,22 @@ export function createPiGenerationAdapter({
             continue;
           }
 
+          if (event.type === 'toolcall_end') {
+            if (!startEmitted) {
+              startEmitted = true;
+              yield { type: 'start' };
+            }
+            yield {
+              type: 'tool-call',
+              toolCall: {
+                id: event.toolCall.id,
+                name: event.toolCall.name,
+                arguments: toUnknownRecord(event.toolCall.arguments),
+              },
+            };
+            continue;
+          }
+
           if (event.type === 'done') {
             terminalReceived = true;
             if (!startEmitted) {
@@ -289,27 +306,68 @@ function createContext(model: Model<Api>, request: GenerationRequest): Context {
   return {
     systemPrompt: request.systemPrompt,
     messages: request.messages.flatMap<Context['messages'][number]>((message) => {
-      if (!message.content.trim()) return [];
       const content = message.content;
+      const toolCalls =
+        message.role === 'assistant' && 'toolCalls' in message ? message.toolCalls : undefined;
+      if (!content.trim() && (message.role !== 'assistant' || (toolCalls?.length ?? 0) === 0)) {
+        return [];
+      }
 
       if (message.role === 'user') {
         return [{ role: 'user' as const, content, timestamp: message.createdAt }];
       }
 
-      if (message.error || message.status === 'error' || message.status === 'streaming') return [];
+      if (message.role === 'toolResult') {
+        return [
+          {
+            role: 'toolResult' as const,
+            toolCallId: message.toolCallId,
+            toolName: message.toolName,
+            content: [{ type: 'text' as const, text: content }],
+            isError: message.isError,
+            timestamp: message.createdAt,
+          },
+        ];
+      }
+
+      if (
+        ('error' in message && message.error) ||
+        ('status' in message && (message.status === 'error' || message.status === 'streaming'))
+      ) {
+        return [];
+      }
 
       const assistant: AssistantMessage = {
         role: 'assistant',
-        content: [{ type: 'text', text: content }],
+        content: [
+          ...(content ? [{ type: 'text' as const, text: content }] : []),
+          ...(toolCalls ?? []).map((toolCall) => ({
+            type: 'toolCall' as const,
+            id: toolCall.id,
+            name: toolCall.name,
+            arguments: toolCall.arguments,
+          })),
+        ],
         api: model.api,
         provider: model.provider,
         model: model.id,
         usage: EMPTY_USAGE,
-        stopReason: chatFinishReasonToPi(message.finishReason),
+        stopReason: chatFinishReasonToPi(
+          message.finishReason ?? (toolCalls?.length ? 'tool' : undefined),
+        ),
         timestamp: message.createdAt,
       };
       return [assistant];
     }),
+    ...(request.tools?.length
+      ? {
+          tools: request.tools.map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters as unknown as TSchema,
+          })),
+        }
+      : {}),
   };
 }
 
@@ -469,6 +527,10 @@ function nonNegativeNumber(value: unknown): number {
 
 function positiveInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function toUnknownRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? { ...value } : {};
 }
 
 function classifyStreamError(message: string | undefined, secret: string): GenerationError {

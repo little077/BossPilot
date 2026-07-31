@@ -147,6 +147,113 @@ describe('pi-ai generation adapter', () => {
     });
   });
 
+  it('maps protocol-neutral tools, tool calls, and tool results', async () => {
+    const calls: StreamCall[] = [];
+    const toolCall = {
+      type: 'toolCall' as const,
+      id: 'call-1',
+      name: 'read_current_job',
+      arguments: {},
+    };
+    const partial = {
+      ...makeAssistant('toolUse'),
+      content: [toolCall],
+    };
+    const loadApi = makeLoader(
+      [
+        { type: 'start', partial },
+        { type: 'toolcall_end', contentIndex: 0, toolCall, partial },
+        { type: 'done', reason: 'toolUse', message: partial },
+      ],
+      calls,
+    );
+    const adapter = createPiGenerationAdapter({ loadApi });
+
+    const result = await collect(
+      adapter.stream(makeTarget(), {
+        systemPrompt: 'system',
+        messages: [
+          { role: 'user', content: '解读当前岗位', createdAt: 1 },
+          {
+            role: 'assistant',
+            content: '',
+            createdAt: 2,
+            finishReason: 'tool',
+            toolCalls: [{ id: 'prior-call', name: 'read_current_job', arguments: {} }],
+          },
+          {
+            role: 'toolResult',
+            toolCallId: 'prior-call',
+            toolName: 'read_current_job',
+            content: '岗位资料',
+            isError: false,
+            createdAt: 3,
+          },
+        ],
+        tools: [
+          {
+            name: 'read_current_job',
+            label: '读取当前岗位',
+            description: '读取当前岗位详情',
+            parameters: {
+              type: 'object',
+              properties: {},
+              additionalProperties: false,
+            },
+          },
+        ],
+        signal: new AbortController().signal,
+      }),
+    );
+
+    expect(result).toEqual([
+      { type: 'start' },
+      {
+        type: 'tool-call',
+        toolCall: { id: 'call-1', name: 'read_current_job', arguments: {} },
+      },
+      {
+        type: 'finish',
+        reason: 'tool',
+        usage: {
+          inputTokens: 12,
+          outputTokens: 5,
+          cacheReadTokens: 3,
+          cacheWriteTokens: 2,
+          totalTokens: 22,
+          cost: 0.0033,
+        },
+      },
+    ]);
+    expect(calls[0]?.context.tools).toEqual([
+      {
+        name: 'read_current_job',
+        description: '读取当前岗位详情',
+        parameters: {
+          type: 'object',
+          properties: {},
+          additionalProperties: false,
+        },
+      },
+    ]);
+    expect(calls[0]?.context.messages).toEqual([
+      { role: 'user', content: '解读当前岗位', timestamp: 1 },
+      expect.objectContaining({
+        role: 'assistant',
+        stopReason: 'toolUse',
+        content: [expect.objectContaining({ type: 'toolCall', id: 'prior-call' })],
+      }),
+      {
+        role: 'toolResult',
+        toolCallId: 'prior-call',
+        toolName: 'read_current_job',
+        content: [{ type: 'text', text: '岗位资料' }],
+        isError: false,
+        timestamp: 3,
+      },
+    ]);
+  });
+
   it.each([
     ['openai-completions', 'openai-completions'],
     ['openai-responses', 'openai-responses'],
