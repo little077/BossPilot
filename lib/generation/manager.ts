@@ -6,6 +6,11 @@ import { GenerationError, isAbortError, sanitizeGenerationError } from '@/lib/ge
 import type {
   GenerationAdapter,
   GenerationEvent,
+  GenerationInputMessage,
+  GenerationToolCall,
+  GenerationToolDefinition,
+  GenerationToolExecutionResult,
+  GenerationToolExecutor,
   ResolvedGenerationTarget,
 } from '@/lib/generation/types';
 
@@ -36,6 +41,9 @@ export interface ChatGenerationManagerOptions {
   /** 全量流快照的最小广播间隔；终态不受该间隔影响。 */
   streamUpdateIntervalMs?: number;
   temperature?: number;
+  /** 当前里程碑开放只读页面工具；Manager 硬性限制一轮最多执行一次。 */
+  tools?: GenerationToolDefinition[];
+  executeTool?: GenerationToolExecutor;
 }
 
 interface ActiveTurn {
@@ -47,11 +55,17 @@ interface ActiveTurn {
   terminalEmitted: boolean;
   updatePending: boolean;
   updateTimer?: ReturnType<typeof setTimeout>;
+  pendingToolCall?: GenerationToolCall;
+  usage?: GenerationUsage;
 }
 
 const ABORTED = Symbol('generation-aborted');
 const DEFAULT_MAX_OUTPUT_CHARS = 100_000;
 const DEFAULT_STREAM_UPDATE_INTERVAL_MS = 50;
+
+type StreamOutcome =
+  | { kind: 'tool'; toolCall: GenerationToolCall }
+  | { kind: 'terminal'; message: ChatMessage };
 
 export class ChatGenerationManager {
   private readonly listeners = new Set<ChatGenerationListener>();
@@ -115,6 +129,11 @@ export class ChatGenerationManager {
       createdAt: this.now(),
       status: 'streaming',
       modelIdentity: { ...target.identity },
+      reasoningActivity: {
+        status: 'running',
+        summary: '正在判断是否需要读取当前页面',
+        startedAt: this.now(),
+      },
     };
     this.publish(turn, 'start');
 
@@ -122,49 +141,119 @@ export class ChatGenerationManager {
       return this.finishCancelled(turn);
     }
 
-    let iterator: AsyncIterator<GenerationEvent> | undefined;
     try {
-      iterator = this.options.adapter
-        .stream(target, {
-          systemPrompt: this.options.systemPrompt ?? '',
-          messages: history.map(cloneMessage),
-          signal: turn.controller.signal,
-          ...(this.options.maxOutputTokens === undefined
-            ? {}
-            : { maxOutputTokens: this.options.maxOutputTokens }),
-          ...(this.options.temperature === undefined
-            ? {}
-            : { temperature: this.options.temperature }),
-        })
-        [Symbol.asyncIterator]();
+      const inputMessages = toGenerationInputMessages(history);
+      const first = await this.runGeneration(turn, target, inputMessages, this.options.tools);
+      if (first.kind === 'terminal') return first.message;
 
-      while (!turn.terminalEmitted) {
-        const result = await nextOrAbort(iterator, turn.controller.signal);
-        if (result === ABORTED) {
-          closeIterator(iterator);
-          return this.finishCancelled(turn);
-        }
-        if (result.done) {
-          return this.finishError(
-            turn,
-            new GenerationError('INVALID_RESPONSE', '模型响应提前结束，请重试。', true),
-          );
-        }
-
-        const terminal = this.consume(turn, result.value);
-        if (terminal) {
-          closeIterator(iterator);
-          return terminal;
-        }
+      const toolDefinition = this.options.tools?.find(
+        (candidate) => candidate.name === first.toolCall.name,
+      );
+      if (!toolDefinition || !this.options.executeTool) {
+        return this.finishError(
+          turn,
+          new GenerationError(
+            'INVALID_RESPONSE',
+            `模型请求了未开放的工具：${first.toolCall.name}`,
+            false,
+          ),
+        );
       }
+
+      this.beginToolActivity(turn, first.toolCall, toolDefinition);
+      const execution = await promiseOrAbort(
+        this.options.executeTool(first.toolCall, turn.controller.signal),
+        turn.controller.signal,
+      );
+      if (execution === ABORTED) return this.finishCancelled(turn);
+      if (execution.errorCode === 'CANCELLED') return this.finishCancelled(turn);
+
+      this.finishToolActivity(turn, execution);
+      const toolMessages: GenerationInputMessage[] = [
+        ...inputMessages,
+        {
+          role: 'assistant',
+          content: turn.rawContent,
+          createdAt: requireMessage(turn).createdAt,
+          finishReason: 'tool',
+          toolCalls: [first.toolCall],
+        },
+        {
+          role: 'toolResult',
+          toolCallId: first.toolCall.id,
+          toolName: first.toolCall.name,
+          content: execution.content,
+          isError: execution.isError,
+          createdAt: this.now(),
+        },
+      ];
+
+      const second = await this.runGeneration(turn, target, toolMessages);
+      if (second.kind === 'tool') {
+        return this.finishError(
+          turn,
+          new GenerationError(
+            'INVALID_RESPONSE',
+            '本轮已完成一次工具调用，不能继续调用其他工具。',
+            false,
+          ),
+        );
+      }
+      return second.message;
     } catch (error) {
       if (turn.controller.signal.aborted || isAbortError(error)) {
         return this.finishCancelled(turn);
       }
       return this.finishError(turn, error);
     }
+  }
 
-    return cloneMessage(requireMessage(turn));
+  private async runGeneration(
+    turn: ActiveTurn,
+    target: ResolvedGenerationTarget,
+    messages: GenerationInputMessage[],
+    tools?: GenerationToolDefinition[],
+  ): Promise<StreamOutcome> {
+    turn.pendingToolCall = undefined;
+    const iterator = this.options.adapter
+      .stream(target, {
+        systemPrompt: this.options.systemPrompt ?? '',
+        messages,
+        signal: turn.controller.signal,
+        ...(tools?.length ? { tools } : {}),
+        ...(this.options.maxOutputTokens === undefined
+          ? {}
+          : { maxOutputTokens: this.options.maxOutputTokens }),
+        ...(this.options.temperature === undefined
+          ? {}
+          : { temperature: this.options.temperature }),
+      })
+      [Symbol.asyncIterator]();
+
+    while (!turn.terminalEmitted) {
+      const result = await nextOrAbort(iterator, turn.controller.signal);
+      if (result === ABORTED) {
+        closeIterator(iterator);
+        return { kind: 'terminal', message: this.finishCancelled(turn) };
+      }
+      if (result.done) {
+        return {
+          kind: 'terminal',
+          message: this.finishError(
+            turn,
+            new GenerationError('INVALID_RESPONSE', '模型响应提前结束，请重试。', true),
+          ),
+        };
+      }
+
+      const outcome = this.consume(turn, result.value);
+      if (outcome) {
+        closeIterator(iterator);
+        return outcome;
+      }
+    }
+
+    return { kind: 'terminal', message: cloneMessage(requireMessage(turn)) };
   }
 
   /** requestId 必须精确匹配；重复取消同一活动轮次不会产生额外终态。 */
@@ -201,24 +290,28 @@ export class ChatGenerationManager {
     if (!this.active) this.replay = undefined;
   }
 
-  private consume(turn: ActiveTurn, event: GenerationEvent): ChatMessage | undefined {
+  private consume(turn: ActiveTurn, event: GenerationEvent): StreamOutcome | undefined {
     switch (event.type) {
       case 'start':
         return undefined;
       case 'text-delta':
         if (event.delta) {
+          this.completeReasoning(turn, '已完成问题分析');
           const remaining = this.maxOutputChars - turn.rawContent.length;
           if (event.delta.length > remaining) {
             if (remaining > 0) turn.rawContent += event.delta.slice(0, remaining);
             requireMessage(turn).content = publicContent(turn.rawContent, turn.secret, true);
             turn.controller.abort();
-            return this.finishError(
-              turn,
-              new GenerationError(
-                'OUTPUT_LIMIT_EXCEEDED',
-                `模型输出超过 ${this.maxOutputChars} 字符安全上限，已停止生成。`,
+            return {
+              kind: 'terminal',
+              message: this.finishError(
+                turn,
+                new GenerationError(
+                  'OUTPUT_LIMIT_EXCEEDED',
+                  `模型输出超过 ${this.maxOutputChars} 字符安全上限，已停止生成。`,
+                ),
               ),
-            );
+            };
           }
 
           turn.rawContent += event.delta;
@@ -226,12 +319,94 @@ export class ChatGenerationManager {
           this.queueUpdate(turn);
         }
         return undefined;
-      case 'finish':
-        if (event.reason === 'cancelled') {
-          return this.finishCancelled(turn, event.usage);
+      case 'tool-call':
+        if (turn.pendingToolCall) {
+          return {
+            kind: 'terminal',
+            message: this.finishError(
+              turn,
+              new GenerationError(
+                'INVALID_RESPONSE',
+                '模型在同一轮请求了多个工具，已停止执行。',
+                false,
+              ),
+            ),
+          };
         }
-        return this.finishCompleted(turn, event.reason, event.usage);
+        turn.pendingToolCall = { ...event.toolCall, arguments: { ...event.toolCall.arguments } };
+        this.completeReasoning(turn, '已判断需要读取当前页面');
+        return undefined;
+      case 'finish':
+        turn.usage = addUsage(turn.usage, event.usage);
+        if (event.reason === 'cancelled') {
+          return { kind: 'terminal', message: this.finishCancelled(turn, turn.usage) };
+        }
+        if (event.reason === 'tool') {
+          if (!turn.pendingToolCall) {
+            return {
+              kind: 'terminal',
+              message: this.finishError(
+                turn,
+                new GenerationError(
+                  'INVALID_RESPONSE',
+                  '模型结束于工具调用状态，但没有返回有效工具请求。',
+                  true,
+                ),
+              ),
+            };
+          }
+          return { kind: 'tool', toolCall: turn.pendingToolCall };
+        }
+        if (turn.pendingToolCall) {
+          return {
+            kind: 'terminal',
+            message: this.finishError(
+              turn,
+              new GenerationError('INVALID_RESPONSE', '模型工具调用没有正确结束。', true),
+            ),
+          };
+        }
+        this.completeReasoning(turn, '已完成问题分析');
+        return {
+          kind: 'terminal',
+          message: this.finishCompleted(turn, event.reason, turn.usage),
+        };
     }
+  }
+
+  private completeReasoning(turn: ActiveTurn, summary: string): void {
+    const activity = requireMessage(turn).reasoningActivity;
+    if (activity?.status !== 'running') return;
+    activity.status = 'completed';
+    activity.finishedAt = this.now();
+    activity.summary = summary;
+  }
+
+  private beginToolActivity(
+    turn: ActiveTurn,
+    call: GenerationToolCall,
+    definition: GenerationToolDefinition,
+  ): void {
+    requireMessage(turn).toolActivity = {
+      callId: call.id,
+      name: definition.name,
+      label: definition.label,
+      status: 'running',
+      statusText: `正在${definition.label}`,
+      startedAt: this.now(),
+    };
+    this.publish(turn, 'update');
+  }
+
+  private finishToolActivity(turn: ActiveTurn, execution: GenerationToolExecutionResult): void {
+    const activity = requireMessage(turn).toolActivity;
+    if (!activity) return;
+    activity.status = execution.isError ? 'failed' : 'succeeded';
+    activity.statusText = execution.statusText;
+    activity.finishedAt = this.now();
+    if (execution.detail) activity.detail = execution.detail;
+    if (execution.errorCode) activity.errorCode = execution.errorCode;
+    this.publish(turn, 'update');
   }
 
   private finishCompleted(
@@ -249,6 +424,17 @@ export class ChatGenerationManager {
 
   private finishCancelled(turn: ActiveTurn, usage?: GenerationUsage): ChatMessage {
     const message = requireMessage(turn);
+    if (message.reasoningActivity?.status === 'running') {
+      message.reasoningActivity.status = 'cancelled';
+      message.reasoningActivity.summary = '已停止问题分析';
+      message.reasoningActivity.finishedAt = this.now();
+    }
+    if (message.toolActivity?.status === 'running') {
+      message.toolActivity.status = 'cancelled';
+      message.toolActivity.statusText = `已停止${message.toolActivity.label}`;
+      message.toolActivity.errorCode = 'CANCELLED';
+      message.toolActivity.finishedAt = this.now();
+    }
     message.content = publicContent(turn.rawContent, turn.secret, true);
     message.status = 'cancelled';
     message.finishReason = 'cancelled';
@@ -259,6 +445,16 @@ export class ChatGenerationManager {
   private finishError(turn: ActiveTurn, error: unknown): ChatMessage {
     const message = requireMessage(turn);
     const safeError = sanitizeGenerationError(error, turn.secret);
+    if (message.reasoningActivity?.status === 'running') {
+      message.reasoningActivity.status = 'error';
+      message.reasoningActivity.summary = '问题分析未完成';
+      message.reasoningActivity.finishedAt = this.now();
+    }
+    if (message.toolActivity?.status === 'running') {
+      message.toolActivity.status = 'failed';
+      message.toolActivity.statusText = `${message.toolActivity.label}时发生错误`;
+      message.toolActivity.finishedAt = this.now();
+    }
     message.content = publicContent(turn.rawContent, turn.secret, true);
     message.status = 'error';
     message.error = true;
@@ -372,6 +568,8 @@ function cloneMessage(message: ChatMessage): ChatMessage {
     ...message,
     ...(message.modelIdentity ? { modelIdentity: { ...message.modelIdentity } } : {}),
     ...(message.usage ? { usage: { ...message.usage } } : {}),
+    ...(message.reasoningActivity ? { reasoningActivity: { ...message.reasoningActivity } } : {}),
+    ...(message.toolActivity ? { toolActivity: { ...message.toolActivity } } : {}),
   };
 }
 
@@ -417,6 +615,58 @@ async function nextOrAbort<T>(
   } finally {
     if (onAbort) signal.removeEventListener('abort', onAbort);
   }
+}
+
+async function promiseOrAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): Promise<T | typeof ABORTED> {
+  if (signal.aborted) return ABORTED;
+
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<typeof ABORTED>((resolve) => {
+    onAbort = () => resolve(ABORTED);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
+}
+
+function toGenerationInputMessages(history: ChatMessage[]): GenerationInputMessage[] {
+  return history.flatMap<GenerationInputMessage>((message) => {
+    const content = message.content.trim();
+    if (!content) return [];
+
+    if (message.role === 'user') {
+      return [{ role: 'user', content, createdAt: message.createdAt }];
+    }
+    if (message.error || message.status === 'error' || message.status === 'streaming') return [];
+
+    return [
+      {
+        role: 'assistant',
+        content,
+        createdAt: message.createdAt,
+        ...(message.finishReason ? { finishReason: message.finishReason } : {}),
+      },
+    ];
+  });
+}
+
+function addUsage(current: GenerationUsage | undefined, next: GenerationUsage): GenerationUsage {
+  if (!current) return { ...next };
+  return {
+    inputTokens: current.inputTokens + next.inputTokens,
+    outputTokens: current.outputTokens + next.outputTokens,
+    cacheReadTokens: current.cacheReadTokens + next.cacheReadTokens,
+    cacheWriteTokens: current.cacheWriteTokens + next.cacheWriteTokens,
+    totalTokens: current.totalTokens + next.totalTokens,
+    cost: current.cost + next.cost,
+  };
 }
 
 function closeIterator<T>(iterator: AsyncIterator<T>): void {

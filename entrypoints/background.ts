@@ -1,3 +1,4 @@
+import { captureCurrentPageStructure } from '@/lib/diagnostics/page-structure';
 import { recorder } from '@/lib/diagnostics/recorder';
 import { redact } from '@/lib/diagnostics/redaction';
 import { buildDiagnosticsReport, diagnosticsFileName } from '@/lib/diagnostics/report';
@@ -18,11 +19,15 @@ import { CHAT_SYSTEM } from '@/lib/llm/prompts';
 import { orchestrator } from '@/lib/pipeline/orchestrator';
 import { ProviderService } from '@/lib/providers/service';
 import { createTrustedStorageGate } from '@/lib/storage/access';
+import { READ_CURRENT_JOB_TOOL, readCurrentJob } from '@/lib/tools/read-current-job';
+import { READ_VISIBLE_JOBS_TOOL, readVisibleJobs } from '@/lib/tools/read-visible-jobs';
 
 interface ActiveDiagnostic {
   requestId: string;
   messageCount: number;
   promptChars: number;
+  /** 本轮发送的完整消息（含 system prompt），供诊断日志记录原文。 */
+  messages: Array<{ role: string; content: string }>;
   startedAt: number;
   targetResolved: boolean;
 }
@@ -43,12 +48,22 @@ export default defineBackground({
       adapter: createPiGenerationAdapter(),
       systemPrompt: CHAT_SYSTEM,
       maxOutputTokens: 8_192,
+      tools: [READ_CURRENT_JOB_TOOL, READ_VISIBLE_JOBS_TOOL],
+      executeTool: async (call, signal) => {
+        recorder.step('chat', 'tool', `模型调用 ${call.name}`);
+        const result =
+          call.name === READ_VISIBLE_JOBS_TOOL.name
+            ? await readVisibleJobs(signal)
+            : await readCurrentJob(signal);
+        recorder.step('chat', result.isError ? 'error' : 'tool', result.statusText, result.detail);
+        return result;
+      },
       resolveTarget: async () => {
         await requireTrustedStorage();
         const target = await resolveActiveGenerationTarget();
         if (activeDiagnostic && !activeDiagnostic.targetResolved) {
           activeDiagnostic.targetResolved = true;
-          recorder.beginRun(latestUserText(activeDiagnostic.requestId), {
+          recorder.beginRun('chat', latestUserText(activeDiagnostic.requestId), {
             model: target.identity.modelId,
             baseUrl: target.baseUrl,
           });
@@ -201,6 +216,10 @@ export default defineBackground({
         promptChars:
           CHAT_SYSTEM.length +
           history.reduce((total, message) => total + message.content.length, 0),
+        messages: [
+          { role: 'system', content: CHAT_SYSTEM },
+          ...history.map((message) => ({ role: message.role, content: message.content })),
+        ],
         startedAt: Date.now(),
         targetResolved: false,
       };
@@ -227,30 +246,34 @@ export default defineBackground({
       if (!diagnostic || diagnostic.requestId !== event.requestId) return;
 
       const usage = event.message.usage;
-      recorder.logLlm({
+      recorder.logLlm('chat', {
         model: event.message.modelIdentity?.modelId ?? 'unknown',
+        purpose: '对话',
         messageCount: diagnostic.messageCount,
         promptChars: diagnostic.promptChars,
         outputChars: event.message.content.length,
+        messages: diagnostic.messages,
+        outputText: event.message.content,
         promptTokens: usage?.inputTokens,
         completionTokens: usage?.outputTokens,
         latencyMs: Date.now() - diagnostic.startedAt,
       });
 
       if (event.type === 'error') {
-        recorder.logError(event.message.errorMessage ?? '模型请求失败。');
-        recorder.finishRun('error');
+        recorder.logError('chat', event.message.errorMessage ?? '模型请求失败。');
+        recorder.finishRun('chat', 'error');
       } else if (event.message.status === 'cancelled') {
-        recorder.step('note', '用户停止了本轮生成。');
-        recorder.finishRun('cancelled');
+        recorder.step('chat', 'note', '用户停止了本轮生成。');
+        recorder.finishRun('chat', 'cancelled');
       } else {
-        recorder.finishRun('completed');
+        recorder.finishRun('chat', 'completed');
       }
       activeDiagnostic = null;
     }
 
     async function downloadDiagnostics(): Promise<void> {
-      const markdown = buildDiagnosticsReport(recorder.snapshotRuns());
+      const pageStructure = await captureCurrentPageStructure();
+      const markdown = buildDiagnosticsReport(recorder.snapshotRuns(), pageStructure);
       const dataUrl = `data:text/markdown;charset=utf-8;base64,${base64EncodeUtf8(markdown)}`;
       await chrome.downloads.download({
         url: dataUrl,

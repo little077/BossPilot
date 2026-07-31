@@ -24,7 +24,7 @@ export type ClientMessage =
   | { type: 'clear_chat' }
   /** 验证码已手动通过，请求继续。 */
   | { type: 'resume_captcha' }
-  /** 下载执行日志（诊断记录，经 chrome.downloads 落盘）。 */
+  /** 下载执行日志与当前 Boss 页面结构诊断（经 chrome.downloads 落盘）。 */
   | { type: 'download_diagnostics' }
   /** 仅解析自然语言、不执行，用于「先确认参数再跑」。 */
   | { type: 'parse_only'; text: string };

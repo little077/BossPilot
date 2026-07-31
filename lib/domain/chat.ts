@@ -2,7 +2,7 @@
 // 侧边栏与用户之间的多轮对话消息。持久化到 IndexedDB（lib/storage/db.ts），
 // 冷启动可回放；发送给模型时映射为 { role, content }。
 
-import type { ModelIdentity } from '@/lib/domain/types';
+import type { ModelIdentity, ReasoningActivity, ToolActivity } from '@/lib/domain/types';
 
 export interface GenerationUsage {
   inputTokens: number;
@@ -49,6 +49,10 @@ export interface ChatMessage {
   modelIdentity?: ModelIdentity;
   finishReason?: GenerationFinishReason;
   usage?: GenerationUsage;
+  /** 原型中的「思考过程」只展示安全阶段摘要，不保存或展示模型私有推理。 */
+  reasoningActivity?: ReasoningActivity;
+  /** 本轮最多一个只读工具；状态随消息快照一起回放，断线后不会留下幽灵任务。 */
+  toolActivity?: ToolActivity;
 }
 
 /** 生成一条消息（补齐 id/createdAt）。 */

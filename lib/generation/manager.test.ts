@@ -5,6 +5,9 @@ import { type ChatGenerationEvent, ChatGenerationManager } from '@/lib/generatio
 import type {
   GenerationAdapter,
   GenerationEvent,
+  GenerationRequest,
+  GenerationToolDefinition,
+  GenerationToolExecutor,
   ResolvedGenerationTarget,
 } from '@/lib/generation/types';
 
@@ -25,6 +28,17 @@ const HISTORY: ChatMessage[] = [
     createdAt: 10,
   },
 ];
+
+const READ_JOB_TOOL: GenerationToolDefinition = {
+  name: 'read_current_job',
+  label: '读取当前岗位',
+  description: '读取当前岗位',
+  parameters: {
+    type: 'object',
+    properties: {},
+    additionalProperties: false,
+  },
+};
 
 function target(
   providerId = 'openai',
@@ -53,7 +67,12 @@ function createManager(
   adapter: GenerationAdapter,
   resolveTarget: () => ResolvedGenerationTarget | Promise<ResolvedGenerationTarget> = () =>
     target(),
-  runtimeOptions: { maxOutputChars?: number; streamUpdateIntervalMs?: number } = {},
+  runtimeOptions: {
+    maxOutputChars?: number;
+    streamUpdateIntervalMs?: number;
+    tools?: GenerationToolDefinition[];
+    executeTool?: GenerationToolExecutor;
+  } = {},
 ) {
   return new ChatGenerationManager({
     adapter,
@@ -90,7 +109,7 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 
 describe('ChatGenerationManager', () => {
   it('emits complete immutable snapshots for a normal streaming round', async () => {
-    const seenHistory: ChatMessage[][] = [];
+    const seenHistory: GenerationRequest['messages'][] = [];
     const adapter: GenerationAdapter = {
       async *stream(_target, request) {
         seenHistory.push(request.messages);
@@ -127,6 +146,290 @@ describe('ChatGenerationManager', () => {
     expect(terminalEvent).toBeDefined();
     if (terminalEvent) terminalEvent.message.content = '被订阅方篡改';
     expect(manager.getSnapshot()?.message.content).toBe('你好');
+  });
+
+  it('executes exactly one tool and continues with a second model request', async () => {
+    const requests: GenerationRequest[] = [];
+    const executeTool = vi.fn<GenerationToolExecutor>().mockResolvedValue({
+      isError: false,
+      statusText: '已读取当前岗位',
+      detail: '岗位描述 1200 字',
+      content: '<untrusted_job_page_data>{"description":"React"}</untrusted_job_page_data>',
+    });
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        requests.push(request);
+        if (requests.length === 1) {
+          yield {
+            type: 'tool-call',
+            toolCall: { id: 'call-1', name: 'read_current_job', arguments: {} },
+          };
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'text-delta', delta: '这个岗位要求熟悉 React。' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool,
+    });
+    const events = collect(manager);
+
+    const result = await manager.start('request-tool', HISTORY);
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.tools).toEqual([READ_JOB_TOOL]);
+    expect(requests[1]?.tools).toBeUndefined();
+    expect(requests[1]?.messages).toContainEqual({
+      role: 'assistant',
+      content: '',
+      createdAt: 20,
+      finishReason: 'tool',
+      toolCalls: [{ id: 'call-1', name: 'read_current_job', arguments: {} }],
+    });
+    expect(requests[1]?.messages).toContainEqual(
+      expect.objectContaining({
+        role: 'toolResult',
+        toolCallId: 'call-1',
+        toolName: 'read_current_job',
+        isError: false,
+      }),
+    );
+    expect(executeTool).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      content: '这个岗位要求熟悉 React。',
+      status: 'completed',
+      finishReason: 'stop',
+      usage: {
+        inputTokens: 8,
+        outputTokens: 4,
+        totalTokens: 12,
+        cost: 0.002,
+      },
+      reasoningActivity: {
+        status: 'completed',
+        summary: '已判断需要读取当前页面',
+      },
+      toolActivity: {
+        name: 'read_current_job',
+        status: 'succeeded',
+        statusText: '已读取当前岗位',
+      },
+    });
+    expect(events.some(({ message }) => message.toolActivity?.status === 'running')).toBe(true);
+    expect(events.some(({ message }) => message.toolActivity?.status === 'succeeded')).toBe(true);
+  });
+
+  it('lets the model explain a deterministic tool failure without inventing page data', async () => {
+    let requestCount = 0;
+    const adapter: GenerationAdapter = {
+      async *stream() {
+        requestCount += 1;
+        if (requestCount === 1) {
+          yield {
+            type: 'tool-call',
+            toolCall: { id: 'call-1', name: 'read_current_job', arguments: {} },
+          };
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'text-delta', delta: '请先打开一个 Boss 直聘岗位详情页。' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool: async () => ({
+        isError: true,
+        errorCode: 'NOT_ON_JOB_PAGE',
+        statusText: '当前不是岗位详情页',
+        content: '工具读取失败（NOT_ON_JOB_PAGE）',
+      }),
+    });
+
+    await expect(manager.start('request-tool-error', HISTORY)).resolves.toMatchObject({
+      content: '请先打开一个 Boss 直聘岗位详情页。',
+      status: 'completed',
+      toolActivity: {
+        status: 'failed',
+        errorCode: 'NOT_ON_JOB_PAGE',
+      },
+    });
+    expect(requestCount).toBe(2);
+  });
+
+  it('treats an executor cancellation result as the only terminal state', async () => {
+    const adapter = adapterFrom(async function* () {
+      yield {
+        type: 'tool-call',
+        toolCall: { id: 'call-1', name: 'read_current_job', arguments: {} },
+      };
+      yield { type: 'finish', reason: 'tool', usage: USAGE };
+    });
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool: async () => ({
+        isError: true,
+        errorCode: 'CANCELLED',
+        statusText: '已停止读取当前岗位',
+        content: '用户取消了读取',
+      }),
+    });
+
+    await expect(manager.start('request-tool-cancelled-result', HISTORY)).resolves.toMatchObject({
+      status: 'cancelled',
+      finishReason: 'cancelled',
+    });
+  });
+
+  it('cancels during page reading and ignores the late tool result', async () => {
+    const toolResult = deferred<{
+      isError: false;
+      statusText: string;
+      content: string;
+    }>();
+    const adapter: GenerationAdapter = {
+      async *stream() {
+        yield {
+          type: 'tool-call',
+          toolCall: { id: 'call-1', name: 'read_current_job', arguments: {} },
+        };
+        yield { type: 'finish', reason: 'tool', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool: () => toolResult.promise,
+    });
+    const resultPromise = manager.start('request-tool-cancel', HISTORY);
+
+    await waitFor(() => manager.getSnapshot()?.message.toolActivity?.status === 'running');
+    expect(manager.stop('request-tool-cancel')).toBe(true);
+    await expect(resultPromise).resolves.toMatchObject({
+      status: 'cancelled',
+      toolActivity: {
+        status: 'cancelled',
+        errorCode: 'CANCELLED',
+      },
+    });
+
+    toolResult.resolve({ isError: false, statusText: '晚到结果', content: 'late' });
+    await Promise.resolve();
+    expect(manager.getSnapshot()?.message.toolActivity?.status).toBe('cancelled');
+  });
+
+  it('rejects a second tool request after the one-call budget is consumed', async () => {
+    let requestCount = 0;
+    const adapter: GenerationAdapter = {
+      async *stream() {
+        requestCount += 1;
+        yield {
+          type: 'tool-call',
+          toolCall: {
+            id: `call-${requestCount}`,
+            name: 'read_current_job',
+            arguments: {},
+          },
+        };
+        yield { type: 'finish', reason: 'tool', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool: async () => ({
+        isError: false,
+        statusText: '已读取当前岗位',
+        content: '岗位资料',
+      }),
+    });
+
+    await expect(manager.start('request-second-tool', HISTORY)).resolves.toMatchObject({
+      status: 'error',
+      errorCode: 'INVALID_RESPONSE',
+      errorMessage: expect.stringContaining('不能继续调用'),
+    });
+    expect(requestCount).toBe(2);
+  });
+
+  it('rejects malformed tool termination sequences', async () => {
+    const missingCall = adapterFrom(async function* () {
+      yield { type: 'finish', reason: 'tool', usage: USAGE };
+    });
+    const missingCallManager = createManager(missingCall, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool: async () => ({
+        isError: false,
+        statusText: 'unused',
+        content: 'unused',
+      }),
+    });
+    await expect(missingCallManager.start('request-missing-call', HISTORY)).resolves.toMatchObject({
+      status: 'error',
+      errorCode: 'INVALID_RESPONSE',
+    });
+
+    const unfinishedCall = adapterFrom(async function* () {
+      yield {
+        type: 'tool-call',
+        toolCall: { id: 'call-1', name: 'read_current_job', arguments: {} },
+      };
+      yield { type: 'finish', reason: 'stop', usage: USAGE };
+    });
+    const unfinishedCallManager = createManager(unfinishedCall, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool: async () => ({
+        isError: false,
+        statusText: 'unused',
+        content: 'unused',
+      }),
+    });
+    await expect(
+      unfinishedCallManager.start('request-unfinished-call', HISTORY),
+    ).resolves.toMatchObject({
+      status: 'error',
+      errorCode: 'INVALID_RESPONSE',
+    });
+  });
+
+  it('rejects unknown or repeated tool calls without executing them', async () => {
+    const executeTool = vi.fn<GenerationToolExecutor>();
+    const unknown = adapterFrom(async function* () {
+      yield {
+        type: 'tool-call',
+        toolCall: { id: 'call-1', name: 'search_jobs', arguments: {} },
+      };
+      yield { type: 'finish', reason: 'tool', usage: USAGE };
+    });
+    const unknownManager = createManager(unknown, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool,
+    });
+    await expect(unknownManager.start('request-unknown', HISTORY)).resolves.toMatchObject({
+      status: 'error',
+      errorCode: 'INVALID_RESPONSE',
+    });
+
+    const repeated = adapterFrom(async function* () {
+      yield {
+        type: 'tool-call',
+        toolCall: { id: 'call-1', name: 'read_current_job', arguments: {} },
+      };
+      yield {
+        type: 'tool-call',
+        toolCall: { id: 'call-2', name: 'read_current_job', arguments: {} },
+      };
+    });
+    const repeatedManager = createManager(repeated, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool,
+    });
+    await expect(repeatedManager.start('request-repeat', HISTORY)).resolves.toMatchObject({
+      status: 'error',
+      errorCode: 'INVALID_RESPONSE',
+    });
+    expect(executeTool).not.toHaveBeenCalled();
   });
 
   it('rejects a concurrent round with BUSY while preserving the first round', async () => {
