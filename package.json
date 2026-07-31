@@ -2,7 +2,7 @@
   "name": "bosspilot",
   "description": "BossPilot — 面向 Boss 直聘的定制化 AI 求职副驾浏览器扩展（BYOK / 本地优先 / 开源）",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "type": "module",
   "keywords": [
