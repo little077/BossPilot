@@ -148,6 +148,49 @@ export interface ProviderStateView {
   activeModel?: ModelIdentity;
 }
 
+/** 一轮用户消息固定绑定的标签页；完整 URL 只在扩展本地用于防止读错页面。 */
+export interface PageTurnSnapshot {
+  tabId: number;
+  windowId: number;
+  url: string;
+  safeUrl: string;
+  origin: string;
+  title: string;
+  scheme: string;
+  isHttp: boolean;
+  isBoss: boolean;
+  capturedAt: number;
+}
+
+export type PageExtractionMode = 'selection' | 'article' | 'main' | 'body-fallback';
+
+/** 固定页面脚本返回的纯文本结果；任何网页 HTML 都不得跨越该边界。 */
+export interface PageScriptExtraction {
+  version: 1;
+  executionUrl: string;
+  title: string;
+  language: string;
+  mode: PageExtractionMode;
+  text: string;
+  originalChars: number;
+  returnedChars: number;
+  truncated: boolean;
+  scannedElements: number;
+  untrusted: true;
+}
+
+export type PageReadErrorCode =
+  | 'permission_denied'
+  | 'permission_required'
+  | 'unsupported_scheme'
+  | 'page_changed'
+  | 'script_injection_failed'
+  | 'invalid_page_result'
+  | 'empty_page'
+  | 'read_timeout'
+  | 'cancelled'
+  | 'unknown_read_error';
+
 /** 单轮对话里可见的安全思考状态；只描述阶段，不暴露模型内部推理原文。 */
 export interface ReasoningActivity {
   status: 'running' | 'completed' | 'cancelled' | 'error';
@@ -156,18 +199,28 @@ export interface ReasoningActivity {
   finishedAt?: number;
 }
 
-/** 一次只读领域工具的 UI/IPC 快照，不携带抓取到的岗位原文。 */
-export type DomainToolName = 'read_current_job' | 'read_visible_jobs';
+/** 一次只读工具的 UI/IPC 快照，不携带抓取到的网页原文。 */
+export type DomainToolName = 'read_current_page' | 'read_current_job' | 'read_visible_jobs';
 
 export interface ToolActivity {
+  /** 所属生成轮次，用于权限等待卡片把用户决定精确路由回 Background。 */
+  requestId?: string;
   callId: string;
   name: DomainToolName;
   label: string;
-  status: 'running' | 'succeeded' | 'failed' | 'cancelled';
+  status: 'waiting_permission' | 'running' | 'succeeded' | 'failed' | 'cancelled';
   statusText: string;
   startedAt: number;
   finishedAt?: number;
   detail?: string;
+  sourceOrigin?: string;
+  sourceTitle?: string;
+  sourceUrl?: string;
+  permissionPattern?: string;
+  extractionMode?: PageExtractionMode;
+  returnedChars?: number;
+  truncated?: boolean;
+  enrichmentStatus?: 'success' | 'failed' | 'not_applicable';
   errorCode?:
     | 'NOT_ON_JOB_PAGE'
     | 'NO_JOB_SELECTED'
@@ -176,7 +229,8 @@ export interface ToolActivity {
     | 'SELECTOR_MISS'
     | 'NO_PERMISSION'
     | 'EXTRACTION_FAILED'
-    | 'CANCELLED';
+    | 'CANCELLED'
+    | PageReadErrorCode;
 }
 
 /** 当前网页结构诊断中的单个选择器命中结果。 */

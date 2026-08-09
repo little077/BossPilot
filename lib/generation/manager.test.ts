@@ -1,11 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ChatMessage, GenerationUsage } from '@/lib/domain/chat';
 import { GenerationError } from '@/lib/generation/errors';
-import { type ChatGenerationEvent, ChatGenerationManager } from '@/lib/generation/manager';
+import {
+  type ChatGenerationEvent,
+  ChatGenerationManager,
+  type DeferredGenerationTurn,
+} from '@/lib/generation/manager';
 import type {
   GenerationAdapter,
   GenerationEvent,
   GenerationRequest,
+  GenerationToolDeferredResult,
   GenerationToolDefinition,
   GenerationToolExecutor,
   ResolvedGenerationTarget,
@@ -72,6 +77,10 @@ function createManager(
     streamUpdateIntervalMs?: number;
     tools?: GenerationToolDefinition[];
     executeTool?: GenerationToolExecutor;
+    onToolDeferred?: (
+      turn: DeferredGenerationTurn,
+      result: GenerationToolDeferredResult,
+    ) => void | Promise<void>;
   } = {},
 ) {
   return new ChatGenerationManager({
@@ -747,5 +756,199 @@ describe('ChatGenerationManager', () => {
     expect(events.at(-1)?.message.content).toBe('abcde');
     expect(upstreamSignal?.aborted).toBe(true);
     expect(iteratorClosed).toBe(true);
+  });
+
+  it('persists a permission wait and resumes the same tool call without replaying phase one', async () => {
+    const requests: GenerationRequest[] = [];
+    let deferredTurn: DeferredGenerationTurn | undefined;
+    const executeTool = vi
+      .fn<GenerationToolExecutor>()
+      .mockResolvedValueOnce({
+        deferred: true,
+        statusText: '等待网站读取权限',
+        detail: '需要读取 example.com',
+        permissionPattern: 'https://example.com/*',
+        sourceOrigin: 'https://example.com',
+        sourceTitle: 'Example',
+      })
+      .mockResolvedValueOnce({
+        isError: false,
+        statusText: '已读取当前页面',
+        content: '安全页面正文',
+        sourceOrigin: 'https://example.com',
+        sourceTitle: 'Example',
+      });
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        requests.push(request);
+        if (requests.length === 1) {
+          yield {
+            type: 'tool-call',
+            toolCall: { id: 'call-1', name: 'read_current_job', arguments: {} },
+          };
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'text-delta', delta: '这是当前页面摘要。' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool,
+      onToolDeferred: (turn) => {
+        deferredTurn = turn;
+      },
+    });
+    const events = collect(manager);
+
+    await expect(manager.start('request-permission', HISTORY)).resolves.toMatchObject({
+      status: 'streaming',
+      toolActivity: {
+        requestId: 'request-permission',
+        status: 'waiting_permission',
+        permissionPattern: 'https://example.com/*',
+      },
+    });
+    expect(manager.isRunning).toBe(false);
+    expect(requests).toHaveLength(1);
+    expect(deferredTurn).toBeDefined();
+    if (!deferredTurn) throw new Error('deferred turn was not persisted');
+
+    await expect(manager.resumeDeferred(deferredTurn, HISTORY)).resolves.toMatchObject({
+      status: 'completed',
+      content: '这是当前页面摘要。',
+      toolActivity: { status: 'succeeded', sourceOrigin: 'https://example.com' },
+    });
+    expect(requests).toHaveLength(2);
+    expect(executeTool).toHaveBeenCalledTimes(2);
+    expect(events.filter(({ type }) => type === 'start')).toHaveLength(1);
+  });
+
+  it('fails a resumed turn if the selected model changed while waiting', async () => {
+    let selected = target();
+    let deferredTurn: DeferredGenerationTurn | undefined;
+    const adapter = adapterFrom(async function* () {
+      yield {
+        type: 'tool-call',
+        toolCall: { id: 'call-1', name: 'read_current_job', arguments: {} },
+      };
+      yield { type: 'finish', reason: 'tool', usage: USAGE };
+    });
+    const manager = createManager(adapter, () => selected, {
+      tools: [READ_JOB_TOOL],
+      executeTool: async () => ({
+        deferred: true,
+        statusText: '等待权限',
+        detail: '需要权限',
+        permissionPattern: 'https://example.com/*',
+        sourceOrigin: 'https://example.com',
+        sourceTitle: 'Example',
+      }),
+      onToolDeferred: (turn) => {
+        deferredTurn = turn;
+      },
+    });
+    await manager.start('request-model-switch', HISTORY);
+    selected = target('anthropic', 'claude-next');
+    if (!deferredTurn) throw new Error('deferred turn was not persisted');
+
+    await expect(manager.resumeDeferred(deferredTurn, HISTORY)).resolves.toMatchObject({
+      status: 'error',
+      errorCode: 'INVALID_RESPONSE',
+      errorMessage: expect.stringContaining('活动模型已变化'),
+    });
+  });
+
+  it('can terminate a durable permission wait exactly once', async () => {
+    const state: DeferredGenerationTurn = {
+      version: 1,
+      requestId: 'request-deferred',
+      message: {
+        id: 'assistant-deferred',
+        role: 'assistant',
+        content: '',
+        createdAt: 1,
+        status: 'streaming',
+        toolActivity: {
+          requestId: 'request-deferred',
+          callId: 'call-1',
+          name: 'read_current_job',
+          label: '读取当前岗位',
+          status: 'waiting_permission',
+          statusText: '等待权限',
+          startedAt: 1,
+        },
+      },
+      rawContent: '',
+      toolCall: { id: 'call-1', name: 'read_current_job', arguments: {} },
+      targetIdentity: { providerId: 'openai', modelId: 'gpt-test' },
+      deferredAt: 1,
+    };
+    const manager = createManager(adapterFrom(async function* () {}));
+    const events = collect(manager);
+
+    expect(manager.cancelDeferred(state)).toMatchObject({ status: 'cancelled' });
+    expect(events.at(-1)?.type).toBe('end');
+    expect(
+      manager.failDeferred(state, new GenerationError('INVALID_RESPONSE', '恢复失败')),
+    ).toMatchObject({ status: 'error', errorMessage: '恢复失败' });
+    expect(events.at(-1)?.type).toBe('error');
+  });
+
+  it('turns a second permission deferral during resume into a deterministic tool failure', async () => {
+    const state: DeferredGenerationTurn = {
+      version: 1,
+      requestId: 'request-deferred-again',
+      message: {
+        id: 'assistant-deferred-again',
+        role: 'assistant',
+        content: '',
+        createdAt: 1,
+        status: 'streaming',
+        toolActivity: {
+          requestId: 'request-deferred-again',
+          callId: 'call-1',
+          name: 'read_current_job',
+          label: '读取当前岗位',
+          status: 'waiting_permission',
+          statusText: '等待权限',
+          startedAt: 1,
+          sourceOrigin: 'https://example.com',
+        },
+      },
+      rawContent: '',
+      toolCall: { id: 'call-1', name: 'read_current_job', arguments: {} },
+      targetIdentity: { providerId: 'openai', modelId: 'gpt-test' },
+      deferredAt: 1,
+    };
+    let secondRequest: GenerationRequest | undefined;
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        secondRequest = request;
+        yield { type: 'text-delta', delta: '没有获得页面权限。' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, async () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool: async () => ({
+        deferred: true,
+        statusText: '仍在等待权限',
+        detail: '权限仍不可用',
+        permissionPattern: 'https://example.com/*',
+        sourceOrigin: 'https://example.com',
+        sourceTitle: 'Example',
+      }),
+    });
+
+    await expect(manager.resumeDeferred(state, HISTORY)).resolves.toMatchObject({
+      status: 'completed',
+      content: '没有获得页面权限。',
+      toolActivity: { status: 'failed', errorCode: 'permission_denied' },
+    });
+    expect(secondRequest?.messages).toContainEqual(
+      expect.objectContaining({ role: 'toolResult', isError: true }),
+    );
   });
 });

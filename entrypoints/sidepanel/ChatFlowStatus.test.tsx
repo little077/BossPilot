@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChatMessage } from '@/lib/domain/chat';
 import { ChatFlowStatus } from './ChatFlowStatus';
@@ -138,5 +138,89 @@ describe('ChatFlowStatus', () => {
     expect(screen.queryByText('岗位描述 1200 字')).not.toBeInTheDocument();
     fireEvent.click(toggle);
     expect(screen.getByText('岗位描述 1200 字')).toBeVisible();
+  });
+
+  it('shows an exact-origin permission card and forwards the user decision', async () => {
+    const resolvePermission = vi.fn().mockResolvedValue(true);
+    render(
+      <ChatFlowStatus
+        message={{
+          ...BASE_MESSAGE,
+          toolActivity: {
+            requestId: 'request-1',
+            callId: 'call-1',
+            name: 'read_current_page',
+            label: '读取当前页面',
+            status: 'waiting_permission',
+            statusText: '等待网站读取权限',
+            startedAt: 1_000,
+            sourceOrigin: 'https://example.com',
+            permissionPattern: 'https://example.com/*',
+          },
+        }}
+        onResolvePagePermission={resolvePermission}
+      />,
+    );
+
+    expect(screen.getByRole('region', { name: '页面读取权限' })).toHaveTextContent(
+      'https://example.com',
+    );
+    fireEvent.click(screen.getByRole('button', { name: '允许读取' }));
+    await waitFor(() =>
+      expect(resolvePermission).toHaveBeenCalledWith('request-1', 'https://example.com/*', true),
+    );
+  });
+
+  it('shows a retryable connection error when a permission decision cannot be sent', async () => {
+    const resolvePermission = vi.fn().mockResolvedValue(false);
+    render(
+      <ChatFlowStatus
+        message={{
+          ...BASE_MESSAGE,
+          toolActivity: {
+            requestId: 'request-1',
+            callId: 'call-1',
+            name: 'read_current_page',
+            label: '读取当前页面',
+            status: 'waiting_permission',
+            statusText: '等待网站读取权限',
+            startedAt: 1_000,
+            permissionPattern: 'https://example.com/*',
+          },
+        }}
+        onResolvePagePermission={resolvePermission}
+      />,
+    );
+
+    expect(screen.getByText('当前网站')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '不允许' }));
+    expect(await screen.findByText('侧边栏连接不可用，请稍后重试。')).toBeVisible();
+    expect(resolvePermission).toHaveBeenCalledWith('request-1', 'https://example.com/*', false);
+  });
+
+  it('shows the successful page source without exposing page text', () => {
+    render(
+      <ChatFlowStatus
+        message={{
+          ...BASE_MESSAGE,
+          toolActivity: {
+            callId: 'call-1',
+            name: 'read_current_page',
+            label: '读取当前页面',
+            status: 'succeeded',
+            statusText: '已读取当前页面',
+            startedAt: 1_000,
+            finishedAt: 1_800,
+            sourceOrigin: 'https://example.com',
+            sourceTitle: 'Example docs',
+            sourceUrl: 'https://example.com/docs',
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText('基于当前页面 · Example docs')).toHaveAttribute(
+      'title',
+      'https://example.com/docs',
+    );
   });
 });

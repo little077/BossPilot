@@ -6,6 +6,7 @@ describe('IPC runtime validation', () => {
     const valid = {
       type: 'chat',
       requestId: 'request-1',
+      conversationId: 'conversation-1',
       messages: [
         {
           id: 'message-1',
@@ -18,6 +19,7 @@ describe('IPC runtime validation', () => {
 
     expect(isClientMessage(valid)).toBe(true);
     expect(isClientMessage({ ...valid, requestId: '' })).toBe(false);
+    expect(isClientMessage({ ...valid, conversationId: '' })).toBe(false);
     expect(
       isClientMessage({
         ...valid,
@@ -51,6 +53,22 @@ describe('IPC runtime validation', () => {
     expect(isClientMessage([])).toBe(false);
   });
 
+  it('validates durable page-permission decisions with the same bounded history rules', () => {
+    const valid = {
+      type: 'page_permission_result',
+      requestId: 'request-1',
+      granted: true,
+      messages: [
+        { id: 'user-1', role: 'user', content: '总结当前页', createdAt: 1 },
+        { id: 'assistant-1', role: 'assistant', content: '', createdAt: 2 },
+      ],
+    };
+    expect(isClientMessage(valid)).toBe(true);
+    expect(isClientMessage({ ...valid, granted: 'yes' })).toBe(false);
+    expect(isClientMessage({ ...valid, messages: [] })).toBe(false);
+    expect(isClientMessage({ ...valid, requestId: '' })).toBe(false);
+  });
+
   it('enforces chat count, total size, identifiers, roles, and timestamps', () => {
     const message = {
       id: 'message-1',
@@ -58,7 +76,12 @@ describe('IPC runtime validation', () => {
       content: 'x',
       createdAt: 1,
     };
-    const chat = { type: 'chat', requestId: 'request-1', messages: [message] };
+    const chat = {
+      type: 'chat',
+      requestId: 'request-1',
+      conversationId: 'conversation-1',
+      messages: [message],
+    };
 
     expect(isClientMessage(chat)).toBe(true);
     expect(isClientMessage({ ...chat, messages: [] })).toBe(false);
@@ -81,6 +104,18 @@ describe('IPC runtime validation', () => {
       false,
     );
     expect(isClientMessage({ ...chat, messages: [{ ...message, createdAt: '1' }] })).toBe(false);
+  });
+
+  it('validates optional conversation-title requests with bounded chat history', () => {
+    const request = {
+      type: 'summarize_conversation',
+      requestId: 'title-1',
+      conversationId: 'conversation-1',
+      messages: [{ id: 'u1', role: 'user', content: '总结网页', createdAt: 1 }],
+    };
+    expect(isClientMessage(request)).toBe(true);
+    expect(isClientMessage({ ...request, conversationId: '' })).toBe(false);
+    expect(isClientMessage({ ...request, messages: [] })).toBe(false);
   });
 
   it('validates provider command payloads instead of trusting the type alone', () => {

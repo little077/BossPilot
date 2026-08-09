@@ -24,14 +24,14 @@ function generationChunk(id: string): string | undefined {
 }
 
 // BossPilot 扩展配置。
-// 权限最小化原则：页面操作权限只收敛到 Boss 直聘域名，不申请 <all_urls>。
+// 权限最小化原则：通用页面读取优先使用 activeTab；长期权限只能由用户按精确 origin 授予。
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
   manifest: {
-    name: 'BossPilot — Boss直聘 AI 求职副驾',
+    name: 'BossPilot — 浏览器 AI 助手',
     description:
-      '在侧边栏用自然语言搜索岗位、批量采集 JD、语义过滤（排除外包等）并进行匹配度打分。BYOK，数据全本地。',
-    permissions: ['sidePanel', 'tabs', 'scripting', 'storage', 'downloads'],
+      '在浏览器侧边栏与 AI 对话，按需读取当前网页；在 Boss 直聘提供岗位分析增强。BYOK，配置与会话本地保存。',
+    permissions: ['sidePanel', 'tabs', 'activeTab', 'scripting', 'storage', 'downloads'],
     host_permissions: ['https://www.zhipin.com/*'],
     // 模型端点在用户点「开通」时按具体 origin 申请；不把模型全网权限设为常驻权限。
     optional_host_permissions: ['https://*/*', 'http://*/*'],

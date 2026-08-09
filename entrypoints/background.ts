@@ -3,7 +3,9 @@ import { recorder } from '@/lib/diagnostics/recorder';
 import { redact } from '@/lib/diagnostics/redaction';
 import { buildDiagnosticsReport, diagnosticsFileName } from '@/lib/diagnostics/report';
 import type { ChatMessage } from '@/lib/domain/chat';
-import { sanitizeGenerationError } from '@/lib/generation/errors';
+import type { PageTurnSnapshot } from '@/lib/domain/types';
+import { generateConversationTitle } from '@/lib/generation/conversation-title';
+import { GenerationError, sanitizeGenerationError } from '@/lib/generation/errors';
 import { type ChatGenerationEvent, ChatGenerationManager } from '@/lib/generation/manager';
 import { createPiGenerationAdapter } from '@/lib/generation/pi-adapter';
 import { resolveActiveGenerationTarget } from '@/lib/generation/resolve';
@@ -16,11 +18,20 @@ import {
   type ServerMessage,
 } from '@/lib/ipc/protocol';
 import { CHAT_SYSTEM } from '@/lib/llm/prompts';
+import { hasExactPageOriginAccess } from '@/lib/page/access';
+import {
+  claimPendingPageTurn,
+  clearPendingPageTurn,
+  createPendingPageTurn,
+  historyMatchesPending,
+  loadPendingPageTurn,
+  savePendingPageTurn,
+} from '@/lib/page/pending';
+import { capturePageTurnSnapshot, pageContextHistory } from '@/lib/page/snapshot';
 import { orchestrator } from '@/lib/pipeline/orchestrator';
 import { ProviderService } from '@/lib/providers/service';
 import { createTrustedStorageGate } from '@/lib/storage/access';
-import { READ_CURRENT_JOB_TOOL, readCurrentJob } from '@/lib/tools/read-current-job';
-import { READ_VISIBLE_JOBS_TOOL, readVisibleJobs } from '@/lib/tools/read-visible-jobs';
+import { READ_CURRENT_PAGE_TOOL, readCurrentPage } from '@/lib/tools/read-current-page';
 
 interface ActiveDiagnostic {
   requestId: string;
@@ -41,22 +52,38 @@ export default defineBackground({
     const providerService = new ProviderService();
     const chatPorts = new Set<chrome.runtime.Port>();
     const diagnosticInputs = new Map<string, string>();
+    const pageSnapshots = new Map<string, PageTurnSnapshot | null>();
+    const chatHistories = new Map<string, ChatMessage[]>();
+    const cancelledPendingRequests = new Set<string>();
     const latestUserText = (requestId: string) => diagnosticInputs.get(requestId) ?? '';
     let activeDiagnostic: ActiveDiagnostic | null = null;
 
+    const generationAdapter = createPiGenerationAdapter();
+    const titleControllers = new Map<string, { controller: AbortController; requestId: string }>();
+
     const generationManager = new ChatGenerationManager({
-      adapter: createPiGenerationAdapter(),
+      adapter: generationAdapter,
       systemPrompt: CHAT_SYSTEM,
       maxOutputTokens: 8_192,
-      tools: [READ_CURRENT_JOB_TOOL, READ_VISIBLE_JOBS_TOOL],
-      executeTool: async (call, signal) => {
+      tools: [READ_CURRENT_PAGE_TOOL],
+      executeTool: async (call, signal, requestId) => {
         recorder.step('chat', 'tool', `模型调用 ${call.name}`);
-        const result =
-          call.name === READ_VISIBLE_JOBS_TOOL.name
-            ? await readVisibleJobs(signal)
-            : await readCurrentJob(signal);
+        const result = await readCurrentPage(pageSnapshots.get(requestId) ?? null, signal);
+        if ('deferred' in result) return result;
         recorder.step('chat', result.isError ? 'error' : 'tool', result.statusText, result.detail);
         return result;
+      },
+      onToolDeferred: async (generation) => {
+        const snapshot = pageSnapshots.get(generation.requestId);
+        const history = chatHistories.get(generation.requestId);
+        if (!snapshot || !history) {
+          throw new GenerationError(
+            'INVALID_RESPONSE',
+            '当前页面恢复点不完整，请重新发送问题。',
+            false,
+          );
+        }
+        await savePendingPageTurn(createPendingPageTurn(generation, snapshot, history));
       },
       resolveTarget: async () => {
         await requireTrustedStorage();
@@ -147,17 +174,49 @@ export default defineBackground({
             send({ type: 'snapshot', snapshot: orchestrator.getSnapshot() });
             const chatSnapshot = generationManager.getSnapshot();
             if (chatSnapshot) send(generationEventToServerMessage(chatSnapshot));
+            const pending = await loadPendingPageTurn();
+            if (!generationManager.isRunning && pending?.status === 'resuming') {
+              generationManager.failDeferred(
+                pending.generation,
+                new GenerationError(
+                  'NETWORK_ERROR',
+                  '授权后的恢复过程被浏览器中断。为避免重复请求模型或读错页面，请重新发送问题。',
+                  true,
+                ),
+              );
+              await clearPendingPageTurn(pending.requestId);
+            } else if (!generationManager.isRunning && pending?.status === 'awaiting_permission') {
+              send({
+                type: 'stream_update',
+                requestId: pending.requestId,
+                message: pending.generation.message,
+              });
+            }
+            const awaitingRequestId =
+              !generationManager.isRunning && pending?.status === 'awaiting_permission'
+                ? pending.requestId
+                : undefined;
             send({
               type: 'chat_state',
-              running: generationManager.isRunning,
-              ...(generationManager.currentRequestId
-                ? { requestId: generationManager.currentRequestId }
+              running: generationManager.isRunning || Boolean(awaitingRequestId),
+              ...(generationManager.currentRequestId || awaitingRequestId
+                ? { requestId: generationManager.currentRequestId ?? awaitingRequestId }
                 : {}),
             });
             break;
           }
           case 'chat':
             await startChat(message.requestId, message.messages);
+            break;
+          case 'summarize_conversation':
+            await summarizeConversation(
+              message.requestId,
+              message.conversationId,
+              message.messages,
+            );
+            break;
+          case 'page_permission_result':
+            await resumePagePermission(message.requestId, message.granted, message.messages);
             break;
           case 'run_nl':
             await orchestrator.runNaturalLanguage(message.text);
@@ -173,13 +232,25 @@ export default defineBackground({
           case 'cancel': {
             if (message.scope !== 'task') {
               const requestId = message.requestId ?? generationManager.currentRequestId;
-              if (requestId) generationManager.stop(requestId);
+              if (requestId && !generationManager.stop(requestId)) {
+                const pending = await claimPendingPageTurn(requestId);
+                if (pending) {
+                  await clearPendingPageTurn(requestId);
+                  generationManager.cancelDeferred(pending.generation);
+                } else {
+                  const resuming = await loadPendingPageTurn();
+                  if (resuming?.requestId === requestId && resuming.status === 'resuming') {
+                    cancelledPendingRequests.add(requestId);
+                  }
+                }
+              }
             }
             if (message.scope !== 'chat') orchestrator.cancel();
             break;
           }
           case 'clear_chat':
             generationManager.clearReplay();
+            await clearPendingPageTurn();
             if (!generationManager.isRunning) recorder.clear();
             break;
           case 'resume_captcha':
@@ -198,8 +269,49 @@ export default defineBackground({
       }
     }
 
+    async function summarizeConversation(
+      requestId: string,
+      conversationId: string,
+      messages: ChatMessage[],
+    ): Promise<void> {
+      const previous = titleControllers.get(conversationId);
+      if (previous) {
+        previous.controller.abort();
+        broadcast(chatPorts, {
+          type: 'conversation_title_error',
+          requestId: previous.requestId,
+          conversationId,
+        });
+      }
+      const controller = new AbortController();
+      titleControllers.set(conversationId, { controller, requestId });
+      const timeout = setTimeout(() => controller.abort(), 30_000);
+
+      try {
+        await requireTrustedStorage();
+        const target = await resolveActiveGenerationTarget();
+        const title = await generateConversationTitle(
+          generationAdapter,
+          target,
+          messages,
+          controller.signal,
+        );
+        if (titleControllers.get(conversationId)?.controller !== controller) return;
+        broadcast(chatPorts, { type: 'conversation_title', requestId, conversationId, title });
+      } catch {
+        if (titleControllers.get(conversationId)?.controller !== controller) return;
+        // 标题是非关键增强；失败时保留本地的「历史记录 N」，不污染主对话。
+        broadcast(chatPorts, { type: 'conversation_title_error', requestId, conversationId });
+      } finally {
+        clearTimeout(timeout);
+        if (titleControllers.get(conversationId)?.controller === controller) {
+          titleControllers.delete(conversationId);
+        }
+      }
+    }
+
     async function startChat(requestId: string, history: ChatMessage[]): Promise<void> {
-      if (generationManager.isRunning) {
+      if (generationManager.isRunning || (await loadPendingPageTurn())) {
         broadcast(chatPorts, {
           type: 'error',
           requestId,
@@ -207,6 +319,10 @@ export default defineBackground({
         });
         return;
       }
+
+      const snapshot = await capturePageTurnSnapshot().catch(() => null);
+      pageSnapshots.set(requestId, snapshot);
+      chatHistories.set(requestId, history);
 
       const lastUser = [...history].reverse().find((message) => message.role === 'user');
       diagnosticInputs.set(requestId, lastUser?.content ?? '');
@@ -225,7 +341,7 @@ export default defineBackground({
       };
 
       try {
-        await generationManager.start(requestId, history);
+        await generationManager.start(requestId, pageContextHistory(history, snapshot));
       } catch (error) {
         activeDiagnostic = null;
         // 解析阶段还没有 stream_start；重连窗口可能已通过 chat_state 绑定本 requestId，
@@ -237,6 +353,87 @@ export default defineBackground({
         });
       } finally {
         diagnosticInputs.delete(requestId);
+        pageSnapshots.delete(requestId);
+        chatHistories.delete(requestId);
+      }
+    }
+
+    async function resumePagePermission(
+      requestId: string,
+      granted: boolean,
+      messages: ChatMessage[],
+    ): Promise<void> {
+      const pending = await claimPendingPageTurn(requestId);
+      if (!pending) {
+        const current = await loadPendingPageTurn();
+        const replay = generationManager.getSnapshot();
+        if (
+          (current?.requestId === requestId && current.status === 'resuming') ||
+          generationManager.currentRequestId === requestId ||
+          (replay?.requestId === requestId && replay.message.status !== 'streaming')
+        ) {
+          return;
+        }
+        broadcast(chatPorts, {
+          type: 'error',
+          requestId,
+          text: '这次页面授权已经处理、过期或不存在，请重新发送问题。',
+        });
+        return;
+      }
+
+      const history = messages.filter((message) => message.id !== pending.generation.message.id);
+      if (cancelledPendingRequests.delete(requestId)) {
+        generationManager.cancelDeferred(pending.generation);
+        await clearPendingPageTurn(requestId);
+        return;
+      }
+      if (!historyMatchesPending(pending, history)) {
+        generationManager.failDeferred(
+          pending.generation,
+          new GenerationError(
+            'INVALID_RESPONSE',
+            '等待授权期间会话历史已经变化。为避免把页面内容接到错误的问题上，请重新发送问题。',
+            false,
+          ),
+        );
+        await clearPendingPageTurn(requestId);
+        return;
+      }
+
+      pageSnapshots.set(requestId, pending.snapshot);
+      chatHistories.set(requestId, history);
+      try {
+        const pattern = pending.generation.message.toolActivity?.permissionPattern;
+        const permissionAvailable =
+          granted && Boolean(pattern) && (await hasExactPageOriginAccess(pattern ?? ''));
+        if (cancelledPendingRequests.delete(requestId)) {
+          generationManager.cancelDeferred(pending.generation);
+          return;
+        }
+        const override = permissionAvailable
+          ? undefined
+          : {
+              isError: true,
+              errorCode: 'permission_denied' as const,
+              statusText: '未授权读取当前网站',
+              detail: '用户或 Chrome 没有授予当前网站的页面读取权限。',
+              content:
+                '工具读取失败（permission_denied）：用户或 Chrome 没有授予当前网站的页面读取权限。',
+              sourceOrigin: pending.snapshot.origin,
+              sourceTitle: pending.snapshot.title,
+              sourceUrl: pending.snapshot.safeUrl,
+            };
+        await generationManager.resumeDeferred(
+          pending.generation,
+          pageContextHistory(history, pending.snapshot),
+          override,
+        );
+      } finally {
+        await clearPendingPageTurn(requestId);
+        pageSnapshots.delete(requestId);
+        chatHistories.delete(requestId);
+        cancelledPendingRequests.delete(requestId);
       }
     }
 

@@ -1,10 +1,10 @@
 // ─── BossPilot 侧边栏主界面 ───
-// 三个页签：对话（流式多轮对话）、结果（岗位卡片）、设置。
+// 三个页签：对话（流式多轮对话）、历史（本地会话列表与恢复）、设置。
 // 对话页采用 home/session 双屏结构：首屏大输入框，发送后经沉底动画过渡到会话布局。
 
 import {
   Bot,
-  Briefcase,
+  History,
   Loader2,
   MessageSquare,
   MessageSquarePlus,
@@ -18,10 +18,10 @@ import remarkGfm from 'remark-gfm';
 import type { TaskPhase } from '@/lib/domain/types';
 import { ChatFlowStatus } from './ChatFlowStatus';
 import { Composer, type ComposerHandle } from './Composer';
-import { JobList } from './JobList';
+import { HistoryView } from './HistoryView';
 import { useAgentPort } from './usePort';
 
-type Tab = 'chat' | 'jobs' | 'settings';
+type Tab = 'chat' | 'history' | 'settings';
 
 const SettingsView = lazy(() =>
   import('./SettingsView').then((module) => ({ default: module.SettingsView })),
@@ -59,16 +59,16 @@ const PROGRESS_PHASES: TaskPhase[] = [
 
 const NAV_ITEMS = [
   ['chat', MessageSquare, '对话'],
-  ['jobs', Briefcase, '结果'],
+  ['history', History, '历史记录'],
   ['settings', Settings, '设置'],
 ] as const;
 
 const MARKDOWN_PLUGINS = [remarkGfm];
 
 const EXAMPLES = [
+  '总结一下我当前打开的网页，并列出三个重点',
   '帮我改简历：我是 3 年前端，想往架构方向走，怎么突出亮点？',
   '面试前端一般会问哪些高频问题？帮我列个准备清单',
-  '西安的前端行情怎么样？15K 现实吗？',
 ];
 
 /** 与 CSS 中沉底过渡时长保持一致（app.css .is-launching） */
@@ -78,13 +78,21 @@ export default function App() {
   const {
     snapshot,
     messages,
+    conversations,
+    activeConversationId,
+    runningConversationId,
+    historyError,
     chatRunning,
     ready,
     connected,
     sendChat,
     cancelChat,
+    resolvePagePermission,
     downloadDiagnostics,
-    clearChat,
+    startNewConversation,
+    restoreConversation,
+    setViewedConversationId,
+    renameConversationTitle,
   } = useAgentPort();
   const [tab, setTab] = useState<Tab>('chat');
   // started=false 时展示首页英雄屏；launching 期间执行沉底动画
@@ -96,14 +104,20 @@ export default function App() {
   const homeWrapRef = useRef<HTMLDivElement>(null);
 
   const pipelineRunning = RUNNING_PHASES.has(snapshot.phase);
+  const currentConversationRunning =
+    chatRunning && Boolean(activeConversationId) && runningConversationId === activeConversationId;
+  const anotherConversationRunning =
+    chatRunning && Boolean(runningConversationId) && runningConversationId !== activeConversationId;
   const lastMessage = messages.at(-1);
   const activeAssistant = lastMessage?.role === 'assistant' ? lastMessage : undefined;
   const chatStatusText =
-    activeAssistant?.toolActivity?.status === 'running'
-      ? '执行工具 · 读取当前岗位'
-      : activeAssistant?.toolActivity
-        ? '回复生成中…'
-        : '思考中…';
+    activeAssistant?.toolActivity?.status === 'waiting_permission'
+      ? '等待页面读取权限'
+      : activeAssistant?.toolActivity?.status === 'running'
+        ? '执行工具 · 读取当前页面'
+        : activeAssistant?.toolActivity
+          ? '回复生成中…'
+          : '思考中…';
 
   // 回放后已有对话时跳过首页；首页发送动画期间先保持当前 DOM，
   // 避免乐观消息写入后提前切屏，让输入框能够完整落到会话区。
@@ -120,13 +134,32 @@ export default function App() {
     return () => cancelAnimationFrame(frame);
   }, [messages]);
 
+  // “已读”以用户当前打开的会话为准；历史列表本身不会把记录标记为已读。
+  useEffect(() => {
+    setViewedConversationId(tab === 'chat' ? activeConversationId : null);
+  }, [activeConversationId, setViewedConversationId, tab]);
+
   const submit = (text: string) => Boolean(text) && !chatRunning && sendChat(text);
 
   const startNewChat = () => {
     if (chatRunning || messages.length === 0) return;
-    clearChat();
+    startNewConversation();
     setTab('chat');
     setStarted(false);
+  };
+
+  const restoreFromHistory = async (conversationId: string): Promise<boolean> => {
+    const restored = await restoreConversation(conversationId);
+    if (restored) {
+      setTab('chat');
+      setStarted(true);
+    }
+    return restored;
+  };
+
+  const viewRunningConversation = async () => {
+    if (!runningConversationId) return;
+    await restoreFromHistory(runningConversationId);
   };
 
   // 首页发送：先同步占用本轮请求，再播放沉底动画。
@@ -178,7 +211,7 @@ export default function App() {
           ) : (
             <div className="flex items-center gap-1.5 truncate text-[9.5px] text-ink-faint">
               <span className="redscope-status-dot" aria-hidden />
-              AI 求职副驾 · 本地隐私
+              BYOK · 页面按需授权
             </div>
           )}
         </div>
@@ -210,9 +243,9 @@ export default function App() {
               onClick={() => setTab(key)}
             >
               <Icon size={15} />
-              {key === 'jobs' && snapshot.jobs.length > 0 && (
+              {key === 'history' && conversations.some(({ unread }) => unread) && (
                 <span
-                  className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-brand"
+                  className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-danger"
                   aria-hidden
                 />
               )}
@@ -253,10 +286,10 @@ export default function App() {
               <h1 className="redscope-home-title text-[clamp(22px,6.5vw,27px)] leading-[1.22]">
                 聊两句，
                 <br />
-                让求职这件事更省心
+                让浏览和求职更省心
               </h1>
               <p className="redscope-home-copy mt-2 max-w-[320px] text-[11px] leading-5">
-                改简历方向、面试准备、行业与薪资行情……有什么想问的，直接开聊。回复会逐字蹦出，随时可下载执行日志。
+                总结当前网页、解读岗位、改简历、准备面试……直接开聊。需要读取其他网站时，会先向你申请该网站权限。
               </p>
             </div>
 
@@ -295,14 +328,26 @@ export default function App() {
         </main>
       )}
 
-      {/* ── 主内容（会话/结果/设置） ── */}
+      {/* ── 主内容（会话/历史/设置） ── */}
       {(tab !== 'chat' || started) && (
         <main
           className="redscope-view min-h-0 flex-1 overflow-y-auto"
           ref={tab === 'chat' ? scrollRef : undefined}
         >
           {tab === 'chat' && (
-            <div className="flex flex-col gap-2.5 p-3" aria-live="polite" aria-busy={chatRunning}>
+            <div
+              className="flex flex-col gap-2.5 p-3"
+              aria-live="polite"
+              aria-busy={currentConversationRunning}
+            >
+              {anotherConversationRunning ? (
+                <div className="chat-background-banner" role="status">
+                  <span>另一条会话正在后台回复，完成后可继续本对话</span>
+                  <button type="button" onClick={() => void viewRunningConversation()}>
+                    查看正在回复的会话
+                  </button>
+                </div>
+              ) : null}
               {/* 会话工具条：诊断日志属于当前会话，放在消息区内。 */}
               <div className="flex items-center justify-end gap-1.5">
                 <button
@@ -336,11 +381,12 @@ export default function App() {
                         : 'border-line bg-surface text-ink'
                     }`}
                   >
-                    <ChatFlowStatus message={m} />
+                    <ChatFlowStatus message={m} onResolvePagePermission={resolvePagePermission} />
                     {streaming &&
                     !m.content &&
                     m.reasoningActivity?.status !== 'running' &&
-                    m.toolActivity?.status !== 'running' ? (
+                    m.toolActivity?.status !== 'running' &&
+                    m.toolActivity?.status !== 'waiting_permission' ? (
                       <span className="chat-answer-wait">
                         <Loader2 size={12} className="animate-spin text-brand" />
                         正在组织回答…
@@ -372,7 +418,17 @@ export default function App() {
             </div>
           )}
 
-          {tab === 'jobs' && <JobList jobs={snapshot.jobs} />}
+          {tab === 'history' && (
+            <HistoryView
+              conversations={conversations}
+              activeConversationId={activeConversationId}
+              runningConversationId={runningConversationId}
+              chatRunning={chatRunning}
+              errorMessage={historyError}
+              onRestore={restoreFromHistory}
+              onRename={renameConversationTitle}
+            />
+          )}
 
           {tab === 'settings' && (
             <Suspense fallback={<div className="p-4 text-xs text-ink-faint">加载中…</div>}>
@@ -387,8 +443,8 @@ export default function App() {
         <div className="redscope-dock border-t border-line bg-app p-2.5">
           <Composer
             autoFocus
-            running={chatRunning}
-            disabled={!connected}
+            running={currentConversationRunning}
+            disabled={!connected || anotherConversationRunning}
             onSend={submit}
             onCancel={cancelChat}
           />

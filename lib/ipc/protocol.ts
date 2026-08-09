@@ -13,7 +13,21 @@ export type ClientMessage =
   /** 侧边栏连接后先声明订阅，后台回放当前任务快照（若有）。 */
   | { type: 'subscribe' }
   /** 流式对话：发送完整会话历史（由侧边栏持有并持久化，SW 无状态更健壮）。 */
-  | { type: 'chat'; requestId: string; messages: ChatMessage[] }
+  | { type: 'chat'; requestId: string; conversationId: string; messages: ChatMessage[] }
+  /** 主回复完成后的可选低成本标题生成；只返回短标题，不接触本地存储。 */
+  | {
+      type: 'summarize_conversation';
+      requestId: string;
+      conversationId: string;
+      messages: ChatMessage[];
+    }
+  /** 用户对当前页精确来源权限作出决定后，恢复同一轮只读工具调用。 */
+  | {
+      type: 'page_permission_result';
+      requestId: string;
+      granted: boolean;
+      messages: ChatMessage[];
+    }
   /** 直接用自然语言发起一次任务（后台先做意图解析再执行）。 */
   | { type: 'run_nl'; text: string }
   /** 用已确认的结构化参数发起任务（任务卡片/编辑后确认走这条）。 */
@@ -49,6 +63,8 @@ export type ServerMessage =
   | { type: 'stream_update'; requestId: string; message: ChatMessage }
   | { type: 'stream_end'; requestId: string; message: ChatMessage }
   | { type: 'stream_error'; requestId: string; message: ChatMessage }
+  | { type: 'conversation_title'; requestId: string; conversationId: string; title: string }
+  | { type: 'conversation_title_error'; requestId: string; conversationId: string }
   /** 出错。 */
   | { type: 'error'; text: string; requestId?: string };
 
@@ -66,18 +82,17 @@ export function isClientMessage(value: unknown): value is ClientMessage {
     case 'clear_chat':
       return true;
     case 'chat':
+    case 'summarize_conversation':
       return (
         isBoundedString(value.requestId, 128) &&
-        Array.isArray(value.messages) &&
-        value.messages.length > 0 &&
-        value.messages.length <= MAX_CHAT_MESSAGES &&
-        value.messages.every(isChatMessage) &&
-        value.messages.reduce(
-          (total, message) =>
-            total +
-            (isRecord(message) && typeof message.content === 'string' ? message.content.length : 0),
-          0,
-        ) <= MAX_CHAT_CHARS
+        isBoundedString(value.conversationId, 128) &&
+        isChatHistory(value.messages)
+      );
+    case 'page_permission_result':
+      return (
+        isBoundedString(value.requestId, 128) &&
+        typeof value.granted === 'boolean' &&
+        isChatHistory(value.messages)
       );
     case 'run_nl':
     case 'parse_only':
@@ -92,6 +107,21 @@ export function isClientMessage(value: unknown): value is ClientMessage {
     default:
       return false;
   }
+}
+
+function isChatHistory(value: unknown): value is ChatMessage[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= MAX_CHAT_MESSAGES &&
+    value.every(isChatMessage) &&
+    value.reduce(
+      (total, message) =>
+        total +
+        (isRecord(message) && typeof message.content === 'string' ? message.content.length : 0),
+      0,
+    ) <= MAX_CHAT_CHARS
+  );
 }
 
 // ─── 多模型配置：一次性 Runtime Message ───

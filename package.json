@@ -1,8 +1,8 @@
 {
   "name": "bosspilot",
-  "description": "BossPilot — 面向 Boss 直聘的定制化 AI 求职副驾浏览器扩展（BYOK / 本地优先 / 开源）",
+  "description": "BossPilot — 通用浏览器 AI 助手，并为 Boss 直聘提供求职增强（BYOK / 本地优先 / 开源）",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "MIT",
   "type": "module",
   "keywords": [
@@ -57,8 +57,9 @@
     "postinstall": "wxt prepare && simple-git-hooks"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.80.6",
+    "@earendil-works/pi-ai": "0.84.1",
     "@mistralai/mistralai": "2.2.6",
+    "@mozilla/readability": "0.6.0",
     "@tiptap/extension-placeholder": "^3.29.2",
     "@tiptap/react": "^3.29.2",
     "@tiptap/starter-kit": "^3.29.2",
@@ -71,23 +72,24 @@
     "turndown": "^7.2.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.6",
+    "@biomejs/biome": "2.5.7",
     "@commitlint/cli": "19.6.1",
     "@commitlint/config-conventional": "19.6.0",
-    "@playwright/test": "1.62.0",
+    "@playwright/test": "1.62.1",
     "@tailwindcss/vite": "^4.0.0",
-    "acorn": "8.18.0",
     "@testing-library/dom": "10.4.1",
     "@testing-library/jest-dom": "7.0.0",
     "@testing-library/react": "16.3.2",
-    "@testing-library/user-event": "14.6.1",
+    "@testing-library/user-event": "14.6.3",
     "@types/chrome": "^0.0.287",
     "@types/node": "24.13.3",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
     "@types/turndown": "^5.0.5",
     "@vitest/coverage-v8": "4.1.10",
     "@wxt-dev/module-react": "1.2.2",
+    "acorn": "8.18.0",
+    "fake-indexeddb": "6.2.5",
     "jsdom": "26.1.0",
     "lint-staged": "16.4.0",
     "sharp": "^0.35.3",
@@ -95,7 +97,7 @@
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.2",
     "vitest": "4.1.10",
-    "wxt": "0.21.2"
+    "wxt": "0.21.3"
   },
   "simple-git-hooks": {
     "pre-commit": "npx lint-staged",

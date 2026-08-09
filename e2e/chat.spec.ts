@@ -5,7 +5,7 @@ const BASE_URL = 'https://www.zhipin.com/bosspilot-chat-e2e/v1';
 const MODEL_ID = 'boss-stream-test';
 const SECRET = 'e2e-chat-secret-2468';
 const USER_TEXT = '请用一句话介绍 BossPilot';
-const ASSISTANT_TEXT = 'BossPilot 是你的本地隐私 AI 求职副驾。';
+const ASSISTANT_TEXT = 'BossPilot 是你的 BYOK 浏览器 AI 助手。';
 
 interface CapturedChatRequest {
   authorization?: string;
@@ -17,7 +17,7 @@ interface CapturedChatRequest {
   };
 }
 
-test('已选自定义模型完成真实扩展流式对话，并在刷新后保留历史', async ({ context, extensionId }) => {
+test('真实流式对话写入历史、生成自动标题，并在刷新后回放', async ({ context, extensionId }) => {
   const chatRequests: CapturedChatRequest[] = [];
 
   await context.route(`${BASE_URL}/models`, async (route) => {
@@ -39,7 +39,10 @@ test('已选自定义模型完成真实扩展流式对话，并在刷新后保�
         'cache-control': 'no-cache',
         'content-type': 'text/event-stream; charset=utf-8',
       },
-      body: openAiStreamBody(),
+      body:
+        chatRequests.length === 1
+          ? openAiStreamBody()
+          : openAiFinalAnswerBody('chatcmpl-bosspilot-title-e2e', 'BossPilot 功能介绍'),
     });
   });
 
@@ -59,6 +62,8 @@ test('已选自定义模型完成真实扩展流式对话，并在刷新后保�
     'aria-pressed',
     'true',
   );
+  await page.getByRole('switch', { name: '自动生成会话标题' }).click();
+  await expect(page.getByText('已开启自动会话标题。')).toBeVisible();
   await expect(page.locator('body')).not.toContainText(SECRET);
 
   await page.getByRole('button', { name: '对话' }).click();
@@ -69,7 +74,7 @@ test('已选自定义模型完成真实扩展流式对话，并在刷新后保�
   await expect(page.locator('.redscope-user-message')).toContainText(USER_TEXT);
   await expect(page.locator('.redscope-ai-message')).toContainText(ASSISTANT_TEXT);
   await expect(page.getByRole('button', { name: '停止生成' })).toHaveCount(0);
-  await expect.poll(() => chatRequests.length).toBe(1);
+  await expect.poll(() => chatRequests.length).toBe(2);
   expect(chatRequests[0]).toMatchObject({
     authorization: `Bearer ${SECRET}`,
     body: {
@@ -78,9 +83,27 @@ test('已选自定义模型完成真实扩展流式对话，并在刷新后保�
     },
   });
   expect(chatRequests[0]?.body.messages).toEqual(
-    expect.arrayContaining([expect.objectContaining({ role: 'user', content: USER_TEXT })]),
+    expect.arrayContaining([
+      expect.objectContaining({ role: 'user', content: expect.stringContaining(USER_TEXT) }),
+    ]),
+  );
+  expect(chatRequests[1]?.body.messages).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        role: 'user',
+        content: expect.stringContaining('请为下面的对话生成标题'),
+      }),
+    ]),
   );
   await expect(page.locator('body')).not.toContainText(SECRET);
+
+  await page.getByRole('button', { name: '历史记录' }).click();
+  const restoreHistory = page.getByRole('button', { name: /恢复会话：BossPilot 功能介绍/ });
+  await expect(restoreHistory).toBeVisible();
+  await restoreHistory.click();
+  await expect(page.locator('.redscope-user-message')).toContainText(USER_TEXT);
+  await expect(page.locator('.redscope-ai-message')).toContainText(ASSISTANT_TEXT);
+  await expect(page.locator('.redscope-dock')).toBeVisible();
 
   await page.reload();
   await expect(page.locator('.redscope-user-message')).toContainText(USER_TEXT);
@@ -88,7 +111,7 @@ test('已选自定义模型完成真实扩展流式对话，并在刷新后保�
   await expect(page.locator('body')).not.toContainText(SECRET);
 });
 
-test('当前岗位工具完成一次调用并继续流式回答', async ({ context, extensionId }) => {
+test('通用当前页工具读取 Boss 岗位并附加领域增强', async ({ context, extensionId }) => {
   const chatRequests: CapturedChatRequest[] = [];
 
   await context.route(`${BASE_URL}/models`, async (route) => {
@@ -177,8 +200,9 @@ test('当前岗位工具完成一次调用并继续流式回答', async ({ conte
     button.click();
   });
 
-  await expect(panel.getByText('已读取当前岗位')).toBeVisible();
-  await expect(panel.getByText('read_current_job')).toBeVisible();
+  await expect(panel.getByText('已读取当前页面')).toBeVisible();
+  await expect(panel.getByText('read_current_page')).toBeVisible();
+  await expect(panel.getByText(/基于当前页面 ·/)).toBeVisible();
   await expect(panel.locator('.redscope-ai-message')).toContainText(
     '该岗位要求 React、TypeScript，并希望候选人具备三年前端经验。',
   );
@@ -226,10 +250,13 @@ test('当前岗位工具完成一次调用并继续流式回答', async ({ conte
   await panel.bringToFront();
   await expect(panel.locator('.is-launching')).toHaveCount(0);
   await panel.setViewportSize({ width: 420, height: 720 });
-  await panel.screenshot({ path: 'test-results/read-current-job-chatflow.png' });
+  await panel.screenshot({ path: 'test-results/read-current-page-chatflow.png' });
 });
 
-test('页面岗位工具滚动懒加载列表并汇总卡片', async ({ context, extensionId }) => {
+test('通用当前页工具在不滚动页面的前提下读取 Boss 当前岗位卡片', async ({
+  context,
+  extensionId,
+}) => {
   const chatRequests: CapturedChatRequest[] = [];
 
   await context.route(`${BASE_URL}/models`, async (route) => {
@@ -252,7 +279,7 @@ test('页面岗位工具滚动懒加载列表并汇总卡片', async ({ context,
         'cache-control': 'no-cache',
         'content-type': 'text/event-stream; charset=utf-8',
       },
-      body: hasToolResult ? openAiJobListAnswerBody() : openAiToolCallBody('read_visible_jobs'),
+      body: hasToolResult ? openAiJobListAnswerBody() : openAiToolCallBody(),
     });
   });
 
@@ -288,24 +315,6 @@ test('页面岗位工具滚动懒加载列表并汇总卡片', async ({ context,
                 </ul>
               </div>
             </main>
-            <script>
-              const scroller = document.querySelector('.job-list-container');
-              const list = document.querySelector('.rec-job-list');
-              let appended = false;
-              scroller.addEventListener('scroll', () => {
-                const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
-                if (!atBottom || appended) return;
-                appended = true;
-                const item = document.createElement('li');
-                item.className = 'job-card-box';
-                item.innerHTML =
-                  '<a href="/job_detail/list-c.html"><span class="job-name">TypeScript 工程师</span></a>' +
-                  '<span class="job-salary">22-32K</span>' +
-                  '<span class="company-name">丙公司</span>' +
-                  '<span class="job-area">杭州</span>';
-                list.append(item);
-              });
-            </script>
           </body>
         </html>`,
     });
@@ -332,21 +341,21 @@ test('页面岗位工具滚动懒加载列表并汇总卡片', async ({ context,
     button.click();
   });
 
-  await expect(panel.getByText('已读取 3 个岗位')).toBeVisible({ timeout: 20_000 });
-  await expect(panel.getByText('read_visible_jobs')).toBeVisible();
+  await expect(panel.getByText('已读取当前页面')).toBeVisible({ timeout: 20_000 });
+  await expect(panel.getByText('read_current_page')).toBeVisible();
   await expect(panel.locator('.redscope-ai-message')).toContainText(
-    '页面共读取到 3 个岗位：前端工程师、React 工程师、TypeScript 工程师。',
+    '当前页面读取到 2 个岗位：前端工程师、React 工程师。',
   );
   await expect.poll(() => chatRequests.length).toBe(2);
   expect(chatRequests[1]?.body.messages).toEqual(
     expect.arrayContaining([
       expect.objectContaining({
         role: 'tool',
-        content: expect.stringContaining('"jobCount":3'),
+        content: expect.stringContaining('"kind":"job_list"'),
       }),
       expect.objectContaining({
         role: 'tool',
-        content: expect.stringContaining('"title":"TypeScript 工程师"'),
+        content: expect.stringContaining('"title":"React 工程师"'),
       }),
     ]),
   );
@@ -404,14 +413,14 @@ function openAiStreamBody(): string {
 
   return [
     `data: ${chunk('BossPilot 是你的')}`,
-    `data: ${chunk('本地隐私 AI 求职副驾。')}`,
+    `data: ${chunk(' BYOK 浏览器 AI 助手。')}`,
     `data: ${chunk('', 'stop')}`,
     'data: [DONE]',
     '',
   ].join('\n\n');
 }
 
-function openAiToolCallBody(toolName = 'read_current_job'): string {
+function openAiToolCallBody(toolName = 'read_current_page'): string {
   const chunk = (delta: Record<string, unknown>, finishReason: string | null = null) =>
     JSON.stringify({
       id: 'chatcmpl-bosspilot-tool-e2e',
@@ -436,7 +445,7 @@ function openAiToolCallBody(toolName = 'read_current_job'): string {
       tool_calls: [
         {
           index: 0,
-          id: 'call-read-current-job',
+          id: 'call-read-current-page',
           type: 'function',
           function: { name: toolName, arguments: '{}' },
         },
@@ -454,7 +463,7 @@ function openAiToolAnswerBody(): string {
 }
 
 function openAiJobListAnswerBody(): string {
-  const answer = '页面共读取到 3 个岗位：前端工程师、React 工程师、TypeScript 工程师。';
+  const answer = '当前页面读取到 2 个岗位：前端工程师、React 工程师。';
   return openAiFinalAnswerBody('chatcmpl-bosspilot-job-list-answer-e2e', answer);
 }
 

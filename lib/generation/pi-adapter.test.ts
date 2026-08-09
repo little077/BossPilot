@@ -584,6 +584,22 @@ describe('pi-ai generation adapter', () => {
     expect(result.at(-1)).toMatchObject({ type: 'finish', reason: expectedReason });
   });
 
+  it('rejects deferred provider responses until durable polling is implemented', async () => {
+    const loadApi = makeLoader([
+      {
+        type: 'done',
+        reason: 'deferred',
+        message: makeAssistant('deferred'),
+      },
+    ]);
+    const adapter = createPiGenerationAdapter({ loadApi });
+
+    await expect(collect(adapter.stream(makeTarget(), makeRequest()))).rejects.toMatchObject({
+      code: 'INVALID_RESPONSE',
+      retryable: false,
+    });
+  });
+
   it('preserves an upstream aborted terminal as cancellation', async () => {
     const loadApi = makeLoader([
       {

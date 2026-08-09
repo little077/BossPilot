@@ -496,10 +496,17 @@ function chatFinishReasonToPi(reason?: GenerationFinishReason): StopReason {
 }
 
 function normalizeFinishReason(
-  reason: Extract<StopReason, 'stop' | 'length' | 'toolUse'>,
+  reason: Extract<StopReason, 'stop' | 'length' | 'toolUse' | 'deferred'>,
 ): 'stop' | 'length' | 'tool' {
   if (reason === 'length') return 'length';
   if (reason === 'toolUse') return 'tool';
+  if (reason === 'deferred') {
+    throw new GenerationError(
+      'INVALID_RESPONSE',
+      '当前模型返回了延迟响应，但 BossPilot 尚未支持异步结果轮询，请更换模型后重试。',
+      false,
+    );
+  }
   return 'stop';
 }
 

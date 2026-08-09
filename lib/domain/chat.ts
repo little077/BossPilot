@@ -55,6 +55,35 @@ export interface ChatMessage {
   toolActivity?: ToolActivity;
 }
 
+/** 会话标题来源；用户手动改名后，自动标题不得再次覆盖。 */
+export type ConversationTitleSource = 'fallback' | 'ai' | 'user';
+
+/**
+ * 历史列表的本地会话摘要。正文消息单独存表，避免列表页读取全部长文本。
+ * updatedAt 只代表最后一条消息时间，改名和已读操作不会把旧会话顶到列表首位。
+ */
+export interface ChatConversation {
+  id: string;
+  ordinal: number;
+  title: string;
+  titleSource: ConversationTitleSource;
+  createdAt: number;
+  updatedAt: number;
+  lastMessagePreview: string;
+  messageCount: number;
+  unread: boolean;
+}
+
+/** IndexedDB 中的消息行；模型与 IPC 仍只传输不含 conversationId 的 ChatMessage。 */
+export interface StoredChatMessage extends ChatMessage {
+  conversationId: string;
+}
+
+export interface ChatHistorySettings {
+  /** 每轮成功回复后额外调用一次当前模型，为历史会话生成短标题。 */
+  autoTitle: boolean;
+}
+
 /** 生成一条消息（补齐 id/createdAt）。 */
 export function makeMessage(role: ChatMessage['role'], content: string): ChatMessage {
   return { id: crypto.randomUUID(), role, content, createdAt: Date.now() };

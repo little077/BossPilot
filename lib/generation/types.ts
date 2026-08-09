@@ -1,5 +1,10 @@
 import type { ChatMessage, GenerationFinishReason, GenerationUsage } from '@/lib/domain/chat';
-import type { DomainToolName, ModelIdentity } from '@/lib/domain/types';
+import type {
+  DomainToolName,
+  ModelIdentity,
+  PageExtractionMode,
+  PageReadErrorCode,
+} from '@/lib/domain/types';
 
 /**
  * Generation protocols are deliberately separate from model-catalog discovery.
@@ -94,13 +99,36 @@ export interface GenerationToolExecutionResult {
     | 'SELECTOR_MISS'
     | 'NO_PERMISSION'
     | 'EXTRACTION_FAILED'
-    | 'CANCELLED';
+    | 'CANCELLED'
+    | PageReadErrorCode;
+  sourceOrigin?: string;
+  sourceTitle?: string;
+  sourceUrl?: string;
+  extractionMode?: PageExtractionMode;
+  returnedChars?: number;
+  truncated?: boolean;
+  enrichmentStatus?: 'success' | 'failed' | 'not_applicable';
 }
+
+/** 需要真实用户手势时暂停工具阶段；不是错误结果，不能提前发给模型。 */
+export interface GenerationToolDeferredResult {
+  deferred: true;
+  statusText: string;
+  detail: string;
+  permissionPattern: string;
+  sourceOrigin: string;
+  sourceTitle: string;
+}
+
+export type GenerationToolExecutionOutcome =
+  | GenerationToolExecutionResult
+  | GenerationToolDeferredResult;
 
 export type GenerationToolExecutor = (
   call: GenerationToolCall,
   signal: AbortSignal,
-) => Promise<GenerationToolExecutionResult>;
+  requestId: string,
+) => Promise<GenerationToolExecutionOutcome>;
 
 export interface GenerationAdapter {
   stream(

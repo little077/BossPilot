@@ -2,13 +2,16 @@
 // 职责：固定单轮模型、串行化生成、保存可重放的完整消息快照，并统一收口取消与错误终态。
 
 import type { ChatMessage, GenerationUsage } from '@/lib/domain/chat';
+import type { ModelIdentity } from '@/lib/domain/types';
 import { GenerationError, isAbortError, sanitizeGenerationError } from '@/lib/generation/errors';
 import type {
   GenerationAdapter,
   GenerationEvent,
   GenerationInputMessage,
   GenerationToolCall,
+  GenerationToolDeferredResult,
   GenerationToolDefinition,
+  GenerationToolExecutionOutcome,
   GenerationToolExecutionResult,
   GenerationToolExecutor,
   ResolvedGenerationTarget,
@@ -24,6 +27,18 @@ export interface ChatGenerationEvent {
 }
 
 export type ChatGenerationListener = (event: ChatGenerationEvent) => void;
+
+/** 等待真实用户手势时可安全持久化的最小生成状态，不包含 API Key 或页面正文。 */
+export interface DeferredGenerationTurn {
+  version: 1;
+  requestId: string;
+  message: ChatMessage;
+  rawContent: string;
+  toolCall: GenerationToolCall;
+  targetIdentity: ModelIdentity;
+  usage?: GenerationUsage;
+  deferredAt: number;
+}
 
 export type GenerationTargetResolver = () =>
   | ResolvedGenerationTarget
@@ -44,6 +59,10 @@ export interface ChatGenerationManagerOptions {
   /** 当前里程碑开放只读页面工具；Manager 硬性限制一轮最多执行一次。 */
   tools?: GenerationToolDefinition[];
   executeTool?: GenerationToolExecutor;
+  onToolDeferred?: (
+    turn: DeferredGenerationTurn,
+    result: GenerationToolDeferredResult,
+  ) => void | Promise<void>;
 }
 
 interface ActiveTurn {
@@ -161,51 +180,190 @@ export class ChatGenerationManager {
       }
 
       this.beginToolActivity(turn, first.toolCall, toolDefinition);
-      const execution = await promiseOrAbort(
-        this.options.executeTool(first.toolCall, turn.controller.signal),
-        turn.controller.signal,
-      );
-      if (execution === ABORTED) return this.finishCancelled(turn);
-      if (execution.errorCode === 'CANCELLED') return this.finishCancelled(turn);
-
-      this.finishToolActivity(turn, execution);
-      const toolMessages: GenerationInputMessage[] = [
-        ...inputMessages,
-        {
-          role: 'assistant',
-          content: turn.rawContent,
-          createdAt: requireMessage(turn).createdAt,
-          finishReason: 'tool',
-          toolCalls: [first.toolCall],
-        },
-        {
-          role: 'toolResult',
-          toolCallId: first.toolCall.id,
-          toolName: first.toolCall.name,
-          content: execution.content,
-          isError: execution.isError,
-          createdAt: this.now(),
-        },
-      ];
-
-      const second = await this.runGeneration(turn, target, toolMessages);
-      if (second.kind === 'tool') {
-        return this.finishError(
-          turn,
-          new GenerationError(
-            'INVALID_RESPONSE',
-            '本轮已完成一次工具调用，不能继续调用其他工具。',
-            false,
-          ),
-        );
-      }
-      return second.message;
+      return await this.executeAndCompleteTool(turn, target, inputMessages, first.toolCall, true);
     } catch (error) {
       if (turn.controller.signal.aborted || isAbortError(error)) {
         return this.finishCancelled(turn);
       }
       return this.finishError(turn, error);
     }
+  }
+
+  /** 从持久化权限卡恢复同一个 tool call；第一阶段模型不会被重复调用。 */
+  async resumeDeferred(
+    state: DeferredGenerationTurn,
+    history: ChatMessage[],
+    executionOverride?: GenerationToolExecutionResult,
+  ): Promise<ChatMessage> {
+    if (this.active) {
+      throw new GenerationError('BUSY', '当前已有回复正在生成，请先停止后再重试。');
+    }
+
+    const turn = activeTurnFromDeferred(state);
+    this.active = turn;
+    this.replay = undefined;
+
+    try {
+      const resolution = this.options.resolveTarget();
+      const target = cloneTarget(isPromiseLike(resolution) ? await resolution : resolution);
+      if (!sameModelIdentity(target.identity, state.targetIdentity)) {
+        return this.finishError(
+          turn,
+          new GenerationError(
+            'INVALID_RESPONSE',
+            '等待授权期间活动模型已变化。为避免把网页发送到错误的模型，请重新发送问题。',
+            false,
+          ),
+        );
+      }
+      turn.secret = target.apiKey;
+      const activity = requireMessage(turn).toolActivity;
+      if (!activity || activity.callId !== state.toolCall.id) {
+        return this.finishError(
+          turn,
+          new GenerationError('INVALID_RESPONSE', '等待授权的工具状态不完整，请重新发送问题。'),
+        );
+      }
+
+      activity.status = 'running';
+      activity.statusText = `正在${activity.label}`;
+      activity.finishedAt = undefined;
+      this.publish(turn, 'update');
+
+      return await this.executeAndCompleteTool(
+        turn,
+        target,
+        toGenerationInputMessages(history),
+        state.toolCall,
+        false,
+        executionOverride,
+      );
+    } catch (error) {
+      if (turn.controller.signal.aborted || isAbortError(error)) {
+        return this.finishCancelled(turn);
+      }
+      return this.finishError(turn, error);
+    }
+  }
+
+  /** 权限卡等待期间没有活动网络请求，取消时直接发布同一消息的确定终态。 */
+  cancelDeferred(state: DeferredGenerationTurn): ChatMessage | null {
+    if (this.active) return null;
+    const turn = activeTurnFromDeferred(state);
+    this.active = turn;
+    return this.finishCancelled(turn, state.usage);
+  }
+
+  /** Service Worker 恢复中断或恢复点失配时，为原消息发布一个明确且唯一的错误终态。 */
+  failDeferred(state: DeferredGenerationTurn, error: unknown): ChatMessage | null {
+    if (this.active) return null;
+    const turn = activeTurnFromDeferred(state);
+    this.active = turn;
+    return this.finishError(turn, error);
+  }
+
+  private async executeAndCompleteTool(
+    turn: ActiveTurn,
+    target: ResolvedGenerationTarget,
+    inputMessages: GenerationInputMessage[],
+    toolCall: GenerationToolCall,
+    allowDeferred: boolean,
+    executionOverride?: GenerationToolExecutionResult,
+  ): Promise<ChatMessage> {
+    if (!this.options.executeTool) {
+      return this.finishError(
+        turn,
+        new GenerationError('INVALID_RESPONSE', '当前没有可执行的页面工具。', false),
+      );
+    }
+
+    const outcome =
+      executionOverride ??
+      (await promiseOrAbort(
+        this.options.executeTool(toolCall, turn.controller.signal, turn.requestId),
+        turn.controller.signal,
+      ));
+    if (outcome === ABORTED) return this.finishCancelled(turn);
+
+    const execution = isDeferredToolExecution(outcome)
+      ? allowDeferred
+        ? await this.deferTool(turn, target, toolCall, outcome)
+        : permissionStillMissing(outcome)
+      : outcome;
+    if (execution === null) return cloneMessage(requireMessage(turn));
+    if (execution.errorCode === 'CANCELLED' || execution.errorCode === 'cancelled') {
+      return this.finishCancelled(turn);
+    }
+
+    this.finishToolActivity(turn, execution);
+    const toolMessages: GenerationInputMessage[] = [
+      ...inputMessages,
+      {
+        role: 'assistant',
+        content: turn.rawContent,
+        createdAt: requireMessage(turn).createdAt,
+        finishReason: 'tool',
+        toolCalls: [toolCall],
+      },
+      {
+        role: 'toolResult',
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        content: execution.content,
+        isError: execution.isError,
+        createdAt: this.now(),
+      },
+    ];
+
+    const second = await this.runGeneration(turn, target, toolMessages);
+    if (second.kind === 'tool') {
+      return this.finishError(
+        turn,
+        new GenerationError(
+          'INVALID_RESPONSE',
+          '本轮已完成一次工具调用，不能继续调用其他工具。',
+          false,
+        ),
+      );
+    }
+    return second.message;
+  }
+
+  private async deferTool(
+    turn: ActiveTurn,
+    target: ResolvedGenerationTarget,
+    toolCall: GenerationToolCall,
+    result: GenerationToolDeferredResult,
+  ): Promise<null> {
+    if (!this.options.onToolDeferred) {
+      throw new GenerationError('PERMISSION_REQUIRED', result.detail, false);
+    }
+
+    const activity = requireMessage(turn).toolActivity;
+    if (!activity) {
+      throw new GenerationError('INVALID_RESPONSE', '页面工具没有可恢复的活动状态。');
+    }
+    activity.status = 'waiting_permission';
+    activity.statusText = result.statusText;
+    activity.detail = result.detail;
+    activity.sourceOrigin = result.sourceOrigin;
+    activity.sourceTitle = result.sourceTitle;
+    activity.permissionPattern = result.permissionPattern;
+
+    const deferred: DeferredGenerationTurn = {
+      version: 1,
+      requestId: turn.requestId,
+      message: cloneMessage(requireMessage(turn)),
+      rawContent: turn.rawContent,
+      toolCall: cloneToolCall(toolCall),
+      targetIdentity: { ...target.identity },
+      ...(turn.usage ? { usage: { ...turn.usage } } : {}),
+      deferredAt: this.now(),
+    };
+    await this.options.onToolDeferred(deferred, result);
+    this.publish(turn, 'update');
+    this.releaseWithoutEvent(turn);
+    return null;
   }
 
   private async runGeneration(
@@ -388,6 +546,7 @@ export class ChatGenerationManager {
     definition: GenerationToolDefinition,
   ): void {
     requireMessage(turn).toolActivity = {
+      requestId: turn.requestId,
       callId: call.id,
       name: definition.name,
       label: definition.label,
@@ -406,6 +565,13 @@ export class ChatGenerationManager {
     activity.finishedAt = this.now();
     if (execution.detail) activity.detail = execution.detail;
     if (execution.errorCode) activity.errorCode = execution.errorCode;
+    if (execution.sourceOrigin) activity.sourceOrigin = execution.sourceOrigin;
+    if (execution.sourceTitle) activity.sourceTitle = execution.sourceTitle;
+    if (execution.sourceUrl) activity.sourceUrl = execution.sourceUrl;
+    if (execution.extractionMode) activity.extractionMode = execution.extractionMode;
+    if (execution.returnedChars !== undefined) activity.returnedChars = execution.returnedChars;
+    if (execution.truncated !== undefined) activity.truncated = execution.truncated;
+    if (execution.enrichmentStatus) activity.enrichmentStatus = execution.enrichmentStatus;
     this.publish(turn, 'update');
   }
 
@@ -429,7 +595,10 @@ export class ChatGenerationManager {
       message.reasoningActivity.summary = '已停止问题分析';
       message.reasoningActivity.finishedAt = this.now();
     }
-    if (message.toolActivity?.status === 'running') {
+    if (
+      message.toolActivity?.status === 'running' ||
+      message.toolActivity?.status === 'waiting_permission'
+    ) {
       message.toolActivity.status = 'cancelled';
       message.toolActivity.statusText = `已停止${message.toolActivity.label}`;
       message.toolActivity.errorCode = 'CANCELLED';
@@ -450,7 +619,10 @@ export class ChatGenerationManager {
       message.reasoningActivity.summary = '问题分析未完成';
       message.reasoningActivity.finishedAt = this.now();
     }
-    if (message.toolActivity?.status === 'running') {
+    if (
+      message.toolActivity?.status === 'running' ||
+      message.toolActivity?.status === 'waiting_permission'
+    ) {
       message.toolActivity.status = 'failed';
       message.toolActivity.statusText = `${message.toolActivity.label}时发生错误`;
       message.toolActivity.finishedAt = this.now();
@@ -570,6 +742,48 @@ function cloneMessage(message: ChatMessage): ChatMessage {
     ...(message.usage ? { usage: { ...message.usage } } : {}),
     ...(message.reasoningActivity ? { reasoningActivity: { ...message.reasoningActivity } } : {}),
     ...(message.toolActivity ? { toolActivity: { ...message.toolActivity } } : {}),
+  };
+}
+
+function activeTurnFromDeferred(state: DeferredGenerationTurn): ActiveTurn {
+  return {
+    requestId: state.requestId,
+    controller: new AbortController(),
+    message: cloneMessage(state.message),
+    rawContent: state.rawContent,
+    secret: '',
+    terminalEmitted: false,
+    updatePending: false,
+    pendingToolCall: cloneToolCall(state.toolCall),
+    ...(state.usage ? { usage: { ...state.usage } } : {}),
+  };
+}
+
+function cloneToolCall(call: GenerationToolCall): GenerationToolCall {
+  return { ...call, arguments: { ...call.arguments } };
+}
+
+function sameModelIdentity(current: ModelIdentity, expected: ModelIdentity): boolean {
+  return current.providerId === expected.providerId && current.modelId === expected.modelId;
+}
+
+function isDeferredToolExecution(
+  outcome: GenerationToolExecutionOutcome,
+): outcome is GenerationToolDeferredResult {
+  return 'deferred' in outcome && outcome.deferred === true;
+}
+
+function permissionStillMissing(
+  result: GenerationToolDeferredResult,
+): GenerationToolExecutionResult {
+  return {
+    isError: true,
+    errorCode: 'permission_denied',
+    statusText: '仍未获得页面权限',
+    detail: result.detail,
+    content: '工具读取失败（permission_denied）：用户或 Chrome 没有授予当前网站的页面读取权限。',
+    sourceOrigin: result.sourceOrigin,
+    sourceTitle: result.sourceTitle,
   };
 }
 

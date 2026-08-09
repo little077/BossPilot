@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ChatMessage } from '@/lib/domain/chat';
+import type { ChatConversation, ChatMessage } from '@/lib/domain/chat';
 import App from './App';
 
 const { useAgentPortMock } = vi.hoisted(() => ({
@@ -17,12 +17,17 @@ vi.mock('./Composer', async () => {
   return {
     Composer: React.forwardRef<
       { setText: (value: string) => void },
-      { className?: string; onSend: (value: string) => void }
-    >(function MockComposer({ className, onSend }, ref) {
+      { className?: string; disabled?: boolean; running?: boolean; onSend: (value: string) => void }
+    >(function MockComposer({ className, disabled, running, onSend }, ref) {
       const [text, setText] = React.useState('');
       React.useImperativeHandle(ref, () => ({ setText }));
       return (
-        <div className={className} data-testid="composer">
+        <div
+          className={className}
+          data-disabled={disabled ? 'true' : 'false'}
+          data-running={running ? 'true' : 'false'}
+          data-testid="composer"
+        >
           <output data-testid="composer-text">{text}</output>
           <button type="button" onClick={() => onSend(text)}>
             触发发送
@@ -33,8 +38,15 @@ vi.mock('./Composer', async () => {
   };
 });
 
-vi.mock('./JobList', () => ({
-  JobList: () => <div>岗位结果</div>,
+vi.mock('./HistoryView', () => ({
+  HistoryView: ({ onRestore }: { onRestore: (conversationId: string) => Promise<boolean> }) => (
+    <div>
+      历史记录列表
+      <button type="button" onClick={() => void onRestore('conversation-old')}>
+        恢复旧会话
+      </button>
+    </div>
+  ),
 }));
 
 vi.mock('./SettingsView', () => ({
@@ -51,14 +63,22 @@ const basePort = {
     jobs: [],
   },
   messages: [] as ChatMessage[],
+  conversations: [] as ChatConversation[],
+  activeConversationId: null,
+  runningConversationId: null,
+  historyError: '',
   chatRunning: false,
   ready: true,
   connected: true,
   send: vi.fn(),
   sendChat: vi.fn(),
   cancelChat: vi.fn(),
+  resolvePagePermission: vi.fn(),
   downloadDiagnostics: vi.fn(),
-  clearChat: vi.fn(),
+  startNewConversation: vi.fn(),
+  restoreConversation: vi.fn(async () => true),
+  setViewedConversationId: vi.fn(),
+  renameConversationTitle: vi.fn(),
 };
 
 beforeEach(() => {
@@ -83,7 +103,7 @@ describe('首页发送过渡', () => {
 
     fireEvent.click(
       screen.getByRole('button', {
-        name: '西安的前端行情怎么样？15K 现实吗？',
+        name: '总结一下我当前打开的网页，并列出三个重点',
       }),
     );
     fireEvent.click(screen.getByRole('button', { name: '触发发送' }));
@@ -103,7 +123,7 @@ describe('首页发送过渡', () => {
 
     fireEvent.click(
       screen.getByRole('button', {
-        name: '西安的前端行情怎么样？15K 现实吗？',
+        name: '总结一下我当前打开的网页，并列出三个重点',
       }),
     );
     fireEvent.click(screen.getByRole('button', { name: '触发发送' }));
@@ -115,7 +135,7 @@ describe('首页发送过渡', () => {
         {
           id: 'optimistic-user',
           role: 'user',
-          content: '西安的前端行情怎么样？15K 现实吗？',
+          content: '总结一下我当前打开的网页，并列出三个重点',
           createdAt: 1,
         },
       ],
@@ -125,7 +145,7 @@ describe('首页发送过渡', () => {
 
     act(() => vi.advanceTimersByTime(520));
     expect(screen.queryByRole('heading', { name: /聊两句/ })).not.toBeInTheDocument();
-    expect(screen.getByText('西安的前端行情怎么样？15K 现实吗？')).toBeInTheDocument();
+    expect(screen.getByText('总结一下我当前打开的网页，并列出三个重点')).toBeInTheDocument();
   });
 });
 
@@ -145,15 +165,15 @@ describe('顶部导航', () => {
     expect(screen.queryByRole('button', { name: '报告' })).not.toBeInTheDocument();
 
     const example = screen.getByRole('button', {
-      name: '西安的前端行情怎么样？15K 现实吗？',
+      name: '总结一下我当前打开的网页，并列出三个重点',
     });
     await user.click(example);
     expect(screen.getByTestId('composer-text')).toHaveTextContent(
-      '西安的前端行情怎么样？15K 现实吗？',
+      '总结一下我当前打开的网页，并列出三个重点',
     );
 
-    await user.click(screen.getByRole('button', { name: '结果' }));
-    expect(screen.getByText('岗位结果').closest('main')).toHaveClass('redscope-view');
+    await user.click(screen.getByRole('button', { name: '历史记录' }));
+    expect(screen.getByText('历史记录列表').closest('main')).toHaveClass('redscope-view');
 
     await user.click(screen.getByRole('button', { name: '设置' }));
     const settingsMain = (await screen.findByText('设置内容')).closest('main');
@@ -163,19 +183,44 @@ describe('顶部导航', () => {
     expect(screen.getByRole('navigation', { name: '主导航' })).toBeInTheDocument();
   });
 
-  it('只展示对话、结果和设置，不再展示报告入口', () => {
+  it('只展示对话、历史记录和设置，不再展示旧结果与报告入口', () => {
     render(<App />);
 
     expect(screen.getByRole('button', { name: '对话' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '对话' })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', { name: '结果' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '历史记录' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '结果' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '设置' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '报告' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '新对话' })).not.toBeInTheDocument();
   });
 
+  it('从历史列表恢复后回到标准对话流，而不是打开只读详情', async () => {
+    const user = userEvent.setup();
+    const restoreConversation = vi.fn(async () => true);
+    useAgentPortMock.mockReturnValue({
+      ...basePort,
+      activeConversationId: 'conversation-old',
+      messages: [
+        { id: 'old-user', role: 'user', content: '以前的问题', createdAt: 1 },
+        { id: 'old-assistant', role: 'assistant', content: '以前的回答', createdAt: 2 },
+      ],
+      restoreConversation,
+    });
+    render(<App />);
+
+    await user.click(screen.getByRole('button', { name: '历史记录' }));
+    await user.click(screen.getByRole('button', { name: '恢复旧会话' }));
+
+    expect(restoreConversation).toHaveBeenCalledWith('conversation-old');
+    expect(await screen.findByText('以前的问题')).toBeVisible();
+    expect(screen.getByText('以前的回答')).toBeVisible();
+    expect(screen.queryByText('历史记录列表')).not.toBeInTheDocument();
+    expect(screen.getByTestId('composer')).toBeVisible();
+  });
+
   it('把新对话作为顶栏全局操作，并返回新的首页会话', async () => {
-    const clearChat = vi.fn();
+    const startNewConversation = vi.fn();
     useAgentPortMock.mockReturnValue({
       ...basePort,
       messages: [
@@ -186,7 +231,7 @@ describe('顶部导航', () => {
           createdAt: 1,
         },
       ],
-      clearChat,
+      startNewConversation,
     });
     const user = userEvent.setup();
     render(<App />);
@@ -196,7 +241,7 @@ describe('顶部导航', () => {
 
     await user.click(newChat);
 
-    expect(clearChat).toHaveBeenCalledOnce();
+    expect(startNewConversation).toHaveBeenCalledOnce();
     expect(screen.getByText(/聊两句/)).toBeInTheDocument();
   });
 
@@ -216,6 +261,27 @@ describe('顶部导航', () => {
     render(<App />);
 
     expect(await screen.findByRole('button', { name: '新对话' })).toBeDisabled();
+  });
+
+  it('查看另一条会话时让后台回复继续，并可一键切回运行会话', async () => {
+    const user = userEvent.setup();
+    const restoreConversation = vi.fn(async () => true);
+    useAgentPortMock.mockReturnValue({
+      ...basePort,
+      activeConversationId: 'conversation-restored',
+      runningConversationId: 'conversation-running',
+      chatRunning: true,
+      messages: [{ id: 'restored-user', role: 'user', content: '当前查看的旧会话', createdAt: 1 }],
+      restoreConversation,
+    });
+    render(<App />);
+
+    expect(screen.getByText('另一条会话正在后台回复，完成后可继续本对话')).toBeVisible();
+    expect(screen.getByTestId('composer')).toHaveAttribute('data-disabled', 'true');
+    expect(screen.getByTestId('composer')).toHaveAttribute('data-running', 'false');
+
+    await user.click(screen.getByRole('button', { name: '查看正在回复的会话' }));
+    expect(restoreConversation).toHaveBeenCalledWith('conversation-running');
   });
 
   it('会话工具栏下载包含当前页面结构的诊断日志', async () => {
