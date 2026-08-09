@@ -123,6 +123,7 @@ async function readPage(
     if (!alreadyGranted && isPermissionInjectionError(error)) {
       return {
         deferred: true,
+        kind: 'page_permission',
         statusText: '等待网站读取权限',
         detail: `仅在你允许后读取 ${snapshot.origin} 的页面纯文本；不会点击、输入或操作网页。`,
         permissionPattern,

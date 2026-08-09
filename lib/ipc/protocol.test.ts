@@ -69,6 +69,19 @@ describe('IPC runtime validation', () => {
     expect(isClientMessage({ ...valid, requestId: '' })).toBe(false);
   });
 
+  it('validates bounded Ask User answers with the same conversation snapshot', () => {
+    const valid = {
+      type: 'ask_user_result',
+      requestId: 'request-1',
+      answer: '周日下午两点以后',
+      messages: [{ id: 'user-1', role: 'user', content: '帮我找活动', createdAt: 1 }],
+    };
+    expect(isClientMessage(valid)).toBe(true);
+    expect(isClientMessage({ ...valid, answer: '' })).toBe(false);
+    expect(isClientMessage({ ...valid, answer: 'x'.repeat(2_001) })).toBe(false);
+    expect(isClientMessage({ ...valid, messages: [] })).toBe(false);
+  });
+
   it('enforces chat count, total size, identifiers, roles, and timestamps', () => {
     const message = {
       id: 'message-1',

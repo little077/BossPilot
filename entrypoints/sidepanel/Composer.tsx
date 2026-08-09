@@ -23,6 +23,8 @@ interface ComposerProps {
   /** 发送后是否清空内容（首页沉底期间保留文字，切屏时随组件卸载） */
   clearOnSend?: boolean;
   className?: string;
+  /** Ask User 等待态：普通输入保持可见但不可编辑，答案只能从上方暂停面板提交。 */
+  waitingForAnswer?: boolean;
   ref?: Ref<ComposerHandle>;
 }
 
@@ -34,6 +36,7 @@ export function Composer({
   autoFocus = false,
   clearOnSend = true,
   className = '',
+  waitingForAnswer = false,
   ref,
 }: ComposerProps) {
   const [empty, setEmpty] = useState(true);
@@ -41,11 +44,13 @@ export function Composer({
   // 回调与状态放进 ref，让 editor 只创建一次也能拿到最新值
   const submitRef = useRef<() => void>(() => {});
   const placeholderRef = useRef('');
-  placeholderRef.current = running
-    ? '正在生成，可点击右侧停止…'
-    : disabled
-      ? '正在连接 BossPilot…'
-      : '输入消息，Enter 发送';
+  placeholderRef.current = waitingForAnswer
+    ? 'Agent 正在等待上方问题的回答…'
+    : running
+      ? '正在生成，可点击右侧停止…'
+      : disabled
+        ? '正在连接 BossPilot…'
+        : '输入消息，Enter 发送';
 
   const editor = useEditor({
     extensions: [
@@ -92,8 +97,8 @@ export function Composer({
 
   // 任务执行中锁定编辑
   useEffect(() => {
-    editor?.setEditable(!running && !disabled);
-  }, [disabled, editor, running]);
+    editor?.setEditable(!running && !disabled && !waitingForAnswer);
+  }, [disabled, editor, running, waitingForAnswer]);
 
   useImperativeHandle(ref, () => ({
     setText: (text: string) => {
@@ -111,7 +116,9 @@ export function Composer({
     >
       <EditorContent editor={editor} className="composer-editor" />
       <footer className="flex items-center justify-between gap-2 px-2.5 pb-2">
-        <span className="text-[10px] text-ink-faint">Enter 发送 · Shift+Enter 换行</span>
+        <span className={`text-[10px] ${waitingForAnswer ? 'text-warning' : 'text-ink-faint'}`}>
+          {waitingForAnswer ? '回答后会从当前步骤继续' : 'Enter 发送 · Shift+Enter 换行'}
+        </span>
         {running ? (
           <button
             type="button"

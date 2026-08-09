@@ -1,19 +1,23 @@
-// ─── MV3 待授权轮次存储 ───
-// 职责：用 chrome.storage.session 保存短期、无正文、无密钥的恢复点，跨 Service Worker 回收但不跨浏览器重启。
+// ─── MV3 Agent 暂停点存储 ───
+// 职责：用 chrome.storage.session 保存权限或 Ask User 恢复点，跨 Service Worker 回收但不跨浏览器重启。
 
 import type { ChatMessage } from '@/lib/domain/chat';
 import type { PageTurnSnapshot } from '@/lib/domain/types';
 import type { DeferredGenerationTurn } from '@/lib/generation/manager';
 
-const PENDING_KEY = 'bosspilot_pending_page_turn_v1';
-const PENDING_TTL_MS = 10 * 60 * 1_000;
+const PENDING_KEY = 'bosspilot_pending_agent_turn_v2';
+const PAGE_PERMISSION_TTL_MS = 10 * 60 * 1_000;
+const USER_INPUT_TTL_MS = 24 * 60 * 60 * 1_000;
+
+export type PendingAgentKind = 'page_permission' | 'user_input';
 
 export interface PendingPageTurn {
-  version: 1;
+  version: 2;
   requestId: string;
-  status: 'awaiting_permission' | 'resuming';
+  kind: PendingAgentKind;
+  status: 'awaiting_permission' | 'awaiting_user' | 'resuming';
   generation: DeferredGenerationTurn;
-  snapshot: PageTurnSnapshot;
+  snapshot: PageTurnSnapshot | null;
   historyMessageIds: string[];
   expiresAt: number;
 }
@@ -26,14 +30,25 @@ export function createPendingPageTurn(
   history: ChatMessage[],
   now = Date.now(),
 ): PendingPageTurn {
+  return createPendingAgentTurn(generation, snapshot, history, 'page_permission', now);
+}
+
+export function createPendingAgentTurn(
+  generation: DeferredGenerationTurn,
+  snapshot: PageTurnSnapshot | null,
+  history: ChatMessage[],
+  kind: PendingAgentKind,
+  now = Date.now(),
+): PendingPageTurn {
   return {
-    version: 1,
+    version: 2,
     requestId: generation.requestId,
-    status: 'awaiting_permission',
+    kind,
+    status: kind === 'user_input' ? 'awaiting_user' : 'awaiting_permission',
     generation: cloneDeferred(generation),
-    snapshot: { ...snapshot },
+    snapshot: snapshot ? { ...snapshot } : null,
     historyMessageIds: history.map((message) => message.id),
-    expiresAt: now + PENDING_TTL_MS,
+    expiresAt: now + (kind === 'user_input' ? USER_INPUT_TTL_MS : PAGE_PERMISSION_TTL_MS),
   };
 }
 
@@ -65,7 +80,11 @@ export async function claimPendingPageTurn(
   let claimed: PendingPageTurn | null = null;
   await serialized(async () => {
     const current = await loadPendingPageTurn(now);
-    if (!current || current.requestId !== requestId || current.status !== 'awaiting_permission') {
+    if (
+      !current ||
+      current.requestId !== requestId ||
+      (current.status !== 'awaiting_permission' && current.status !== 'awaiting_user')
+    ) {
       return;
     }
     claimed = { ...current, status: 'resuming' };
@@ -106,9 +125,18 @@ async function serialized(operation: () => Promise<void>): Promise<void> {
 }
 
 function parsePendingPageTurn(value: unknown): PendingPageTurn | null {
-  if (!isRecord(value) || value.version !== 1 || typeof value.requestId !== 'string') return null;
-  if (value.status !== 'awaiting_permission' && value.status !== 'resuming') return null;
-  if (!isSnapshot(value.snapshot) || !isDeferred(value.generation)) return null;
+  if (!isRecord(value) || value.version !== 2 || typeof value.requestId !== 'string') return null;
+  if (value.kind !== 'page_permission' && value.kind !== 'user_input') return null;
+  if (
+    value.status !== 'awaiting_permission' &&
+    value.status !== 'awaiting_user' &&
+    value.status !== 'resuming'
+  ) {
+    return null;
+  }
+  if ((value.snapshot !== null && !isSnapshot(value.snapshot)) || !isDeferred(value.generation)) {
+    return null;
+  }
   if (!Array.isArray(value.historyMessageIds) || !value.historyMessageIds.every(isShortString)) {
     return null;
   }
@@ -130,7 +158,7 @@ function isSnapshot(value: unknown): value is PageTurnSnapshot {
 function isDeferred(value: unknown): value is DeferredGenerationTurn {
   return (
     isRecord(value) &&
-    value.version === 1 &&
+    (value.version === 1 || value.version === 2) &&
     isShortString(value.requestId) &&
     isRecord(value.message) &&
     isRecord(value.toolCall) &&
@@ -151,10 +179,44 @@ function cloneDeferred(value: DeferredGenerationTurn): DeferredGenerationTurn {
         ? { reasoningActivity: { ...value.message.reasoningActivity } }
         : {}),
       ...(value.message.toolActivity ? { toolActivity: { ...value.message.toolActivity } } : {}),
+      ...(value.message.toolActivities
+        ? { toolActivities: value.message.toolActivities.map((activity) => ({ ...activity })) }
+        : {}),
+      ...(value.message.pendingUserQuestion
+        ? {
+            pendingUserQuestion: {
+              ...value.message.pendingUserQuestion,
+              options: value.message.pendingUserQuestion.options.map((option) => ({ ...option })),
+            },
+          }
+        : {}),
     },
     toolCall: { ...value.toolCall, arguments: { ...value.toolCall.arguments } },
     targetIdentity: { ...value.targetIdentity },
     ...(value.usage ? { usage: { ...value.usage } } : {}),
+    ...(value.loopMessages
+      ? {
+          loopMessages: value.loopMessages.map((message) =>
+            message.role === 'assistant'
+              ? {
+                  ...message,
+                  ...(message.toolCalls
+                    ? {
+                        toolCalls: message.toolCalls.map((call) => ({
+                          ...call,
+                          arguments: { ...call.arguments },
+                        })),
+                      }
+                    : {}),
+                }
+              : { ...message },
+          ),
+        }
+      : {}),
+    ...(value.toolCallSignatures ? { toolCallSignatures: [...value.toolCallSignatures] } : {}),
+    ...(value.toolAttemptSignatures
+      ? { toolAttemptSignatures: [...value.toolAttemptSignatures] }
+      : {}),
   };
 }
 

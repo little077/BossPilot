@@ -4,6 +4,7 @@ import { GenerationError } from '@/lib/generation/errors';
 import {
   type ChatGenerationEvent,
   ChatGenerationManager,
+  DEFAULT_MAX_AGENT_TURNS,
   type DeferredGenerationTurn,
 } from '@/lib/generation/manager';
 import type {
@@ -45,6 +46,17 @@ const READ_JOB_TOOL: GenerationToolDefinition = {
   },
 };
 
+const ASK_USER_TOOL: GenerationToolDefinition = {
+  name: 'ask_user',
+  label: '询问用户',
+  description: '询问一个关键问题',
+  parameters: {
+    type: 'object',
+    properties: {},
+    additionalProperties: false,
+  },
+};
+
 function target(
   providerId = 'openai',
   modelId = 'gpt-test',
@@ -77,6 +89,8 @@ function createManager(
     streamUpdateIntervalMs?: number;
     tools?: GenerationToolDefinition[];
     executeTool?: GenerationToolExecutor;
+    maxAgentTurns?: number;
+    maxConsecutiveIdenticalToolCalls?: number;
     onToolDeferred?: (
       turn: DeferredGenerationTurn,
       result: GenerationToolDeferredResult,
@@ -157,7 +171,7 @@ describe('ChatGenerationManager', () => {
     expect(manager.getSnapshot()?.message.content).toBe('你好');
   });
 
-  it('executes exactly one tool and continues with a second model request', async () => {
+  it('executes a tool and keeps tools available for the next model request', async () => {
     const requests: GenerationRequest[] = [];
     let reportLateProgress: ((statusText: string, detail?: string) => void) | undefined;
     const executeTool = vi
@@ -198,7 +212,7 @@ describe('ChatGenerationManager', () => {
 
     expect(requests).toHaveLength(2);
     expect(requests[0]?.tools).toEqual([READ_JOB_TOOL]);
-    expect(requests[1]?.tools).toBeUndefined();
+    expect(requests[1]?.tools).toEqual([READ_JOB_TOOL]);
     expect(requests[1]?.messages).toContainEqual({
       role: 'assistant',
       content: '',
@@ -245,6 +259,91 @@ describe('ChatGenerationManager', () => {
     expect(events.some(({ message }) => message.toolActivity?.status === 'succeeded')).toBe(true);
     reportLateProgress?.('不应覆盖最终状态', '晚到进度');
     expect(manager.getSnapshot()?.message.toolActivity?.statusText).toBe('已读取当前岗位');
+  });
+
+  it('continues through multiple tool turns and keeps a complete activity timeline', async () => {
+    const requests: GenerationRequest[] = [];
+    const executeTool = vi.fn<GenerationToolExecutor>().mockImplementation(async (call) => ({
+      isError: false,
+      statusText: `已完成 ${call.id}`,
+      content: `result:${call.id}`,
+    }));
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        requests.push(request);
+        if (requests.length <= 2) {
+          yield {
+            type: 'tool-call',
+            toolCall: {
+              id: `call-${requests.length}`,
+              name: 'read_current_job',
+              arguments: { pass: requests.length },
+            },
+          };
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'text-delta', delta: '两步操作已经完成。' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool,
+    });
+
+    await expect(manager.start('request-loop', HISTORY)).resolves.toMatchObject({
+      status: 'completed',
+      content: '两步操作已经完成。',
+      usage: { totalTokens: 18 },
+      toolActivities: [
+        { callId: 'call-1', status: 'succeeded' },
+        { callId: 'call-2', status: 'succeeded' },
+      ],
+      toolActivity: { callId: 'call-2', status: 'succeeded' },
+    });
+    expect(requests).toHaveLength(3);
+    expect(requests.every(({ tools }) => tools?.[0]?.name === 'read_current_job')).toBe(true);
+    expect(executeTool).toHaveBeenCalledTimes(2);
+    expect(requests[2]?.messages).toContainEqual(
+      expect.objectContaining({ role: 'toolResult', toolCallId: 'call-2' }),
+    );
+  });
+
+  it('uses a 200-turn default safety ceiling and supports a lower test override', async () => {
+    expect(DEFAULT_MAX_AGENT_TURNS).toBe(200);
+    let requestCount = 0;
+    const adapter: GenerationAdapter = {
+      async *stream() {
+        requestCount += 1;
+        yield {
+          type: 'tool-call',
+          toolCall: {
+            id: `call-${requestCount}`,
+            name: 'read_current_job',
+            arguments: { pass: requestCount },
+          },
+        };
+        yield { type: 'finish', reason: 'tool', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      maxAgentTurns: 3,
+      maxConsecutiveIdenticalToolCalls: 10,
+      executeTool: async () => ({
+        isError: false,
+        statusText: '完成一步',
+        content: '一步结果',
+      }),
+    });
+
+    await expect(manager.start('request-turn-limit', HISTORY)).resolves.toMatchObject({
+      status: 'error',
+      errorCode: 'AGENT_LIMIT_REACHED',
+      errorMessage: expect.stringContaining('3 个模型回合'),
+    });
+    expect(requestCount).toBe(3);
   });
 
   it('lets the model explain a deterministic tool failure without inventing page data', async () => {
@@ -345,7 +444,7 @@ describe('ChatGenerationManager', () => {
     expect(manager.getSnapshot()?.message.toolActivity?.status).toBe('cancelled');
   });
 
-  it('rejects a second tool request after the one-call budget is consumed', async () => {
+  it('stops after the consecutive identical-tool safety budget is consumed', async () => {
     let requestCount = 0;
     const adapter: GenerationAdapter = {
       async *stream() {
@@ -372,10 +471,47 @@ describe('ChatGenerationManager', () => {
 
     await expect(manager.start('request-second-tool', HISTORY)).resolves.toMatchObject({
       status: 'error',
-      errorCode: 'INVALID_RESPONSE',
-      errorMessage: expect.stringContaining('不能继续调用'),
+      errorCode: 'REPEATED_TOOL_CALL',
+      errorMessage: expect.stringContaining('没有取得进展'),
     });
-    expect(requestCount).toBe(2);
+    expect(requestCount).toBe(3);
+  });
+
+  it('does not treat identical calls with changing observable results as no progress', async () => {
+    let requestCount = 0;
+    const adapter: GenerationAdapter = {
+      async *stream() {
+        requestCount += 1;
+        if (requestCount <= 3) {
+          yield {
+            type: 'tool-call',
+            toolCall: {
+              id: `call-${requestCount}`,
+              name: 'read_current_job',
+              arguments: {},
+            },
+          };
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'text-delta', delta: '页面已经取得进展。' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool: async () => ({
+        isError: false,
+        statusText: '已读取当前岗位',
+        content: `页面版本 ${requestCount}`,
+      }),
+    });
+
+    await expect(manager.start('request-progress', HISTORY)).resolves.toMatchObject({
+      status: 'completed',
+      content: '页面已经取得进展。',
+    });
+    expect(requestCount).toBe(4);
   });
 
   it('rejects malformed tool termination sequences', async () => {
@@ -781,6 +917,7 @@ describe('ChatGenerationManager', () => {
       .fn<GenerationToolExecutor>()
       .mockResolvedValueOnce({
         deferred: true,
+        kind: 'page_permission',
         statusText: '等待网站操作权限',
         detail: '需要操作 example.com',
         permissionPattern: 'https://example.com/*',
@@ -843,6 +980,78 @@ describe('ChatGenerationManager', () => {
     expect(events.filter(({ type }) => type === 'start')).toHaveLength(1);
   });
 
+  it('keeps Ask User outside the answer and resumes from the saved loop context', async () => {
+    const requests: GenerationRequest[] = [];
+    let deferredTurn: DeferredGenerationTurn | undefined;
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        requests.push(request);
+        if (requests.length === 1) {
+          yield {
+            type: 'tool-call',
+            toolCall: { id: 'ask-1', name: 'ask_user', arguments: {} },
+          };
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'text-delta', delta: '我会按周日下午继续查找。' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const executeTool = vi.fn<GenerationToolExecutor>().mockResolvedValue({
+      deferred: true,
+      kind: 'user_input',
+      statusText: '等待用户补充信息',
+      question: '你更方便哪一天？',
+      options: [
+        { id: 'option-1', label: '周六' },
+        { id: 'option-2', label: '周日' },
+      ],
+      allowCustom: true,
+    });
+    const manager = createManager(adapter, () => target(), {
+      tools: [ASK_USER_TOOL],
+      executeTool,
+      onToolDeferred: (turn) => {
+        deferredTurn = turn;
+      },
+    });
+
+    await expect(manager.start('request-ask', HISTORY)).resolves.toMatchObject({
+      status: 'streaming',
+      content: '',
+      pendingUserQuestion: {
+        requestId: 'request-ask',
+        callId: 'ask-1',
+        question: '你更方便哪一天？',
+      },
+      toolActivity: { name: 'ask_user', status: 'waiting_user' },
+    });
+    expect(deferredTurn).toMatchObject({ version: 2, modelTurns: 1 });
+    if (!deferredTurn) throw new Error('ask user turn was not persisted');
+
+    await expect(
+      manager.resumeDeferred(deferredTurn, HISTORY, {
+        isError: false,
+        statusText: '已收到用户回答',
+        content: '<user_clarification>{"answer":"周日下午"}</user_clarification>',
+      }),
+    ).resolves.toMatchObject({
+      status: 'completed',
+      content: '我会按周日下午继续查找。',
+      pendingUserQuestion: undefined,
+      toolActivity: { name: 'ask_user', status: 'succeeded' },
+    });
+    expect(executeTool).toHaveBeenCalledTimes(1);
+    expect(requests[1]?.messages).toContainEqual(
+      expect.objectContaining({
+        role: 'toolResult',
+        toolCallId: 'ask-1',
+        content: expect.stringContaining('周日下午'),
+      }),
+    );
+  });
+
   it('fails a resumed turn if the selected model changed while waiting', async () => {
     let selected = target();
     let deferredTurn: DeferredGenerationTurn | undefined;
@@ -857,6 +1066,7 @@ describe('ChatGenerationManager', () => {
       tools: [READ_JOB_TOOL],
       executeTool: async () => ({
         deferred: true,
+        kind: 'page_permission',
         statusText: '等待权限',
         detail: '需要权限',
         permissionPattern: 'https://example.com/*',
@@ -952,6 +1162,7 @@ describe('ChatGenerationManager', () => {
       tools: [READ_JOB_TOOL],
       executeTool: async () => ({
         deferred: true,
+        kind: 'page_permission',
         statusText: '仍在等待权限',
         detail: '权限仍不可用',
         permissionPattern: 'https://example.com/*',

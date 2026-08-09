@@ -1,5 +1,5 @@
 // ─── 对话生成会话管理器 ───
-// 职责：固定单轮模型、串行化生成、保存可重放的完整消息快照，并统一收口取消与错误终态。
+// 职责：固定单轮模型、串行执行有界 Agent 循环、保存可恢复快照，并统一收口取消与错误终态。
 
 import type { ChatMessage, GenerationUsage } from '@/lib/domain/chat';
 import type { ModelIdentity } from '@/lib/domain/types';
@@ -30,7 +30,7 @@ export type ChatGenerationListener = (event: ChatGenerationEvent) => void;
 
 /** 等待真实用户手势时可安全持久化的最小生成状态，不包含 API Key 或页面正文。 */
 export interface DeferredGenerationTurn {
-  version: 1;
+  version: 1 | 2;
   requestId: string;
   message: ChatMessage;
   rawContent: string;
@@ -38,6 +38,13 @@ export interface DeferredGenerationTurn {
   targetIdentity: ModelIdentity;
   usage?: GenerationUsage;
   deferredAt: number;
+  /** v2：恢复多步循环所需的协议消息；只写入扩展私有的 chrome.storage.session。 */
+  loopMessages?: GenerationInputMessage[];
+  modelTurns?: number;
+  /** @deprecated v0.5 早期快照只记录工具名和参数，恢复时不再用于无进展判断。 */
+  toolCallSignatures?: string[];
+  /** 相同调用且相同可观察结果的紧凑签名，用于跨 Ask User/权限暂停恢复无进展检测。 */
+  toolAttemptSignatures?: string[];
 }
 
 export type GenerationTargetResolver = () =>
@@ -56,9 +63,13 @@ export interface ChatGenerationManagerOptions {
   /** 全量流快照的最小广播间隔；终态不受该间隔影响。 */
   streamUpdateIntervalMs?: number;
   temperature?: number;
-  /** 当前里程碑开放高层确定性工具；Manager 硬性限制一轮最多执行一次。 */
+  /** 当前里程碑开放的高层有界工具；同一个模型回合仍只接受一次工具调用。 */
   tools?: GenerationToolDefinition[];
   executeTool?: GenerationToolExecutor;
+  /** 包含最终回答在内的模型回合硬上限；默认 200，只作为失控保险丝。 */
+  maxAgentTurns?: number;
+  /** 相同工具、参数和可观察结果最多连续出现几次；默认 3，防止无进展空转。 */
+  maxConsecutiveIdenticalToolCalls?: number;
   onToolDeferred?: (
     turn: DeferredGenerationTurn,
     result: GenerationToolDeferredResult,
@@ -76,11 +87,15 @@ interface ActiveTurn {
   updateTimer?: ReturnType<typeof setTimeout>;
   pendingToolCall?: GenerationToolCall;
   usage?: GenerationUsage;
+  modelTurns: number;
+  toolAttemptSignatures: string[];
 }
 
 const ABORTED = Symbol('generation-aborted');
 const DEFAULT_MAX_OUTPUT_CHARS = 100_000;
 const DEFAULT_STREAM_UPDATE_INTERVAL_MS = 50;
+export const DEFAULT_MAX_AGENT_TURNS = 200;
+export const DEFAULT_MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS = 3;
 
 type StreamOutcome =
   | { kind: 'tool'; toolCall: GenerationToolCall }
@@ -92,6 +107,8 @@ export class ChatGenerationManager {
   private readonly now: () => number;
   private readonly maxOutputChars: number;
   private readonly streamUpdateIntervalMs: number;
+  private readonly maxAgentTurns: number;
+  private readonly maxConsecutiveIdenticalToolCalls: number;
   private active?: ActiveTurn;
   private replay?: ChatGenerationEvent;
 
@@ -101,6 +118,11 @@ export class ChatGenerationManager {
     this.maxOutputChars = options.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
     this.streamUpdateIntervalMs =
       options.streamUpdateIntervalMs ?? DEFAULT_STREAM_UPDATE_INTERVAL_MS;
+    this.maxAgentTurns = positiveInteger(options.maxAgentTurns, DEFAULT_MAX_AGENT_TURNS);
+    this.maxConsecutiveIdenticalToolCalls = positiveInteger(
+      options.maxConsecutiveIdenticalToolCalls,
+      DEFAULT_MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+    );
   }
 
   get isRunning(): boolean {
@@ -128,6 +150,8 @@ export class ChatGenerationManager {
       secret: '',
       terminalEmitted: false,
       updatePending: false,
+      modelTurns: 0,
+      toolAttemptSignatures: [],
     };
     this.active = turn;
 
@@ -161,26 +185,7 @@ export class ChatGenerationManager {
     }
 
     try {
-      const inputMessages = toGenerationInputMessages(history);
-      const first = await this.runGeneration(turn, target, inputMessages, this.options.tools);
-      if (first.kind === 'terminal') return first.message;
-
-      const toolDefinition = this.options.tools?.find(
-        (candidate) => candidate.name === first.toolCall.name,
-      );
-      if (!toolDefinition || !this.options.executeTool) {
-        return this.finishError(
-          turn,
-          new GenerationError(
-            'INVALID_RESPONSE',
-            `模型请求了未开放的工具：${first.toolCall.name}`,
-            false,
-          ),
-        );
-      }
-
-      this.beginToolActivity(turn, first.toolCall, toolDefinition);
-      return await this.executeAndCompleteTool(turn, target, inputMessages, first.toolCall, true);
+      return await this.runAgentLoop(turn, target, toGenerationInputMessages(history));
     } catch (error) {
       if (turn.controller.signal.aborted || isAbortError(error)) {
         return this.finishCancelled(turn);
@@ -217,7 +222,8 @@ export class ChatGenerationManager {
         );
       }
       turn.secret = target.apiKey;
-      const activity = requireMessage(turn).toolActivity;
+      const message = requireMessage(turn);
+      const activity = currentToolActivity(message);
       if (!activity || activity.callId !== state.toolCall.id) {
         return this.finishError(
           turn,
@@ -228,12 +234,16 @@ export class ChatGenerationManager {
       activity.status = 'running';
       activity.statusText = `正在${activity.label}`;
       activity.finishedAt = undefined;
+      message.pendingUserQuestion = undefined;
+      syncLegacyToolActivity(message, activity);
       this.publish(turn, 'update');
 
-      return await this.executeAndCompleteTool(
+      return await this.executeAndContinueTool(
         turn,
         target,
-        toGenerationInputMessages(history),
+        state.loopMessages
+          ? cloneGenerationInputMessages(state.loopMessages)
+          : toGenerationInputMessages(history),
         state.toolCall,
         false,
         executionOverride,
@@ -262,7 +272,49 @@ export class ChatGenerationManager {
     return this.finishError(turn, error);
   }
 
-  private async executeAndCompleteTool(
+  /**
+   * 每个模型回合最多接受一个工具调用，但工具结果会继续交还模型，直到自然回答、暂停或触发保险丝。
+   * 浏览器工具保持串行，避免多个页面动作互相争用活动标签页。
+   */
+  private async runAgentLoop(
+    turn: ActiveTurn,
+    target: ResolvedGenerationTarget,
+    inputMessages: GenerationInputMessage[],
+  ): Promise<ChatMessage> {
+    if (turn.modelTurns >= this.maxAgentTurns) {
+      return this.finishError(
+        turn,
+        new GenerationError(
+          'AGENT_LIMIT_REACHED',
+          `Agent 已达到 ${this.maxAgentTurns} 个模型回合的安全上限，任务已停止。你可以缩小目标后继续。`,
+          false,
+        ),
+      );
+    }
+
+    turn.modelTurns += 1;
+    const outcome = await this.runGeneration(turn, target, inputMessages, this.options.tools);
+    if (outcome.kind === 'terminal') return outcome.message;
+
+    const toolDefinition = this.options.tools?.find(
+      (candidate) => candidate.name === outcome.toolCall.name,
+    );
+    if (!toolDefinition || !this.options.executeTool) {
+      return this.finishError(
+        turn,
+        new GenerationError(
+          'INVALID_RESPONSE',
+          `模型请求了未开放的工具：${outcome.toolCall.name}`,
+          false,
+        ),
+      );
+    }
+
+    this.beginToolActivity(turn, outcome.toolCall, toolDefinition);
+    return await this.executeAndContinueTool(turn, target, inputMessages, outcome.toolCall, true);
+  }
+
+  private async executeAndContinueTool(
     turn: ActiveTurn,
     target: ResolvedGenerationTarget,
     inputMessages: GenerationInputMessage[],
@@ -292,8 +344,8 @@ export class ChatGenerationManager {
 
     const execution = isDeferredToolExecution(outcome)
       ? allowDeferred
-        ? await this.deferTool(turn, target, toolCall, outcome)
-        : permissionStillMissing(outcome)
+        ? await this.deferTool(turn, target, inputMessages, toolCall, outcome)
+        : deferredStillMissing(outcome)
       : outcome;
     if (execution === null) return cloneMessage(requireMessage(turn));
     if (execution.errorCode === 'CANCELLED' || execution.errorCode === 'cancelled') {
@@ -301,6 +353,21 @@ export class ChatGenerationManager {
     }
 
     this.finishToolActivity(turn, execution);
+    const attemptSignature = toolAttemptSignature(toolCall, execution);
+    turn.toolAttemptSignatures.push(attemptSignature);
+    if (
+      trailingIdenticalCount(turn.toolAttemptSignatures, attemptSignature) >=
+      this.maxConsecutiveIdenticalToolCalls
+    ) {
+      return this.finishError(
+        turn,
+        new GenerationError(
+          'REPEATED_TOOL_CALL',
+          `Agent 连续 ${this.maxConsecutiveIdenticalToolCalls} 次执行了相同操作且页面没有取得进展，已停止空转。请检查页面是否仍在加载、需要验证或操作目标已经失效。`,
+          false,
+        ),
+      );
+    }
     const toolMessages: GenerationInputMessage[] = [
       ...inputMessages,
       {
@@ -320,51 +387,61 @@ export class ChatGenerationManager {
       },
     ];
 
-    const second = await this.runGeneration(turn, target, toolMessages);
-    if (second.kind === 'tool') {
-      return this.finishError(
-        turn,
-        new GenerationError(
-          'INVALID_RESPONSE',
-          '本轮已完成一次工具调用，不能继续调用其他工具。',
-          false,
-        ),
-      );
-    }
-    return second.message;
+    return await this.runAgentLoop(turn, target, toolMessages);
   }
 
   private async deferTool(
     turn: ActiveTurn,
     target: ResolvedGenerationTarget,
+    loopMessages: GenerationInputMessage[],
     toolCall: GenerationToolCall,
     result: GenerationToolDeferredResult,
   ): Promise<null> {
     if (!this.options.onToolDeferred) {
-      throw new GenerationError('PERMISSION_REQUIRED', result.detail, false);
+      throw new GenerationError(
+        'PERMISSION_REQUIRED',
+        result.kind === 'page_permission' ? result.detail : result.question,
+        false,
+      );
     }
 
-    const activity = requireMessage(turn).toolActivity;
+    const message = requireMessage(turn);
+    const activity = currentToolActivity(message);
     if (!activity) {
-      throw new GenerationError('INVALID_RESPONSE', '浏览器工具没有可恢复的活动状态。');
+      throw new GenerationError('INVALID_RESPONSE', 'Agent 工具没有可恢复的活动状态。');
     }
-    activity.status = 'waiting_permission';
+    activity.status = result.kind === 'user_input' ? 'waiting_user' : 'waiting_permission';
     activity.statusText = result.statusText;
-    activity.detail = result.detail;
-    activity.sourceOrigin = result.sourceOrigin;
-    activity.sourceTitle = result.sourceTitle;
-    activity.permissionPattern = result.permissionPattern;
-    activity.permissionKind = result.permissionKind ?? 'read';
+    if (result.kind === 'page_permission') {
+      activity.detail = result.detail;
+      activity.sourceOrigin = result.sourceOrigin;
+      activity.sourceTitle = result.sourceTitle;
+      activity.permissionPattern = result.permissionPattern;
+      activity.permissionKind = result.permissionKind ?? 'read';
+    } else {
+      message.pendingUserQuestion = {
+        requestId: turn.requestId,
+        callId: toolCall.id,
+        question: result.question,
+        options: result.options.map((option) => ({ ...option })),
+        allowCustom: result.allowCustom,
+        ...(result.customPlaceholder ? { customPlaceholder: result.customPlaceholder } : {}),
+      };
+    }
+    syncLegacyToolActivity(message, activity);
 
     const deferred: DeferredGenerationTurn = {
-      version: 1,
+      version: 2,
       requestId: turn.requestId,
-      message: cloneMessage(requireMessage(turn)),
+      message: cloneMessage(message),
       rawContent: turn.rawContent,
       toolCall: cloneToolCall(toolCall),
       targetIdentity: { ...target.identity },
       ...(turn.usage ? { usage: { ...turn.usage } } : {}),
       deferredAt: this.now(),
+      loopMessages: cloneGenerationInputMessages(loopMessages),
+      modelTurns: turn.modelTurns,
+      toolAttemptSignatures: [...turn.toolAttemptSignatures],
     };
     await this.options.onToolDeferred(deferred, result);
     this.publish(turn, 'update');
@@ -551,7 +628,8 @@ export class ChatGenerationManager {
     call: GenerationToolCall,
     definition: GenerationToolDefinition,
   ): void {
-    requireMessage(turn).toolActivity = {
+    const message = requireMessage(turn);
+    const activity = {
       requestId: turn.requestId,
       callId: call.id,
       name: definition.name,
@@ -559,12 +637,15 @@ export class ChatGenerationManager {
       status: 'running',
       statusText: `正在${definition.label}`,
       startedAt: this.now(),
-    };
+    } satisfies NonNullable<ChatMessage['toolActivity']>;
+    message.toolActivities = [...(message.toolActivities ?? []), activity];
+    syncLegacyToolActivity(message, activity);
     this.publish(turn, 'update');
   }
 
   private finishToolActivity(turn: ActiveTurn, execution: GenerationToolExecutionResult): void {
-    const activity = requireMessage(turn).toolActivity;
+    const message = requireMessage(turn);
+    const activity = currentToolActivity(message);
     if (!activity) return;
     activity.status = execution.isError ? 'failed' : 'succeeded';
     activity.statusText = execution.statusText;
@@ -578,14 +659,17 @@ export class ChatGenerationManager {
     if (execution.returnedChars !== undefined) activity.returnedChars = execution.returnedChars;
     if (execution.truncated !== undefined) activity.truncated = execution.truncated;
     if (execution.enrichmentStatus) activity.enrichmentStatus = execution.enrichmentStatus;
+    syncLegacyToolActivity(message, activity);
     this.publish(turn, 'update');
   }
 
   private updateToolActivity(turn: ActiveTurn, statusText: string, detail?: string): void {
-    const activity = requireMessage(turn).toolActivity;
+    const message = requireMessage(turn);
+    const activity = currentToolActivity(message);
     if (activity?.status !== 'running' || turn.controller.signal.aborted) return;
     activity.statusText = statusText;
     if (detail) activity.detail = detail;
+    syncLegacyToolActivity(message, activity);
     this.publish(turn, 'update');
   }
 
@@ -599,6 +683,7 @@ export class ChatGenerationManager {
     message.status = 'completed';
     message.finishReason = reason;
     message.usage = { ...usage };
+    message.pendingUserQuestion = undefined;
     return this.publishTerminal(turn, 'end');
   }
 
@@ -609,15 +694,19 @@ export class ChatGenerationManager {
       message.reasoningActivity.summary = '已停止问题分析';
       message.reasoningActivity.finishedAt = this.now();
     }
+    const toolActivity = currentToolActivity(message);
     if (
-      message.toolActivity?.status === 'running' ||
-      message.toolActivity?.status === 'waiting_permission'
+      toolActivity?.status === 'running' ||
+      toolActivity?.status === 'waiting_permission' ||
+      toolActivity?.status === 'waiting_user'
     ) {
-      message.toolActivity.status = 'cancelled';
-      message.toolActivity.statusText = `已停止${message.toolActivity.label}`;
-      message.toolActivity.errorCode = 'CANCELLED';
-      message.toolActivity.finishedAt = this.now();
+      toolActivity.status = 'cancelled';
+      toolActivity.statusText = `已停止${toolActivity.label}`;
+      toolActivity.errorCode = 'CANCELLED';
+      toolActivity.finishedAt = this.now();
+      syncLegacyToolActivity(message, toolActivity);
     }
+    message.pendingUserQuestion = undefined;
     message.content = publicContent(turn.rawContent, turn.secret, true);
     message.status = 'cancelled';
     message.finishReason = 'cancelled';
@@ -633,14 +722,18 @@ export class ChatGenerationManager {
       message.reasoningActivity.summary = '问题分析未完成';
       message.reasoningActivity.finishedAt = this.now();
     }
+    const toolActivity = currentToolActivity(message);
     if (
-      message.toolActivity?.status === 'running' ||
-      message.toolActivity?.status === 'waiting_permission'
+      toolActivity?.status === 'running' ||
+      toolActivity?.status === 'waiting_permission' ||
+      toolActivity?.status === 'waiting_user'
     ) {
-      message.toolActivity.status = 'failed';
-      message.toolActivity.statusText = `${message.toolActivity.label}时发生错误`;
-      message.toolActivity.finishedAt = this.now();
+      toolActivity.status = 'failed';
+      toolActivity.statusText = `${toolActivity.label}时发生错误`;
+      toolActivity.finishedAt = this.now();
+      syncLegacyToolActivity(message, toolActivity);
     }
+    message.pendingUserQuestion = undefined;
     message.content = publicContent(turn.rawContent, turn.secret, true);
     message.status = 'error';
     message.error = true;
@@ -756,6 +849,17 @@ function cloneMessage(message: ChatMessage): ChatMessage {
     ...(message.usage ? { usage: { ...message.usage } } : {}),
     ...(message.reasoningActivity ? { reasoningActivity: { ...message.reasoningActivity } } : {}),
     ...(message.toolActivity ? { toolActivity: { ...message.toolActivity } } : {}),
+    ...(message.toolActivities
+      ? { toolActivities: message.toolActivities.map((activity) => ({ ...activity })) }
+      : {}),
+    ...(message.pendingUserQuestion
+      ? {
+          pendingUserQuestion: {
+            ...message.pendingUserQuestion,
+            options: message.pendingUserQuestion.options.map((option) => ({ ...option })),
+          },
+        }
+      : {}),
   };
 }
 
@@ -769,6 +873,8 @@ function activeTurnFromDeferred(state: DeferredGenerationTurn): ActiveTurn {
     terminalEmitted: false,
     updatePending: false,
     pendingToolCall: cloneToolCall(state.toolCall),
+    modelTurns: state.modelTurns ?? 1,
+    toolAttemptSignatures: [...(state.toolAttemptSignatures ?? [])],
     ...(state.usage ? { usage: { ...state.usage } } : {}),
   };
 }
@@ -787,9 +893,15 @@ function isDeferredToolExecution(
   return 'deferred' in outcome && outcome.deferred === true;
 }
 
-function permissionStillMissing(
-  result: GenerationToolDeferredResult,
-): GenerationToolExecutionResult {
+function deferredStillMissing(result: GenerationToolDeferredResult): GenerationToolExecutionResult {
+  if (result.kind === 'user_input') {
+    return {
+      isError: true,
+      statusText: '没有收到有效回答',
+      detail: 'Ask User 恢复时没有收到有效的用户答案。',
+      content: 'ask_user 失败：没有收到有效的用户答案。',
+    };
+  }
   return {
     isError: true,
     errorCode: 'permission_denied',
@@ -799,6 +911,83 @@ function permissionStillMissing(
     sourceOrigin: result.sourceOrigin,
     sourceTitle: result.sourceTitle,
   };
+}
+
+function currentToolActivity(
+  message: ChatMessage,
+): NonNullable<ChatMessage['toolActivity']> | null {
+  return message.toolActivities?.at(-1) ?? message.toolActivity ?? null;
+}
+
+function syncLegacyToolActivity(
+  message: ChatMessage,
+  activity: NonNullable<ChatMessage['toolActivity']>,
+): void {
+  message.toolActivity = { ...activity };
+}
+
+function positiveInteger(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : fallback;
+}
+
+function toolCallSignature(call: GenerationToolCall): string {
+  return `${call.name}:${stableJson(call.arguments)}`;
+}
+
+function toolAttemptSignature(
+  call: GenerationToolCall,
+  result: GenerationToolExecutionResult,
+): string {
+  return `${toolCallSignature(call)}:${result.isError ? 'error' : 'success'}:${
+    result.errorCode ?? ''
+  }:${compactHash(result.content)}`;
+}
+
+/** FNV-1a：只用于紧凑比较工具结果，不用于安全或数据完整性。 */
+function compactHash(value: string): string {
+  let hash = 2_166_136_261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (typeof value !== 'object' || value === null) return JSON.stringify(value) ?? 'undefined';
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    .join(',')}}`;
+}
+
+function trailingIdenticalCount(signatures: string[], target: string): number {
+  let count = 0;
+  for (let index = signatures.length - 1; index >= 0; index -= 1) {
+    if (signatures[index] !== target) break;
+    count += 1;
+  }
+  return count;
+}
+
+function cloneGenerationInputMessages(
+  messages: GenerationInputMessage[],
+): GenerationInputMessage[] {
+  return messages.map((message) => {
+    if (message.role === 'assistant') {
+      return {
+        ...message,
+        ...(message.toolCalls
+          ? { toolCalls: message.toolCalls.map((call) => cloneToolCall(call)) }
+          : {}),
+      };
+    }
+    return { ...message };
+  });
 }
 
 function cloneEvent(event: ChatGenerationEvent): ChatGenerationEvent {

@@ -28,6 +28,13 @@ export type ClientMessage =
       granted: boolean;
       messages: ChatMessage[];
     }
+  /** 回答底部 Ask User 面板后，从持久化暂停点继续原 Agent 循环。 */
+  | {
+      type: 'ask_user_result';
+      requestId: string;
+      answer: string;
+      messages: ChatMessage[];
+    }
   /** 直接用自然语言发起一次任务（后台先做意图解析再执行）。 */
   | { type: 'run_nl'; text: string }
   /** 用已确认的结构化参数发起任务（任务卡片/编辑后确认走这条）。 */
@@ -92,6 +99,12 @@ export function isClientMessage(value: unknown): value is ClientMessage {
       return (
         isBoundedString(value.requestId, 128) &&
         typeof value.granted === 'boolean' &&
+        isChatHistory(value.messages)
+      );
+    case 'ask_user_result':
+      return (
+        isBoundedString(value.requestId, 128) &&
+        isBoundedString(value.answer, 2_000) &&
         isChatHistory(value.messages)
       );
     case 'run_nl':

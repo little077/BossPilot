@@ -243,12 +243,32 @@ export interface ReasoningActivity {
   finishedAt?: number;
 }
 
+/** Ask User 的预设答案；由模型提出，但进入 UI 前会经过长度、数量与重复项校验。 */
+export interface AskUserOption {
+  id: string;
+  label: string;
+}
+
+/**
+ * Agent 等待用户补充信息时的跨运行时快照。
+ * 它属于任务控制面，不是聊天正文，因此 UI 必须固定渲染在输入框上方。
+ */
+export interface PendingUserQuestion {
+  requestId: string;
+  callId: string;
+  question: string;
+  options: AskUserOption[];
+  allowCustom: boolean;
+  customPlaceholder?: string;
+}
+
 /** 一次浏览器工具的 UI/IPC 快照；状态元数据不携带抓取到的网页正文。 */
 export type DomainToolName =
   | 'read_current_page'
   | 'browser_action'
   | 'read_current_job'
-  | 'read_visible_jobs';
+  | 'read_visible_jobs'
+  | 'ask_user';
 
 export interface ToolActivity {
   /** 所属生成轮次，用于权限等待卡片把用户决定精确路由回 Background。 */
@@ -256,7 +276,7 @@ export interface ToolActivity {
   callId: string;
   name: DomainToolName;
   label: string;
-  status: 'waiting_permission' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+  status: 'waiting_permission' | 'waiting_user' | 'running' | 'succeeded' | 'failed' | 'cancelled';
   statusText: string;
   startedAt: number;
   finishedAt?: number;

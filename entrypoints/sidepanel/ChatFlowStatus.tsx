@@ -1,7 +1,16 @@
 // ─── 会话执行状态 ───
-// 参考 RedScope 原型呈现安全思考摘要与单工具时间线；不展示模型内部推理原文。
+// 参考 RedScope 原型呈现安全思考摘要与多工具时间线；Ask User 固定在底部，不进入这里。
 
-import { Brain, Check, ChevronDown, Loader2, LockKeyhole, Minus, X } from 'lucide-react';
+import {
+  Brain,
+  Check,
+  ChevronDown,
+  CircleHelp,
+  Loader2,
+  LockKeyhole,
+  Minus,
+  X,
+} from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { ChatMessage } from '@/lib/domain/chat';
 import type { ReasoningActivity, ToolActivity } from '@/lib/domain/types';
@@ -16,14 +25,17 @@ interface ChatFlowStatusProps {
 }
 
 export function ChatFlowStatus({ message, onResolvePagePermission }: ChatFlowStatusProps) {
-  if (!message.reasoningActivity && !message.toolActivity) return null;
+  const activities = (
+    message.toolActivities ?? (message.toolActivity ? [message.toolActivity] : [])
+  ).filter(({ name }) => name !== 'ask_user');
+  if (!message.reasoningActivity && activities.length === 0) return null;
 
   return (
     <div className="chat-flow-status">
       {message.reasoningActivity ? <ReasoningStep activity={message.reasoningActivity} /> : null}
-      {message.toolActivity ? (
-        <ToolStep activity={message.toolActivity} onResolve={onResolvePagePermission} />
-      ) : null}
+      {activities.map((activity) => (
+        <ToolStep key={activity.callId} activity={activity} onResolve={onResolvePagePermission} />
+      ))}
     </div>
   );
 }
@@ -196,6 +208,8 @@ function formatDuration(durationMs: number): string {
 
 function toolIcon(status: ToolActivity['status']) {
   switch (status) {
+    case 'waiting_user':
+      return <CircleHelp size={11} />;
     case 'waiting_permission':
       return <LockKeyhole size={11} />;
     case 'running':

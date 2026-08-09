@@ -26,7 +26,12 @@ import type {
   GenerationToolExecutionResult,
 } from '@/lib/generation/types';
 import { hasExactPageOriginAccess, pageOriginPattern } from '@/lib/page/access';
-import { safePageTitle, safePageUrl, validatePageTurnSnapshot } from '@/lib/page/snapshot';
+import {
+  safePageTitle,
+  safePageUrl,
+  snapshotFromTab,
+  validatePageTurnSnapshot,
+} from '@/lib/page/snapshot';
 
 export const BROWSER_ACTION_TOOL: GenerationToolDefinition = {
   name: 'browser_action',
@@ -71,6 +76,8 @@ type ReportProgress = (statusText: string, detail?: string) => void;
 
 const VERIFY_TIMEOUT_MS = 6_000;
 const VERIFY_POLL_MS = 250;
+const CONTENT_SETTLE_MS = 900;
+const STABLE_VERIFY_POLLS = 2;
 const CONTROL_DISCOVERY_TIMEOUT_MS = 2_400;
 const CONTROL_DISCOVERY_POLL_MS = 200;
 const MAX_QUERY_CHARS = 500;
@@ -134,6 +141,7 @@ async function openTarget(
       sourceOrigin: new URL(url).origin,
       sourceTitle: safePageTitle(ready.title ?? '', url),
       sourceUrl: safePageUrl(url),
+      nextPageSnapshot: snapshotFromTab(ready),
     };
   } catch (error) {
     if (signal.aborted) return cancelled();
@@ -200,6 +208,7 @@ async function searchTarget(
   if (!permissionGranted && !activeTabAccess) {
     return {
       deferred: true,
+      kind: 'page_permission',
       statusText: '等待网站操作权限',
       detail: `仅在你允许后识别并操作 ${targetOrigin} 的搜索框；不会发送聊天、登录、支付、投递或发布内容。`,
       permissionPattern,
@@ -308,6 +317,7 @@ async function searchTarget(
       sourceOrigin: new URL(finalUrl).origin,
       sourceTitle: finalTitle,
       sourceUrl: safePageUrl(finalUrl),
+      nextPageSnapshot: snapshotFromTab(verification.tab),
     };
   } catch (error) {
     if (signal.aborted) return cancelled();
@@ -347,13 +357,30 @@ async function waitForSearchVerification(
   before: BrowserPageFingerprint,
   signal: AbortSignal,
 ): Promise<{ changed: boolean; reason: string; tab: chrome.tabs.Tab }> {
+  const startedAt = Date.now();
   const deadline = Date.now() + VERIFY_TIMEOUT_MS;
   let lastTab = await chrome.tabs.get(tabId);
+  let lastNavigationUrl = '';
+  let stableNavigationPolls = 0;
+  let lastContentKey = '';
+  let stableContentPolls = 0;
   while (Date.now() <= deadline) {
     signal.throwIfAborted();
     lastTab = await chrome.tabs.get(tabId);
     if (lastTab.url && withoutHash(lastTab.url) !== withoutHash(before.url)) {
-      return { changed: true, reason: '页面地址已变化', tab: lastTab };
+      const navigationUrl = withoutHash(lastTab.url);
+      stableNavigationPolls =
+        lastTab.status === 'complete' && navigationUrl === lastNavigationUrl
+          ? stableNavigationPolls + 1
+          : lastTab.status === 'complete'
+            ? 1
+            : 0;
+      lastNavigationUrl = navigationUrl;
+      if (stableNavigationPolls >= STABLE_VERIFY_POLLS) {
+        return { changed: true, reason: '页面地址已变化', tab: lastTab };
+      }
+      await abortableDelay(VERIFY_POLL_MS, signal);
+      continue;
     }
     try {
       const snapshots = await chrome.scripting.executeScript({
@@ -362,7 +389,19 @@ async function waitForSearchVerification(
       });
       const after = parseFingerprint(snapshots[0]?.result);
       if (after && fingerprintChanged(before, after)) {
-        return { changed: true, reason: '页面内容已更新', tab: lastTab };
+        const contentKey = fingerprintKey(after);
+        stableContentPolls = contentKey === lastContentKey ? stableContentPolls + 1 : 1;
+        lastContentKey = contentKey;
+        if (
+          Date.now() - startedAt >= CONTENT_SETTLE_MS &&
+          stableContentPolls >= STABLE_VERIFY_POLLS &&
+          lastTab.status === 'complete'
+        ) {
+          return { changed: true, reason: '页面内容已更新', tab: lastTab };
+        }
+      } else {
+        lastContentKey = '';
+        stableContentPolls = 0;
       }
     } catch {
       // 导航提交期间脚本上下文会短暂销毁；继续轮询 tab URL 与新文档。
@@ -370,6 +409,10 @@ async function waitForSearchVerification(
     await abortableDelay(VERIFY_POLL_MS, signal);
   }
   return { changed: false, reason: '页面未出现可验证变化', tab: lastTab };
+}
+
+function fingerprintKey(value: BrowserPageFingerprint): string {
+  return `${withoutHash(value.url)}\n${value.title}\n${value.textHash}\n${value.textLength}\n${value.childCount}`;
 }
 
 function parseRequest(value: Record<string, unknown>): BrowserActionRequest | null {

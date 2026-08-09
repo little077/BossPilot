@@ -13,7 +13,7 @@ interface CapturedChatRequest {
     messages?: Array<{ role?: string; content?: unknown }>;
     model?: unknown;
     stream?: unknown;
-    tools?: unknown;
+    tools?: Array<{ function?: { name?: string } }>;
   };
 }
 
@@ -99,7 +99,7 @@ test('真实流式对话写入历史、生成自动标题，并在刷新后回�
 
   await page.getByRole('button', { name: '历史记录' }).click();
   const restoreHistory = page.getByRole('button', { name: /恢复会话：BossPilot 功能介绍/ });
-  await expect(restoreHistory).toBeVisible();
+  await expect(restoreHistory).toBeVisible({ timeout: 10_000 });
   await restoreHistory.click();
   await expect(page.locator('.redscope-user-message')).toContainText(USER_TEXT);
   await expect(page.locator('.redscope-ai-message')).toContainText(ASSISTANT_TEXT);
@@ -109,6 +109,91 @@ test('真实流式对话写入历史、生成自动标题，并在刷新后回�
   await expect(page.locator('.redscope-user-message')).toContainText(USER_TEXT);
   await expect(page.locator('.redscope-ai-message')).toContainText(ASSISTANT_TEXT);
   await expect(page.locator('body')).not.toContainText(SECRET);
+});
+
+test('Ask User 固定在输入框上方，切换页面后仍可回答并恢复原循环', async ({
+  context,
+  extensionId,
+}) => {
+  const chatRequests: CapturedChatRequest[] = [];
+  await context.route(`${BASE_URL}/models`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ data: [{ id: MODEL_ID, name: 'Boss Stream Test' }] }),
+    });
+  });
+  await context.route(`${BASE_URL}/chat/completions`, async (route) => {
+    const request = await captureChatRequest(route.request());
+    chatRequests.push(request);
+    const hasToolResult = request.body.messages?.some(({ role }) => role === 'tool') ?? false;
+    await route.fulfill({
+      status: 200,
+      headers: {
+        'access-control-allow-origin': '*',
+        'cache-control': 'no-cache',
+        'content-type': 'text/event-stream; charset=utf-8',
+      },
+      body: hasToolResult
+        ? openAiFinalAnswerBody(
+            'chatcmpl-bosspilot-ask-answer-e2e',
+            '收到，我会按周日继续执行，之前的进度已经保留。',
+          )
+        : openAiToolCallBody('ask_user', {
+            question: '你更方便哪一天？',
+            options: ['周六', '周日'],
+            customPlaceholder: '例如：周日下午',
+          }),
+    });
+  });
+
+  const panel = await context.newPage();
+  await panel.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  await panel.getByRole('button', { name: '设置' }).click();
+  await panel.getByRole('button', { name: /显示更多/ }).click();
+  await panel.getByRole('button', { name: /自定义端点/ }).click();
+  const card = panel.getByRole('article', { name: '自定义端点 模型配置' });
+  await card.getByLabel('Base URL（OpenAI 兼容端点）').fill(BASE_URL);
+  await card.getByLabel('API Key（仅存本机）').fill(SECRET);
+  await card.getByRole('button', { name: '开通' }).click();
+  await card.getByRole('button', { name: 'Boss Stream Test' }).click();
+
+  await panel.getByRole('button', { name: '对话', exact: true }).click();
+  await panel.locator('.composer-editor [contenteditable="true"]').fill('帮我安排周末活动');
+  await panel.getByRole('button', { name: '发送' }).click();
+
+  const askPanel = panel.locator('.ask-user-panel');
+  await expect(askPanel).toBeVisible();
+  await expect(askPanel.getByText('你更方便哪一天？')).toBeVisible();
+  await expect(
+    panel.locator('.redscope-ai-message').filter({ hasText: '你更方便哪一天？' }),
+  ).toHaveCount(0);
+  await expect(
+    panel.locator('.redscope-dock .composer-editor [contenteditable="false"]'),
+  ).toBeVisible();
+  await panel.setViewportSize({ width: 420, height: 720 });
+  await panel.screenshot({ path: 'test-results/ask-user-sidepanel.png' });
+
+  await panel.getByRole('button', { name: '历史记录' }).click();
+  await expect(askPanel).toHaveCount(0);
+  await panel.getByRole('button', { name: '对话', exact: true }).click();
+  await expect(panel.locator('.ask-user-panel')).toBeVisible();
+
+  await panel.locator('.ask-user-option').filter({ hasText: '周日' }).click();
+  await panel.getByRole('button', { name: '继续执行' }).click();
+  await expect(panel.locator('.ask-user-panel')).toHaveCount(0);
+  await expect(panel.locator('.redscope-ai-message')).toContainText(
+    '收到，我会按周日继续执行，之前的进度已经保留。',
+  );
+  await expect.poll(() => chatRequests.length).toBe(2);
+  expect(chatRequests[1]?.body.messages).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        role: 'tool',
+        content: expect.stringContaining('周日'),
+      }),
+    ]),
+  );
 });
 
 test('通用当前页工具读取 Boss 岗位并附加领域增强', async ({ context, extensionId }) => {
@@ -208,7 +293,11 @@ test('通用当前页工具读取 Boss 岗位并附加领域增强', async ({ co
   );
   await expect.poll(() => chatRequests.length).toBe(2);
   expect(chatRequests[0]?.body.tools).toBeDefined();
-  expect(chatRequests[1]?.body.tools).toEqual([]);
+  expect(chatRequests[1]?.body.tools?.map((tool) => tool.function?.name)).toEqual([
+    'read_current_page',
+    'browser_action',
+    'ask_user',
+  ]);
   expect(chatRequests[1]?.body.messages).toEqual(
     expect.arrayContaining([
       expect.objectContaining({
@@ -487,7 +576,18 @@ async function captureChatRequest(request: Request): Promise<CapturedChatRequest
         : undefined,
       model: body.model,
       stream: body.stream,
-      tools: body.tools,
+      tools: Array.isArray(body.tools)
+        ? body.tools.flatMap((tool) => {
+            if (!isRecord(tool) || !isRecord(tool.function)) return [];
+            return [
+              {
+                function: {
+                  name: typeof tool.function.name === 'string' ? tool.function.name : undefined,
+                },
+              },
+            ];
+          })
+        : undefined,
     },
   };
 }

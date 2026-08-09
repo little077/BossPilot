@@ -2,7 +2,12 @@
 // 侧边栏与用户之间的多轮对话消息。持久化到 IndexedDB（lib/storage/db.ts），
 // 冷启动可回放；发送给模型时映射为 { role, content }。
 
-import type { ModelIdentity, ReasoningActivity, ToolActivity } from '@/lib/domain/types';
+import type {
+  ModelIdentity,
+  PendingUserQuestion,
+  ReasoningActivity,
+  ToolActivity,
+} from '@/lib/domain/types';
 
 export interface GenerationUsage {
   inputTokens: number;
@@ -28,6 +33,8 @@ export type GenerationErrorCode =
   | 'NETWORK_ERROR'
   | 'TIMEOUT'
   | 'OUTPUT_LIMIT_EXCEEDED'
+  | 'AGENT_LIMIT_REACHED'
+  | 'REPEATED_TOOL_CALL'
   | 'INVALID_RESPONSE';
 
 export interface ChatMessage {
@@ -51,8 +58,12 @@ export interface ChatMessage {
   usage?: GenerationUsage;
   /** 原型中的「思考过程」只展示安全阶段摘要，不保存或展示模型私有推理。 */
   reasoningActivity?: ReasoningActivity;
-  /** 本轮最多一个只读工具；状态随消息快照一起回放，断线后不会留下幽灵任务。 */
+  /** 兼容旧历史记录的最后一个工具快照；新 UI 优先读取 toolActivities。 */
   toolActivity?: ToolActivity;
+  /** Agent 循环中的完整工具时间线；每个模型回合最多产生一个工具调用。 */
+  toolActivities?: ToolActivity[];
+  /** Ask User 暂停点；固定显示在输入框上方，不作为消息气泡渲染。 */
+  pendingUserQuestion?: PendingUserQuestion;
 }
 
 /** 会话标题来源；用户手动改名后，自动标题不得再次覆盖。 */

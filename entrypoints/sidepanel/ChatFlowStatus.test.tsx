@@ -140,6 +140,49 @@ describe('ChatFlowStatus', () => {
     expect(screen.getByText('岗位描述 1200 字')).toBeVisible();
   });
 
+  it('renders the full multi-tool timeline but keeps Ask User out of the message flow', () => {
+    render(
+      <ChatFlowStatus
+        message={{
+          ...BASE_MESSAGE,
+          toolActivities: [
+            {
+              callId: 'call-1',
+              name: 'browser_action',
+              label: '操作浏览器',
+              status: 'succeeded',
+              statusText: '已在百度搜索',
+              startedAt: 1_000,
+              finishedAt: 1_500,
+            },
+            {
+              callId: 'call-2',
+              name: 'read_current_page',
+              label: '读取当前页面',
+              status: 'succeeded',
+              statusText: '已读取搜索结果',
+              startedAt: 1_600,
+              finishedAt: 2_000,
+            },
+            {
+              callId: 'call-3',
+              name: 'ask_user',
+              label: '询问用户',
+              status: 'waiting_user',
+              statusText: '等待用户补充信息',
+              startedAt: 2_100,
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText('已在百度搜索')).toBeVisible();
+    expect(screen.getByText('已读取搜索结果')).toBeVisible();
+    expect(screen.queryByText('等待用户补充信息')).not.toBeInTheDocument();
+    expect(screen.queryByText('询问用户')).not.toBeInTheDocument();
+  });
+
   it('shows an exact-origin permission card and forwards the user decision', async () => {
     const resolvePermission = vi.fn().mockResolvedValue(true);
     render(

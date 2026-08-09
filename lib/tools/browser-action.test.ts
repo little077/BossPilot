@@ -301,6 +301,7 @@ describe('browser_action tool', () => {
       ),
     ).resolves.toEqual({
       deferred: true,
+      kind: 'page_permission',
       statusText: '等待网站操作权限',
       detail: expect.stringContaining('不会发送聊天'),
       permissionPattern: 'https://www.baidu.com/*',
@@ -549,6 +550,67 @@ describe('browser_action tool', () => {
       isError: false,
       detail: expect.stringContaining('页面地址已变化'),
       sourceUrl: 'https://www.baidu.com/s',
+      nextPageSnapshot: {
+        tabId: 9,
+        url: 'https://www.baidu.com/s?wd=AI',
+      },
+    });
+  });
+
+  it('waits through autocomplete DOM changes until a delayed search navigation is stable', async () => {
+    vi.useFakeTimers();
+    const home = {
+      id: 9,
+      windowId: 3,
+      url: 'https://www.baidu.com/',
+      title: '百度',
+      status: 'complete' as const,
+    };
+    const loadingResults = {
+      ...home,
+      url: 'https://www.baidu.com/s?wd=AI',
+      title: 'AI - 百度',
+      status: 'loading' as const,
+    };
+    const completeResults = { ...loadingResults, status: 'complete' as const };
+    tabsGet
+      .mockResolvedValueOnce(home)
+      .mockResolvedValueOnce(home)
+      .mockResolvedValueOnce(home)
+      .mockResolvedValueOnce(home)
+      .mockResolvedValueOnce(loadingResults)
+      .mockResolvedValueOnce(completeResults)
+      .mockResolvedValue(completeResults);
+    executeScript.mockImplementation((options: { args?: unknown[] }) =>
+      options.args
+        ? Promise.resolve([{ result: searchResult() }])
+        : Promise.resolve([
+            {
+              result: {
+                ...BEFORE,
+                textHash: 'autocomplete-only',
+                textLength: 140,
+              },
+            },
+          ]),
+    );
+
+    const pending = executeBrowserAction(
+      call({ action: 'search', destination: 'baidu', query: 'AI' }),
+      SNAPSHOT,
+      '',
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    await expect(pending).resolves.toMatchObject({
+      isError: false,
+      detail: expect.stringContaining('页面地址已变化'),
+      sourceUrl: 'https://www.baidu.com/s',
+      nextPageSnapshot: {
+        tabId: 9,
+        url: 'https://www.baidu.com/s?wd=AI',
+      },
     });
   });
 
@@ -697,7 +759,7 @@ describe('browser_action tool', () => {
       new AbortController().signal,
       progress,
     );
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(1_500);
     await expect(pending).resolves.toMatchObject({ isError: false });
     expect(progress).toHaveBeenCalledWith('正在等待搜索框出现', expect.any(String));
   });

@@ -578,6 +578,21 @@ export function useAgentPort() {
     [getConversationMessages, send],
   );
 
+  const resolveAskUser = useCallback(
+    async (requestId: string, answer: string): Promise<boolean> => {
+      const active = activeChatRef.current;
+      const normalized = answer.replaceAll('\u0000', '').trim().slice(0, 2_000);
+      if (!active || active.requestId !== requestId || !normalized) return false;
+      return send({
+        type: 'ask_user_result',
+        requestId,
+        answer: normalized,
+        messages: getConversationMessages(active.conversationId),
+      });
+    },
+    [getConversationMessages, send],
+  );
+
   const downloadDiagnostics = useCallback(() => {
     send({ type: 'download_diagnostics' });
   }, [send]);
@@ -655,6 +670,7 @@ export function useAgentPort() {
     sendChat,
     cancelChat,
     resolvePagePermission,
+    resolveAskUser,
     downloadDiagnostics,
     startNewConversation,
     restoreConversation,

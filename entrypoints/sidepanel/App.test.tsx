@@ -74,6 +74,7 @@ const basePort = {
   sendChat: vi.fn(),
   cancelChat: vi.fn(),
   resolvePagePermission: vi.fn(),
+  resolveAskUser: vi.fn(async () => true),
   downloadDiagnostics: vi.fn(),
   startNewConversation: vi.fn(),
   restoreConversation: vi.fn(async () => true),
@@ -146,6 +147,69 @@ describe('首页发送过渡', () => {
     act(() => vi.advanceTimersByTime(520));
     expect(screen.queryByRole('heading', { name: /聊两句/ })).not.toBeInTheDocument();
     expect(screen.getByText('总结一下我当前打开的网页，并列出三个重点')).toBeInTheDocument();
+  });
+});
+
+describe('Ask User 底部暂停面板', () => {
+  it('不把问题渲染进消息流，并从底部连体面板提交答案', async () => {
+    const user = userEvent.setup();
+    const resolveAskUser = vi.fn(async () => true);
+    const cancelChat = vi.fn();
+    const pendingAssistant: ChatMessage = {
+      id: 'assistant-ask',
+      role: 'assistant',
+      content: '',
+      createdAt: 2,
+      status: 'streaming',
+      pendingUserQuestion: {
+        requestId: 'request-ask',
+        callId: 'call-ask',
+        question: '你更方便哪一天？',
+        options: [
+          { id: 'option-1', label: '周六' },
+          { id: 'option-2', label: '周日' },
+        ],
+        allowCustom: true,
+      },
+    };
+    useAgentPortMock.mockReturnValue({
+      ...basePort,
+      messages: [
+        { id: 'user-1', role: 'user', content: '帮我找周末活动', createdAt: 1 },
+        pendingAssistant,
+      ],
+      conversations: [
+        {
+          id: 'conversation-1',
+          ordinal: 1,
+          title: '历史记录 1',
+          titleSource: 'fallback',
+          createdAt: 1,
+          updatedAt: 2,
+          lastMessagePreview: '帮我找周末活动',
+          messageCount: 2,
+          unread: false,
+        },
+      ],
+      activeConversationId: 'conversation-1',
+      runningConversationId: 'conversation-1',
+      chatRunning: true,
+      resolveAskUser,
+      cancelChat,
+    });
+
+    render(<App />);
+    const question = screen.getByText('你更方便哪一天？');
+    expect(question.closest('main')).toBeNull();
+    expect(question.closest('.ask-user-shell')).not.toBeNull();
+    expect(screen.getByTestId('composer')).toHaveAttribute('data-disabled', 'true');
+    expect(screen.getByText('任务已暂停 · 等待你的回答')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '取消任务' }));
+    expect(cancelChat).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole('radio', { name: '周日' }));
+    await user.click(screen.getByRole('button', { name: '继续执行' }));
+    expect(resolveAskUser).toHaveBeenCalledWith('request-ask', '周日');
   });
 });
 

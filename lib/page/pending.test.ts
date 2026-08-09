@@ -5,6 +5,7 @@ import type { DeferredGenerationTurn } from '@/lib/generation/manager';
 import {
   claimPendingPageTurn,
   clearPendingPageTurn,
+  createPendingAgentTurn,
   createPendingPageTurn,
   historyMatchesPending,
   loadPendingPageTurn,
@@ -81,14 +82,30 @@ describe('pending page permission turns', () => {
     await expect(loadPendingPageTurn(700_000)).resolves.toBeNull();
     expect(remove).toHaveBeenCalled();
 
-    stored.bosspilot_pending_page_turn_v1 = { version: 99 };
+    stored.bosspilot_pending_agent_turn_v2 = { version: 99 };
     await expect(loadPendingPageTurn()).resolves.toBeNull();
 
-    stored.bosspilot_pending_page_turn_v1 = {
+    stored.bosspilot_pending_agent_turn_v2 = {
       ...createPendingPageTurn(DEFERRED, SNAPSHOT, HISTORY),
       historyMessageIds: [''],
     };
     await expect(loadPendingPageTurn()).resolves.toBeNull();
+  });
+
+  it('keeps Ask User pauses for the browser session without requiring a page snapshot', async () => {
+    const pending = createPendingAgentTurn(DEFERRED, null, HISTORY, 'user_input', 1_000);
+    expect(pending).toMatchObject({
+      version: 2,
+      kind: 'user_input',
+      status: 'awaiting_user',
+      snapshot: null,
+      expiresAt: 86_401_000,
+    });
+    await savePendingPageTurn(pending);
+    await expect(claimPendingPageTurn('request-1', 2_000)).resolves.toMatchObject({
+      status: 'resuming',
+      kind: 'user_input',
+    });
   });
 
   it('defensively clones all optional generation snapshots before persistence', () => {

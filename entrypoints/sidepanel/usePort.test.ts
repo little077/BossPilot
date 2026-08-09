@@ -1377,4 +1377,57 @@ describe('useAgentPort', () => {
       granted: false,
     });
   });
+
+  it('routes an Ask User answer back to the exact running conversation', async () => {
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('帮我找周末活动');
+    });
+    const chat = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    expect(chat).toBeDefined();
+    if (!chat) throw new Error('chat request was not sent');
+
+    const waiting: ChatMessage = {
+      id: 'assistant-ask',
+      role: 'assistant',
+      content: '',
+      createdAt: 2,
+      status: 'streaming',
+      pendingUserQuestion: {
+        requestId: chat.requestId,
+        callId: 'ask-1',
+        question: '你更方便哪一天？',
+        options: [
+          { id: 'option-1', label: '周六' },
+          { id: 'option-2', label: '周日' },
+        ],
+        allowCustom: true,
+      },
+    };
+    act(() => {
+      ports[0]?.emit({ type: 'stream_update', requestId: chat.requestId, message: waiting });
+    });
+
+    let accepted = false;
+    await act(async () => {
+      accepted = await hook.result.current.resolveAskUser(chat.requestId, '  周日下午  ');
+    });
+    expect(accepted).toBe(true);
+    expect(ports[0]?.sent.at(-1)).toMatchObject({
+      type: 'ask_user_result',
+      requestId: chat.requestId,
+      answer: '周日下午',
+      messages: expect.arrayContaining([
+        expect.objectContaining({ id: chat.messages[0]?.id }),
+        expect.objectContaining({ id: 'assistant-ask' }),
+      ]),
+    });
+
+    await act(async () => {
+      accepted = await hook.result.current.resolveAskUser(chat.requestId, '');
+    });
+    expect(accepted).toBe(false);
+  });
 });

@@ -112,6 +112,7 @@ describe('readCurrentPage', () => {
 
     await expect(readCurrentPage(SNAPSHOT, new AbortController().signal)).resolves.toEqual({
       deferred: true,
+      kind: 'page_permission',
       statusText: '等待网站读取权限',
       detail: expect.stringContaining('https://example.com'),
       permissionPattern: 'https://example.com/*',

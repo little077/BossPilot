@@ -1,10 +1,12 @@
 import type { ChatMessage, GenerationFinishReason, GenerationUsage } from '@/lib/domain/chat';
 import type {
+  AskUserOption,
   BrowserActionErrorCode,
   DomainToolName,
   ModelIdentity,
   PageExtractionMode,
   PageReadErrorCode,
+  PageTurnSnapshot,
 } from '@/lib/domain/types';
 
 /**
@@ -110,11 +112,17 @@ export interface GenerationToolExecutionResult {
   returnedChars?: number;
   truncated?: boolean;
   enrichmentStatus?: 'success' | 'failed' | 'not_applicable';
+  /**
+   * 浏览器工具实际操作完成后的本地页面身份。仅供 background 延续同一 Agent 任务，
+   * Manager 不会把完整 URL 或标签页 ID 发给模型。
+   */
+  nextPageSnapshot?: PageTurnSnapshot;
 }
 
-/** 需要真实用户手势时暂停工具阶段；不是错误结果，不能提前发给模型。 */
-export interface GenerationToolDeferredResult {
+/** 页面权限需要真实用户手势时暂停；不是错误结果，不能提前发给模型。 */
+export interface GenerationPagePermissionDeferredResult {
   deferred: true;
+  kind: 'page_permission';
   statusText: string;
   detail: string;
   permissionPattern: string;
@@ -122,6 +130,21 @@ export interface GenerationToolDeferredResult {
   sourceTitle: string;
   permissionKind?: 'read' | 'interact';
 }
+
+/** Agent 缺少关键条件时暂停，并把单个澄清问题交给底部 Ask User 面板。 */
+export interface GenerationUserInputDeferredResult {
+  deferred: true;
+  kind: 'user_input';
+  statusText: string;
+  question: string;
+  options: AskUserOption[];
+  allowCustom: boolean;
+  customPlaceholder?: string;
+}
+
+export type GenerationToolDeferredResult =
+  | GenerationPagePermissionDeferredResult
+  | GenerationUserInputDeferredResult;
 
 export type GenerationToolExecutionOutcome =
   | GenerationToolExecutionResult

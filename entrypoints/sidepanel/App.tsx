@@ -16,6 +16,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { TaskPhase } from '@/lib/domain/types';
+import { AskUserPanel } from './AskUserPanel';
 import { ChatFlowStatus } from './ChatFlowStatus';
 import { Composer, type ComposerHandle } from './Composer';
 import { HistoryView } from './HistoryView';
@@ -88,6 +89,7 @@ export default function App() {
     sendChat,
     cancelChat,
     resolvePagePermission,
+    resolveAskUser,
     downloadDiagnostics,
     startNewConversation,
     restoreConversation,
@@ -110,14 +112,21 @@ export default function App() {
     chatRunning && Boolean(runningConversationId) && runningConversationId !== activeConversationId;
   const lastMessage = messages.at(-1);
   const activeAssistant = lastMessage?.role === 'assistant' ? lastMessage : undefined;
-  const chatStatusText =
-    activeAssistant?.toolActivity?.status === 'waiting_permission'
-      ? activeAssistant.toolActivity.permissionKind === 'interact'
+  const pendingUserQuestion =
+    currentConversationRunning && activeAssistant?.status === 'streaming'
+      ? activeAssistant.pendingUserQuestion
+      : undefined;
+  const currentToolActivity =
+    activeAssistant?.toolActivities?.at(-1) ?? activeAssistant?.toolActivity;
+  const chatStatusText = pendingUserQuestion
+    ? '任务已暂停 · 等待你的回答'
+    : currentToolActivity?.status === 'waiting_permission'
+      ? currentToolActivity.permissionKind === 'interact'
         ? '等待网站操作权限'
         : '等待页面读取权限'
-      : activeAssistant?.toolActivity?.status === 'running'
-        ? `执行工具 · ${activeAssistant.toolActivity.label}`
-        : activeAssistant?.toolActivity
+      : currentToolActivity?.status === 'running'
+        ? `执行工具 · ${currentToolActivity.label}`
+        : currentToolActivity
           ? '回复生成中…'
           : '思考中…';
 
@@ -364,6 +373,7 @@ export default function App() {
 
               {messages.map((m) => {
                 const streaming = m.role === 'assistant' && m.status === 'streaming';
+                if (m.role === 'assistant' && m.pendingUserQuestion) return null;
                 if (m.role === 'user') {
                   return (
                     <div
@@ -443,13 +453,25 @@ export default function App() {
       {/* ── 会话底部输入区（仅对话页 · 已进入会话） ── */}
       {tab === 'chat' && started && (
         <div className="redscope-dock border-t border-line bg-app p-2.5">
-          <Composer
-            autoFocus
-            running={currentConversationRunning}
-            disabled={!connected || anotherConversationRunning}
-            onSend={submit}
-            onCancel={cancelChat}
-          />
+          <div className={pendingUserQuestion ? 'ask-user-shell' : ''}>
+            {pendingUserQuestion ? (
+              <AskUserPanel
+                key={pendingUserQuestion.callId}
+                question={pendingUserQuestion}
+                onContinue={(answer) => resolveAskUser(pendingUserQuestion.requestId, answer)}
+                onCancel={cancelChat}
+              />
+            ) : null}
+            <Composer
+              autoFocus={!pendingUserQuestion}
+              running={currentConversationRunning && !pendingUserQuestion}
+              waitingForAnswer={Boolean(pendingUserQuestion)}
+              disabled={!connected || anotherConversationRunning || Boolean(pendingUserQuestion)}
+              onSend={submit}
+              onCancel={cancelChat}
+              className={pendingUserQuestion ? 'ask-user-composer' : ''}
+            />
+          </div>
         </div>
       )}
     </div>
