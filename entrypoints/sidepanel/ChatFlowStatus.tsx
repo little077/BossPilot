@@ -80,6 +80,7 @@ function ToolStep({
   const [permissionError, setPermissionError] = useState('');
   const running = activity.status === 'running';
   const waitingPermission = activity.status === 'waiting_permission';
+  const interactionPermission = activity.permissionKind === 'interact';
   const elapsedMs = useElapsedMs(activity.startedAt, activity.finishedAt, running);
   const canExpand = Boolean(activity.detail);
   const canResolvePermission = Boolean(
@@ -130,13 +131,18 @@ function ToolStep({
           <div className="chat-tool-detail">{activity.detail}</div>
         ) : null}
         {waitingPermission ? (
-          <section className="chat-permission-card" aria-label="页面读取权限">
+          <section
+            className="chat-permission-card"
+            aria-label={interactionPermission ? '页面操作权限' : '页面读取权限'}
+          >
             <div className="chat-permission-origin">
               <LockKeyhole size={11} aria-hidden />
               <span>{activity.sourceOrigin ?? '当前网站'}</span>
             </div>
             <p>
-              允许后可读取这个网站的可见纯文本，并把回答所需内容发送给你当前选择的模型供应商；不会点击、输入或操作页面。可随时在设置中撤销。
+              {interactionPermission
+                ? '允许后可识别并操作这个网站的搜索框，用于输入你本轮提供的搜索词并提交；不会发送聊天、登录、支付、投递或发布内容。可随时在设置中撤销。'
+                : '允许后可读取这个网站的可见纯文本，并把回答所需内容发送给你当前选择的模型供应商；不会点击、输入或操作页面。可随时在设置中撤销。'}
             </p>
             <div className="chat-permission-actions">
               <button
@@ -154,7 +160,7 @@ function ToolStep({
                 onClick={() => void resolvePermission(true)}
               >
                 {permissionBusy ? <Loader2 size={10} className="animate-spin" /> : null}
-                允许读取
+                {interactionPermission ? '允许操作' : '允许读取'}
               </button>
             </div>
             {permissionError ? (

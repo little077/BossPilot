@@ -191,6 +191,50 @@ export type PageReadErrorCode =
   | 'cancelled'
   | 'unknown_read_error';
 
+export type BrowserDestination = 'current' | 'baidu' | 'bing' | 'google' | 'boss';
+
+export type BrowserActionErrorCode =
+  | 'INVALID_BROWSER_ACTION'
+  | 'UNGROUNDED_URL'
+  | 'TAB_NOT_FOUND'
+  | 'TAB_LOAD_TIMEOUT'
+  | 'NO_SEARCH_CONTROL'
+  | 'AMBIGUOUS_SEARCH_CONTROL'
+  | 'INTERACTION_FAILED'
+  | 'VERIFICATION_FAILED';
+
+/** 页面脚本只返回交互元数据，不跨运行时传输页面正文或表单中的其他值。 */
+export interface BrowserSearchControlSnapshot {
+  tag: 'input' | 'textarea' | 'contenteditable';
+  role: string;
+  label: string;
+  placeholder: string;
+  type: string;
+  score: number;
+}
+
+export interface BrowserPageFingerprint {
+  url: string;
+  title: string;
+  textHash: string;
+  textLength: number;
+  childCount: number;
+}
+
+export interface BrowserSearchScriptResult {
+  version: 1;
+  ok: boolean;
+  executionUrl: string;
+  control?: BrowserSearchControlSnapshot;
+  candidates: BrowserSearchControlSnapshot[];
+  ambiguous: boolean;
+  typed: boolean;
+  submitted: boolean;
+  submissionMethod?: 'form' | 'button' | 'keypress';
+  fingerprint: BrowserPageFingerprint;
+  error?: string;
+}
+
 /** 单轮对话里可见的安全思考状态；只描述阶段，不暴露模型内部推理原文。 */
 export interface ReasoningActivity {
   status: 'running' | 'completed' | 'cancelled' | 'error';
@@ -199,8 +243,12 @@ export interface ReasoningActivity {
   finishedAt?: number;
 }
 
-/** 一次只读工具的 UI/IPC 快照，不携带抓取到的网页原文。 */
-export type DomainToolName = 'read_current_page' | 'read_current_job' | 'read_visible_jobs';
+/** 一次浏览器工具的 UI/IPC 快照；状态元数据不携带抓取到的网页正文。 */
+export type DomainToolName =
+  | 'read_current_page'
+  | 'browser_action'
+  | 'read_current_job'
+  | 'read_visible_jobs';
 
 export interface ToolActivity {
   /** 所属生成轮次，用于权限等待卡片把用户决定精确路由回 Background。 */
@@ -217,6 +265,7 @@ export interface ToolActivity {
   sourceTitle?: string;
   sourceUrl?: string;
   permissionPattern?: string;
+  permissionKind?: 'read' | 'interact';
   extractionMode?: PageExtractionMode;
   returnedChars?: number;
   truncated?: boolean;
@@ -230,6 +279,7 @@ export interface ToolActivity {
     | 'NO_PERMISSION'
     | 'EXTRACTION_FAILED'
     | 'CANCELLED'
+    | BrowserActionErrorCode
     | PageReadErrorCode;
 }
 

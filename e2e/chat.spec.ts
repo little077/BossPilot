@@ -361,6 +361,112 @@ test('通用当前页工具在不滚动页面的前提下读取 Boss 当前岗�
   );
 });
 
+test('浏览器操作工具在当前页语义识别搜索框、提交并验证结果', async ({ context, extensionId }) => {
+  const chatRequests: CapturedChatRequest[] = [];
+  await context.route(`${BASE_URL}/models`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ data: [{ id: MODEL_ID, name: 'Boss Stream Test' }] }),
+    });
+  });
+  await context.route(`${BASE_URL}/chat/completions`, async (route) => {
+    const request = await captureChatRequest(route.request());
+    chatRequests.push(request);
+    const hasToolResult = request.body.messages?.some(({ role }) => role === 'tool') ?? false;
+    await route.fulfill({
+      status: 200,
+      headers: {
+        'access-control-allow-origin': '*',
+        'cache-control': 'no-cache',
+        'content-type': 'text/event-stream; charset=utf-8',
+      },
+      body: hasToolResult
+        ? openAiFinalAnswerBody(
+            'chatcmpl-browser-action-answer-e2e',
+            '已经在当前页面搜索 AI Agent，并确认页面已更新。',
+          )
+        : openAiToolCallBody('browser_action', {
+            action: 'search',
+            destination: 'current',
+            query: 'AI Agent',
+          }),
+    });
+  });
+
+  const searchPageUrl = 'https://www.zhipin.com/bosspilot-browser-action-e2e';
+  await context.route(searchPageUrl, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: `<!doctype html>
+        <html lang="zh-CN">
+          <head><title>通用搜索测试页</title></head>
+          <body>
+            <main>
+              <form role="search" id="search-form">
+                <label for="search-query">搜索知识库</label>
+                <input id="search-query" type="search" placeholder="输入关键词" />
+                <button type="submit">搜索</button>
+              </form>
+              <section id="result">等待搜索</section>
+            </main>
+            <script>
+              document.querySelector('#search-form').addEventListener('submit', (event) => {
+                event.preventDefault();
+                const value = document.querySelector('#search-query').value;
+                document.querySelector('#result').textContent = '搜索结果：' + value;
+                document.title = value + ' - 搜索结果';
+              });
+            </script>
+          </body>
+        </html>`,
+    });
+  });
+
+  const panel = await context.newPage();
+  await panel.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  await panel.getByRole('button', { name: '设置' }).click();
+  await panel.getByRole('button', { name: /显示更多/ }).click();
+  await panel.getByRole('button', { name: /自定义端点/ }).click();
+  const card = panel.getByRole('article', { name: '自定义端点 模型配置' });
+  await card.getByLabel('Base URL（OpenAI 兼容端点）').fill(BASE_URL);
+  await card.getByLabel('API Key（仅存本机）').fill(SECRET);
+  await card.getByRole('button', { name: '开通' }).click();
+  await card.getByRole('button', { name: 'Boss Stream Test' }).click();
+  await panel.getByRole('button', { name: '对话' }).click();
+  await panel.locator('.composer-editor [contenteditable="true"]').fill('在当前页面搜索 AI Agent');
+
+  const targetPage = await context.newPage();
+  await targetPage.goto(searchPageUrl);
+  await targetPage.bringToFront();
+  await panel.getByRole('button', { name: '发送' }).evaluate((button: HTMLElement) => {
+    button.click();
+  });
+
+  await expect(targetPage.locator('#search-query')).toHaveValue('AI Agent');
+  await expect(targetPage.locator('#result')).toHaveText('搜索结果：AI Agent');
+  await expect(panel.getByText('browser_action')).toBeVisible();
+  await expect(panel.getByText('已完成并验证页面搜索')).toBeVisible();
+  await expect(panel.locator('.redscope-ai-message')).toContainText(
+    '已经在当前页面搜索 AI Agent，并确认页面已更新。',
+  );
+  await expect.poll(() => chatRequests.length).toBe(2);
+  expect(chatRequests[0]?.body.tools).toBeDefined();
+  expect(chatRequests[1]?.body.messages).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        role: 'tool',
+        content: expect.stringContaining('"action":"search"'),
+      }),
+      expect.objectContaining({
+        role: 'tool',
+        content: expect.stringContaining('"verifiedBy":"页面内容已更新"'),
+      }),
+    ]),
+  );
+});
+
 async function captureChatRequest(request: Request): Promise<CapturedChatRequest> {
   const rawBody = request.postDataJSON() as unknown;
   const body = isRecord(rawBody) ? rawBody : {};
@@ -420,7 +526,10 @@ function openAiStreamBody(): string {
   ].join('\n\n');
 }
 
-function openAiToolCallBody(toolName = 'read_current_page'): string {
+function openAiToolCallBody(
+  toolName = 'read_current_page',
+  toolArguments: Record<string, unknown> = {},
+): string {
   const chunk = (delta: Record<string, unknown>, finishReason: string | null = null) =>
     JSON.stringify({
       id: 'chatcmpl-bosspilot-tool-e2e',
@@ -447,7 +556,7 @@ function openAiToolCallBody(toolName = 'read_current_page'): string {
           index: 0,
           id: 'call-read-current-page',
           type: 'function',
-          function: { name: toolName, arguments: '{}' },
+          function: { name: toolName, arguments: JSON.stringify(toolArguments) },
         },
       ],
     })}`,

@@ -159,12 +159,20 @@ describe('ChatGenerationManager', () => {
 
   it('executes exactly one tool and continues with a second model request', async () => {
     const requests: GenerationRequest[] = [];
-    const executeTool = vi.fn<GenerationToolExecutor>().mockResolvedValue({
-      isError: false,
-      statusText: '已读取当前岗位',
-      detail: '岗位描述 1200 字',
-      content: '<untrusted_job_page_data>{"description":"React"}</untrusted_job_page_data>',
-    });
+    let reportLateProgress: ((statusText: string, detail?: string) => void) | undefined;
+    const executeTool = vi
+      .fn<GenerationToolExecutor>()
+      .mockImplementation(async (_call, _signal, _requestId, reportProgress) => {
+        reportLateProgress = reportProgress;
+        reportProgress('正在识别页面控件', '使用可见性和无障碍语义。');
+        reportProgress('正在读取岗位内容');
+        return {
+          isError: false,
+          statusText: '已读取当前岗位',
+          detail: '岗位描述 1200 字',
+          content: '<untrusted_job_page_data>{"description":"React"}</untrusted_job_page_data>',
+        };
+      });
     const adapter: GenerationAdapter = {
       async *stream(_target, request) {
         requests.push(request);
@@ -219,7 +227,7 @@ describe('ChatGenerationManager', () => {
       },
       reasoningActivity: {
         status: 'completed',
-        summary: '已判断需要读取当前页面',
+        summary: '已判断需要使用浏览器工具',
       },
       toolActivity: {
         name: 'read_current_job',
@@ -228,7 +236,15 @@ describe('ChatGenerationManager', () => {
       },
     });
     expect(events.some(({ message }) => message.toolActivity?.status === 'running')).toBe(true);
+    expect(
+      events.some(({ message }) => message.toolActivity?.statusText === '正在识别页面控件'),
+    ).toBe(true);
+    expect(
+      events.some(({ message }) => message.toolActivity?.statusText === '正在读取岗位内容'),
+    ).toBe(true);
     expect(events.some(({ message }) => message.toolActivity?.status === 'succeeded')).toBe(true);
+    reportLateProgress?.('不应覆盖最终状态', '晚到进度');
+    expect(manager.getSnapshot()?.message.toolActivity?.statusText).toBe('已读取当前岗位');
   });
 
   it('lets the model explain a deterministic tool failure without inventing page data', async () => {
@@ -765,11 +781,12 @@ describe('ChatGenerationManager', () => {
       .fn<GenerationToolExecutor>()
       .mockResolvedValueOnce({
         deferred: true,
-        statusText: '等待网站读取权限',
-        detail: '需要读取 example.com',
+        statusText: '等待网站操作权限',
+        detail: '需要操作 example.com',
         permissionPattern: 'https://example.com/*',
         sourceOrigin: 'https://example.com',
         sourceTitle: 'Example',
+        permissionKind: 'interact',
       })
       .mockResolvedValueOnce({
         isError: false,
@@ -808,6 +825,7 @@ describe('ChatGenerationManager', () => {
         requestId: 'request-permission',
         status: 'waiting_permission',
         permissionPattern: 'https://example.com/*',
+        permissionKind: 'interact',
       },
     });
     expect(manager.isRunning).toBe(false);

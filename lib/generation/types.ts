@@ -1,5 +1,6 @@
 import type { ChatMessage, GenerationFinishReason, GenerationUsage } from '@/lib/domain/chat';
 import type {
+  BrowserActionErrorCode,
   DomainToolName,
   ModelIdentity,
   PageExtractionMode,
@@ -100,6 +101,7 @@ export interface GenerationToolExecutionResult {
     | 'NO_PERMISSION'
     | 'EXTRACTION_FAILED'
     | 'CANCELLED'
+    | BrowserActionErrorCode
     | PageReadErrorCode;
   sourceOrigin?: string;
   sourceTitle?: string;
@@ -118,6 +120,7 @@ export interface GenerationToolDeferredResult {
   permissionPattern: string;
   sourceOrigin: string;
   sourceTitle: string;
+  permissionKind?: 'read' | 'interact';
 }
 
 export type GenerationToolExecutionOutcome =
@@ -128,6 +131,7 @@ export type GenerationToolExecutor = (
   call: GenerationToolCall,
   signal: AbortSignal,
   requestId: string,
+  reportProgress: (statusText: string, detail?: string) => void,
 ) => Promise<GenerationToolExecutionOutcome>;
 
 export interface GenerationAdapter {

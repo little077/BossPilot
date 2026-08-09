@@ -31,6 +31,7 @@ import { capturePageTurnSnapshot, pageContextHistory } from '@/lib/page/snapshot
 import { orchestrator } from '@/lib/pipeline/orchestrator';
 import { ProviderService } from '@/lib/providers/service';
 import { createTrustedStorageGate } from '@/lib/storage/access';
+import { BROWSER_ACTION_TOOL, executeBrowserAction } from '@/lib/tools/browser-action';
 import { READ_CURRENT_PAGE_TOOL, readCurrentPage } from '@/lib/tools/read-current-page';
 
 interface ActiveDiagnostic {
@@ -65,10 +66,19 @@ export default defineBackground({
       adapter: generationAdapter,
       systemPrompt: CHAT_SYSTEM,
       maxOutputTokens: 8_192,
-      tools: [READ_CURRENT_PAGE_TOOL],
-      executeTool: async (call, signal, requestId) => {
+      tools: [READ_CURRENT_PAGE_TOOL, BROWSER_ACTION_TOOL],
+      executeTool: async (call, signal, requestId, reportProgress) => {
         recorder.step('chat', 'tool', `模型调用 ${call.name}`);
-        const result = await readCurrentPage(pageSnapshots.get(requestId) ?? null, signal);
+        const result =
+          call.name === 'browser_action'
+            ? await executeBrowserAction(
+                call,
+                pageSnapshots.get(requestId) ?? null,
+                latestUserText(requestId),
+                signal,
+                reportProgress,
+              )
+            : await readCurrentPage(pageSnapshots.get(requestId) ?? null, signal);
         if ('deferred' in result) return result;
         recorder.step('chat', result.isError ? 'error' : 'tool', result.statusText, result.detail);
         return result;
@@ -403,6 +413,8 @@ export default defineBackground({
 
       pageSnapshots.set(requestId, pending.snapshot);
       chatHistories.set(requestId, history);
+      const lastUser = [...history].reverse().find((message) => message.role === 'user');
+      diagnosticInputs.set(requestId, lastUser?.content ?? '');
       try {
         const pattern = pending.generation.message.toolActivity?.permissionPattern;
         const permissionAvailable =
@@ -411,18 +423,28 @@ export default defineBackground({
           generationManager.cancelDeferred(pending.generation);
           return;
         }
+        const permissionKind = pending.generation.message.toolActivity?.permissionKind ?? 'read';
         const override = permissionAvailable
           ? undefined
           : {
               isError: true,
               errorCode: 'permission_denied' as const,
-              statusText: '未授权读取当前网站',
-              detail: '用户或 Chrome 没有授予当前网站的页面读取权限。',
+              statusText:
+                permissionKind === 'interact' ? '未授权操作目标网站' : '未授权读取当前网站',
+              detail:
+                permissionKind === 'interact'
+                  ? '用户或 Chrome 没有授予目标网站的页面操作权限。'
+                  : '用户或 Chrome 没有授予当前网站的页面读取权限。',
               content:
-                '工具读取失败（permission_denied）：用户或 Chrome 没有授予当前网站的页面读取权限。',
-              sourceOrigin: pending.snapshot.origin,
-              sourceTitle: pending.snapshot.title,
-              sourceUrl: pending.snapshot.safeUrl,
+                permissionKind === 'interact'
+                  ? '浏览器工具失败（permission_denied）：用户或 Chrome 没有授予目标网站的页面操作权限。'
+                  : '工具读取失败（permission_denied）：用户或 Chrome 没有授予当前网站的页面读取权限。',
+              sourceOrigin:
+                pending.generation.message.toolActivity?.sourceOrigin ?? pending.snapshot.origin,
+              sourceTitle:
+                pending.generation.message.toolActivity?.sourceTitle ?? pending.snapshot.title,
+              sourceUrl:
+                pending.generation.message.toolActivity?.sourceUrl ?? pending.snapshot.safeUrl,
             };
         await generationManager.resumeDeferred(
           pending.generation,
@@ -431,6 +453,7 @@ export default defineBackground({
         );
       } finally {
         await clearPendingPageTurn(requestId);
+        diagnosticInputs.delete(requestId);
         pageSnapshots.delete(requestId);
         chatHistories.delete(requestId);
         cancelledPendingRequests.delete(requestId);

@@ -26,6 +26,8 @@ export default defineConfig({
       include: [
         'lib/adapter/city-codes.ts',
         'lib/adapter/zhipin.ts',
+        'lib/browser/semantic-search.ts',
+        'lib/browser/tab-router.ts',
         'lib/diagnostics/recorder.ts',
         'lib/diagnostics/page-structure.ts',
         'lib/diagnostics/redaction.ts',
@@ -54,6 +56,7 @@ export default defineConfig({
         'lib/tools/read-current-page.ts',
         'lib/tools/read-current-job.ts',
         'lib/tools/read-visible-jobs.ts',
+        'lib/tools/browser-action.ts',
         'entrypoints/sidepanel/ChatFlowStatus.tsx',
         'entrypoints/sidepanel/HistoryView.tsx',
         'entrypoints/sidepanel/SettingsView.tsx',

@@ -198,6 +198,42 @@ describe('ChatFlowStatus', () => {
     expect(resolvePermission).toHaveBeenCalledWith('request-1', 'https://example.com/*', false);
   });
 
+  it('distinguishes an interaction grant from a read-only page grant', async () => {
+    const resolvePermission = vi.fn().mockResolvedValue(true);
+    render(
+      <ChatFlowStatus
+        message={{
+          ...BASE_MESSAGE,
+          toolActivity: {
+            requestId: 'request-action',
+            callId: 'call-action',
+            name: 'browser_action',
+            label: '操作浏览器',
+            status: 'waiting_permission',
+            statusText: '等待网站操作权限',
+            startedAt: 1_000,
+            sourceOrigin: 'https://www.baidu.com',
+            permissionPattern: 'https://www.baidu.com/*',
+            permissionKind: 'interact',
+          },
+        }}
+        onResolvePagePermission={resolvePermission}
+      />,
+    );
+
+    expect(screen.getByRole('region', { name: '页面操作权限' })).toHaveTextContent(
+      '识别并操作这个网站的搜索框',
+    );
+    fireEvent.click(screen.getByRole('button', { name: '允许操作' }));
+    await waitFor(() =>
+      expect(resolvePermission).toHaveBeenCalledWith(
+        'request-action',
+        'https://www.baidu.com/*',
+        true,
+      ),
+    );
+  });
+
   it('shows the successful page source without exposing page text', () => {
     render(
       <ChatFlowStatus

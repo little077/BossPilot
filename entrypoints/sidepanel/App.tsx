@@ -112,9 +112,11 @@ export default function App() {
   const activeAssistant = lastMessage?.role === 'assistant' ? lastMessage : undefined;
   const chatStatusText =
     activeAssistant?.toolActivity?.status === 'waiting_permission'
-      ? '等待页面读取权限'
+      ? activeAssistant.toolActivity.permissionKind === 'interact'
+        ? '等待网站操作权限'
+        : '等待页面读取权限'
       : activeAssistant?.toolActivity?.status === 'running'
-        ? '执行工具 · 读取当前页面'
+        ? `执行工具 · ${activeAssistant.toolActivity.label}`
         : activeAssistant?.toolActivity
           ? '回复生成中…'
           : '思考中…';

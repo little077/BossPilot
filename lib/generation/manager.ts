@@ -56,7 +56,7 @@ export interface ChatGenerationManagerOptions {
   /** 全量流快照的最小广播间隔；终态不受该间隔影响。 */
   streamUpdateIntervalMs?: number;
   temperature?: number;
-  /** 当前里程碑开放只读页面工具；Manager 硬性限制一轮最多执行一次。 */
+  /** 当前里程碑开放高层确定性工具；Manager 硬性限制一轮最多执行一次。 */
   tools?: GenerationToolDefinition[];
   executeTool?: GenerationToolExecutor;
   onToolDeferred?: (
@@ -150,7 +150,7 @@ export class ChatGenerationManager {
       modelIdentity: { ...target.identity },
       reasoningActivity: {
         status: 'running',
-        summary: '正在判断是否需要读取当前页面',
+        summary: '正在判断是否需要使用浏览器工具',
         startedAt: this.now(),
       },
     };
@@ -273,14 +273,19 @@ export class ChatGenerationManager {
     if (!this.options.executeTool) {
       return this.finishError(
         turn,
-        new GenerationError('INVALID_RESPONSE', '当前没有可执行的页面工具。', false),
+        new GenerationError('INVALID_RESPONSE', '当前没有可执行的浏览器工具。', false),
       );
     }
 
     const outcome =
       executionOverride ??
       (await promiseOrAbort(
-        this.options.executeTool(toolCall, turn.controller.signal, turn.requestId),
+        this.options.executeTool(
+          toolCall,
+          turn.controller.signal,
+          turn.requestId,
+          (statusText, detail) => this.updateToolActivity(turn, statusText, detail),
+        ),
         turn.controller.signal,
       ));
     if (outcome === ABORTED) return this.finishCancelled(turn);
@@ -341,7 +346,7 @@ export class ChatGenerationManager {
 
     const activity = requireMessage(turn).toolActivity;
     if (!activity) {
-      throw new GenerationError('INVALID_RESPONSE', '页面工具没有可恢复的活动状态。');
+      throw new GenerationError('INVALID_RESPONSE', '浏览器工具没有可恢复的活动状态。');
     }
     activity.status = 'waiting_permission';
     activity.statusText = result.statusText;
@@ -349,6 +354,7 @@ export class ChatGenerationManager {
     activity.sourceOrigin = result.sourceOrigin;
     activity.sourceTitle = result.sourceTitle;
     activity.permissionPattern = result.permissionPattern;
+    activity.permissionKind = result.permissionKind ?? 'read';
 
     const deferred: DeferredGenerationTurn = {
       version: 1,
@@ -492,7 +498,7 @@ export class ChatGenerationManager {
           };
         }
         turn.pendingToolCall = { ...event.toolCall, arguments: { ...event.toolCall.arguments } };
-        this.completeReasoning(turn, '已判断需要读取当前页面');
+        this.completeReasoning(turn, '已判断需要使用浏览器工具');
         return undefined;
       case 'finish':
         turn.usage = addUsage(turn.usage, event.usage);
@@ -572,6 +578,14 @@ export class ChatGenerationManager {
     if (execution.returnedChars !== undefined) activity.returnedChars = execution.returnedChars;
     if (execution.truncated !== undefined) activity.truncated = execution.truncated;
     if (execution.enrichmentStatus) activity.enrichmentStatus = execution.enrichmentStatus;
+    this.publish(turn, 'update');
+  }
+
+  private updateToolActivity(turn: ActiveTurn, statusText: string, detail?: string): void {
+    const activity = requireMessage(turn).toolActivity;
+    if (activity?.status !== 'running' || turn.controller.signal.aborted) return;
+    activity.statusText = statusText;
+    if (detail) activity.detail = detail;
     this.publish(turn, 'update');
   }
 
