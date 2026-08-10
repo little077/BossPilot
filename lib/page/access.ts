@@ -35,6 +35,13 @@ export async function hasExactPageOriginAccess(pattern: string): Promise<boolean
   return chrome.permissions.contains({ origins: [pattern] });
 }
 
+export function isPageInjectionPermissionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /cannot access contents|cannot access a chrome|missing host permission|permission.*required|not allowed to access|extensions gallery/i.test(
+    message,
+  );
+}
+
 /** 必须直接从按钮点击处理器调用，避免丢失 Chrome 要求的 user gesture。 */
 export async function requestPageOriginAccess(pattern: string): Promise<boolean> {
   if (!isExactPageOriginPattern(pattern)) return false;

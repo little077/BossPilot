@@ -203,6 +203,64 @@ export type BrowserActionErrorCode =
   | 'INTERACTION_FAILED'
   | 'VERIFICATION_FAILED';
 
+export type PageInteractionErrorCode =
+  | 'INVALID_PAGE_INTERACTION'
+  | 'OBSERVATION_REQUIRED'
+  | 'STALE_ELEMENT_REFERENCE'
+  | 'ELEMENT_NOT_FOUND'
+  | 'ELEMENT_NOT_INTERACTABLE'
+  | 'SENSITIVE_INPUT_BLOCKED'
+  | 'INTERACTION_FAILED';
+
+export type PageInteractionRisk = 'safe' | 'confirm' | 'blocked';
+
+/** 页面上下文脚本返回的候选元素；path 仅保存在扩展本地，不发送给模型。 */
+export interface PageInteractiveElementCandidate {
+  path: number[];
+  tag: string;
+  role: string;
+  name: string;
+  type: string;
+  disabled: boolean;
+  checked?: boolean;
+  selectedText?: string;
+  hasValue?: boolean;
+  destinationOrigin?: string;
+  risk: PageInteractionRisk;
+  riskReason?: string;
+}
+
+export interface PageViewportSnapshot {
+  scrollX: number;
+  scrollY: number;
+  width: number;
+  height: number;
+  documentWidth: number;
+  documentHeight: number;
+}
+
+/** 自包含观察脚本的跨运行时返回值。 */
+export interface PageInteractionObservationResult {
+  version: 1;
+  executionUrl: string;
+  title: string;
+  elements: PageInteractiveElementCandidate[];
+  viewport: PageViewportSnapshot;
+  truncated: boolean;
+}
+
+/** 自包含动作脚本的跨运行时返回值。 */
+export interface PageInteractionScriptResult {
+  version: 1;
+  ok: boolean;
+  executionUrl: string;
+  action: 'click' | 'fill' | 'select' | 'check' | 'scroll';
+  risk: PageInteractionRisk;
+  riskReason?: string;
+  error?: PageInteractionErrorCode;
+  detail: string;
+}
+
 /** 页面脚本只返回交互元数据，不跨运行时传输页面正文或表单中的其他值。 */
 export interface BrowserSearchControlSnapshot {
   tag: 'input' | 'textarea' | 'contenteditable';
@@ -266,6 +324,8 @@ export interface PendingUserQuestion {
 export type DomainToolName =
   | 'read_current_page'
   | 'browser_action'
+  | 'observe_page'
+  | 'interact_page'
   | 'read_current_job'
   | 'read_visible_jobs'
   | 'ask_user';
@@ -300,6 +360,7 @@ export interface ToolActivity {
     | 'EXTRACTION_FAILED'
     | 'CANCELLED'
     | BrowserActionErrorCode
+    | PageInteractionErrorCode
     | PageReadErrorCode;
 }
 

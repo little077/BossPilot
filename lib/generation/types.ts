@@ -5,6 +5,7 @@ import type {
   DomainToolName,
   ModelIdentity,
   PageExtractionMode,
+  PageInteractionErrorCode,
   PageReadErrorCode,
   PageTurnSnapshot,
 } from '@/lib/domain/types';
@@ -104,6 +105,7 @@ export interface GenerationToolExecutionResult {
     | 'EXTRACTION_FAILED'
     | 'CANCELLED'
     | BrowserActionErrorCode
+    | PageInteractionErrorCode
     | PageReadErrorCode;
   sourceOrigin?: string;
   sourceTitle?: string;

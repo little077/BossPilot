@@ -4,7 +4,11 @@ import { defineConfig } from 'wxt';
 
 function generationChunk(id: string): string | undefined {
   const moduleId = id.replaceAll('\\', '/');
-  if (moduleId.endsWith('/lib/tools/browser-action.ts') || moduleId.includes('/lib/browser/')) {
+  if (
+    moduleId.endsWith('/lib/tools/browser-action.ts') ||
+    moduleId.endsWith('/lib/tools/page-interaction.ts') ||
+    moduleId.includes('/lib/browser/')
+  ) {
     return 'browser-action';
   }
   if (!moduleId.includes('/node_modules/')) return undefined;
@@ -33,7 +37,7 @@ export default defineConfig({
   manifest: {
     name: 'BossPilot — 浏览器 AI 助手',
     description:
-      '在浏览器侧边栏与 AI 对话，按需读取网页、切换标签页并执行受限搜索；在 Boss 直聘提供岗位分析增强。',
+      '在浏览器侧边栏与 AI 对话，按需观察并操作当前网页、管理标签页；在 Boss 直聘提供岗位分析增强。',
     permissions: ['sidePanel', 'tabs', 'activeTab', 'scripting', 'storage', 'downloads'],
     host_permissions: ['https://www.zhipin.com/*'],
     // 模型端点在用户点「开通」时按具体 origin 申请；不把模型全网权限设为常驻权限。

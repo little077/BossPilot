@@ -58,6 +58,7 @@ export default defineConfig({
         'lib/tools/read-current-job.ts',
         'lib/tools/read-visible-jobs.ts',
         'lib/tools/browser-action.ts',
+        'lib/tools/page-interaction.ts',
         'entrypoints/sidepanel/ChatFlowStatus.tsx',
         'entrypoints/sidepanel/AskUserPanel.tsx',
         'entrypoints/sidepanel/HistoryView.tsx',

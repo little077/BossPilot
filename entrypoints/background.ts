@@ -34,6 +34,11 @@ import { ProviderService } from '@/lib/providers/service';
 import { createTrustedStorageGate } from '@/lib/storage/access';
 import { ASK_USER_TOOL, askUser } from '@/lib/tools/ask-user';
 import { BROWSER_ACTION_TOOL, executeBrowserAction } from '@/lib/tools/browser-action';
+import {
+  INTERACT_PAGE_TOOL,
+  OBSERVE_PAGE_TOOL,
+  PageInteractionCoordinator,
+} from '@/lib/tools/page-interaction';
 import { READ_CURRENT_PAGE_TOOL, readCurrentPage } from '@/lib/tools/read-current-page';
 
 interface ActiveDiagnostic {
@@ -58,10 +63,12 @@ export default defineBackground({
     const pageSnapshots = new Map<string, PageTurnSnapshot | null>();
     const chatHistories = new Map<string, ChatMessage[]>();
     const cancelledPendingRequests = new Set<string>();
+    const approvedToolCalls = new Set<string>();
     const latestUserText = (requestId: string) => diagnosticInputs.get(requestId) ?? '';
     let activeDiagnostic: ActiveDiagnostic | null = null;
 
     const generationAdapter = createPiGenerationAdapter();
+    const pageInteraction = new PageInteractionCoordinator();
     const titleControllers = new Map<string, { controller: AbortController; requestId: string }>();
 
     const generationManager = new ChatGenerationManager({
@@ -70,7 +77,13 @@ export default defineBackground({
       maxOutputTokens: 8_192,
       maxAgentTurns: 200,
       maxConsecutiveIdenticalToolCalls: 3,
-      tools: [READ_CURRENT_PAGE_TOOL, BROWSER_ACTION_TOOL, ASK_USER_TOOL],
+      tools: [
+        READ_CURRENT_PAGE_TOOL,
+        BROWSER_ACTION_TOOL,
+        OBSERVE_PAGE_TOOL,
+        INTERACT_PAGE_TOOL,
+        ASK_USER_TOOL,
+      ],
       executeTool: async (call, signal, requestId, reportProgress) => {
         recorder.step('chat', 'tool', `模型调用 ${call.name}`);
         let result: GenerationToolExecutionOutcome;
@@ -92,6 +105,23 @@ export default defineBackground({
           case 'read_current_page':
             result = await readCurrentPage(pageSnapshots.get(requestId) ?? null, signal);
             break;
+          case 'observe_page':
+            result = await pageInteraction.observe(
+              call,
+              pageSnapshots.get(requestId) ?? null,
+              signal,
+              requestId,
+            );
+            break;
+          case 'interact_page':
+            result = await pageInteraction.interact(
+              call,
+              pageSnapshots.get(requestId) ?? null,
+              signal,
+              requestId,
+              approvedToolCalls.delete(call.id),
+            );
+            break;
           case 'ask_user':
             result = askUser(call);
             break;
@@ -104,6 +134,9 @@ export default defineBackground({
             };
         }
         if ('deferred' in result) return result;
+        if (!result.isError && result.nextPageSnapshot) {
+          pageSnapshots.set(requestId, result.nextPageSnapshot);
+        }
         recorder.step('chat', result.isError ? 'error' : 'tool', result.statusText, result.detail);
         return result;
       },
@@ -395,6 +428,9 @@ export default defineBackground({
           text: sanitizeGenerationError(error).message,
         });
       } finally {
+        const pending = await loadPendingPageTurn().catch(() => null);
+        if (pending?.requestId !== requestId)
+          await pageInteraction.clear(requestId).catch(() => void 0);
         diagnosticInputs.delete(requestId);
         pageSnapshots.delete(requestId);
         chatHistories.delete(requestId);
@@ -460,6 +496,8 @@ export default defineBackground({
       chatHistories.set(requestId, history);
       const lastUser = [...history].reverse().find((message) => message.role === 'user');
       diagnosticInputs.set(requestId, lastUser?.content ?? '');
+      // 先移除已经领取的旧暂停点；恢复过程中若再次暂停，会写入一个新的有效暂停点。
+      await clearPendingPageTurn(requestId);
       try {
         const pendingActivity =
           pending.generation.message.toolActivities?.at(-1) ??
@@ -497,7 +535,10 @@ export default defineBackground({
           override,
         );
       } finally {
-        await clearPendingPageTurn(requestId);
+        const nextPending = await loadPendingPageTurn().catch(() => null);
+        if (nextPending?.requestId !== requestId) {
+          await pageInteraction.clear(requestId).catch(() => void 0);
+        }
         diagnosticInputs.delete(requestId);
         pageSnapshots.delete(requestId);
         chatHistories.delete(requestId);
@@ -572,24 +613,44 @@ export default defineBackground({
       chatHistories.set(requestId, history);
       const lastUser = [...history].reverse().find((message) => message.role === 'user');
       diagnosticInputs.set(requestId, lastUser?.content ?? '');
+      await clearPendingPageTurn(requestId);
       try {
         if (cancelledPendingRequests.delete(requestId)) {
           generationManager.cancelDeferred(pending.generation);
           return;
         }
-        await generationManager.resumeDeferred(pending.generation, history, {
-          isError: false,
-          statusText: '已收到用户回答',
-          detail: normalizedAnswer.slice(0, 240),
-          content: [
-            '以下是用户对刚才澄清问题的直接回答。把它作为任务约束继续执行。',
-            '<user_clarification>',
-            JSON.stringify({ answer: normalizedAnswer }).replaceAll('<', '\\u003c'),
-            '</user_clarification>',
-          ].join('\n'),
-        });
+        if (pending.generation.toolCall.name === 'interact_page') {
+          if (normalizedAnswer === '确认执行') {
+            approvedToolCalls.add(pending.generation.toolCall.id);
+            await generationManager.resumeDeferred(pending.generation, history);
+          } else {
+            await generationManager.resumeDeferred(pending.generation, history, {
+              isError: true,
+              statusText: '用户未确认页面操作',
+              detail: '用户选择不执行这次可能产生外部影响的页面操作。',
+              content:
+                '页面操作未执行：用户没有确认本次高风险动作。不要重试相同动作，除非用户重新明确要求。',
+            });
+          }
+        } else {
+          await generationManager.resumeDeferred(pending.generation, history, {
+            isError: false,
+            statusText: '已收到用户回答',
+            detail: normalizedAnswer.slice(0, 240),
+            content: [
+              '以下是用户对刚才澄清问题的直接回答。把它作为任务约束继续执行。',
+              '<user_clarification>',
+              JSON.stringify({ answer: normalizedAnswer }).replaceAll('<', '\\u003c'),
+              '</user_clarification>',
+            ].join('\n'),
+          });
+        }
       } finally {
-        await clearPendingPageTurn(requestId);
+        approvedToolCalls.delete(pending.generation.toolCall.id);
+        const nextPending = await loadPendingPageTurn().catch(() => null);
+        if (nextPending?.requestId !== requestId) {
+          await pageInteraction.clear(requestId).catch(() => void 0);
+        }
         diagnosticInputs.delete(requestId);
         pageSnapshots.delete(requestId);
         chatHistories.delete(requestId);

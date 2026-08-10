@@ -13,7 +13,11 @@ import type {
   GenerationToolExecutionOutcome,
   GenerationToolExecutionResult,
 } from '@/lib/generation/types';
-import { hasExactPageOriginAccess, pageOriginPattern } from '@/lib/page/access';
+import {
+  hasExactPageOriginAccess,
+  isPageInjectionPermissionError,
+  pageOriginPattern,
+} from '@/lib/page/access';
 import { navigationKey, validatePageTurnSnapshot } from '@/lib/page/snapshot';
 
 export const READ_CURRENT_PAGE_TOOL: GenerationToolDefinition = {
@@ -120,7 +124,7 @@ async function readPage(
     });
   } catch (error) {
     if (signal.aborted) return cancelledResult(snapshot);
-    if (!alreadyGranted && isPermissionInjectionError(error)) {
+    if (!alreadyGranted && isPageInjectionPermissionError(error)) {
       return {
         deferred: true,
         kind: 'page_permission',
@@ -328,13 +332,6 @@ async function withReadDeadline(
     if (timer !== undefined) clearTimeout(timer);
     if (onAbort) signal.removeEventListener('abort', onAbort);
   }
-}
-
-function isPermissionInjectionError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /cannot access contents|cannot access a chrome|missing host permission|permission.*required|not allowed to access|extensions gallery/i.test(
-    message,
-  );
 }
 
 function isExtractionMode(value: unknown): value is PageScriptExtraction['mode'] {
