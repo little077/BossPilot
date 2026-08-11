@@ -674,7 +674,147 @@ test('通用页面 Agent 先观察控件，高风险提交经用户确认后恢�
     expect.arrayContaining([
       expect.objectContaining({
         role: 'tool',
-        content: expect.stringContaining('previousReferencesInvalidated'),
+        content: expect.stringContaining('"status":"verified"'),
+      }),
+    ]),
+  );
+});
+
+test('页面 Agent 跟随点击打开的新标签页并继续执行', async ({ context, extensionId }) => {
+  const chatRequests: CapturedChatRequest[] = [];
+  const sourceUrl = 'https://www.zhipin.com/bosspilot-new-tab-e2e';
+  const reportUrl = 'https://www.zhipin.com/bosspilot-report-e2e';
+
+  await context.route(`${BASE_URL}/models`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ data: [{ id: MODEL_ID, name: 'Boss Stream Test' }] }),
+    });
+  });
+  await context.route(`${BASE_URL}/chat/completions`, async (route) => {
+    const request = await captureChatRequest(route.request());
+    chatRequests.push(request);
+    const toolMessages = request.body.messages?.filter(({ role }) => role === 'tool') ?? [];
+    const lastToolMessage = toolMessages.at(-1);
+    const toolContent = typeof lastToolMessage?.content === 'string' ? lastToolMessage.content : '';
+    const observationId = /"observationId":"([^"]+)"/u.exec(toolContent)?.[1];
+
+    let body: string;
+    if (toolMessages.length === 0) {
+      body = openAiToolCallBody('observe_page', {}, 'call-observe-source');
+    } else if (toolMessages.length === 1 && observationId) {
+      body = openAiToolCallBody(
+        'interact_page',
+        { action: 'click', observationId, ref: 'e1' },
+        'call-open-report',
+      );
+    } else if (toolMessages.length === 2 && observationId) {
+      body = openAiToolCallBody(
+        'interact_page',
+        { action: 'click', observationId, ref: 'e1' },
+        'call-view-detail',
+      );
+    } else if (toolMessages.length >= 3) {
+      body = openAiFinalAnswerBody(
+        'chatcmpl-new-tab-answer-e2e',
+        '已经跟随新标签页，并验证详情已打开。',
+      );
+    } else {
+      body = openAiFinalAnswerBody(
+        'chatcmpl-new-tab-observation-error',
+        '没有拿到新页面的观察编号。',
+      );
+    }
+
+    await route.fulfill({
+      status: 200,
+      headers: {
+        'access-control-allow-origin': '*',
+        'cache-control': 'no-cache',
+        'content-type': 'text/event-stream; charset=utf-8',
+      },
+      body,
+    });
+  });
+  await context.route(sourceUrl, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: `<!doctype html>
+        <html lang="zh-CN">
+          <head><title>新标签页来源</title></head>
+          <body><a href="${reportUrl}" target="_blank">打开报告</a></body>
+        </html>`,
+    });
+  });
+  await context.route(reportUrl, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: `<!doctype html>
+        <html lang="zh-CN">
+          <head><title>报告页面</title></head>
+          <body>
+            <main>
+              <h1>报告页面</h1>
+              <button type="button" id="view-detail">查看详情</button>
+              <output id="result">尚未查看</output>
+            </main>
+            <script>
+              document.querySelector('#view-detail').addEventListener('click', () => {
+                document.querySelector('#result').textContent = '已查看详情';
+              });
+            </script>
+          </body>
+        </html>`,
+    });
+  });
+
+  const panel = await context.newPage();
+  await panel.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  await panel.getByRole('button', { name: '设置' }).click();
+  await panel.getByRole('button', { name: /显示更多/ }).click();
+  await panel.getByRole('button', { name: /自定义端点/ }).click();
+  const card = panel.getByRole('article', { name: '自定义端点 模型配置' });
+  await card.getByLabel('Base URL（OpenAI 兼容端点）').fill(BASE_URL);
+  await card.getByLabel('API Key（仅存本机）').fill(SECRET);
+  await card.getByRole('button', { name: '开通' }).click();
+  await card.getByRole('button', { name: 'Boss Stream Test' }).click();
+
+  const source = await context.newPage();
+  await source.goto(sourceUrl);
+  await source.bringToFront();
+
+  await panel.getByRole('button', { name: '对话' }).click();
+  await panel
+    .locator('.composer-editor [contenteditable="true"]')
+    .fill('打开报告，并在新页面查看详情');
+  await panel.getByRole('button', { name: '发送' }).evaluate((button: HTMLElement) => {
+    button.click();
+  });
+
+  await expect.poll(() => context.pages().some((page) => page.url() === reportUrl)).toBe(true);
+  const report = context.pages().find((page) => page.url() === reportUrl);
+  if (!report) throw new Error('点击后没有找到报告标签页');
+  await expect(report.locator('#result')).toHaveText('已查看详情');
+  await expect(panel.locator('.redscope-ai-message')).toContainText(
+    '已经跟随新标签页，并验证详情已打开。',
+  );
+  await expect.poll(() => chatRequests.length).toBe(4);
+  expect(chatRequests[2]?.body.messages).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        role: 'tool',
+        content: expect.stringContaining('点击后打开了一个新标签页'),
+      }),
+    ]),
+  );
+  expect(chatRequests[3]?.body.messages).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        role: 'tool',
+        content: expect.stringContaining('"status":"verified"'),
       }),
     ]),
   );
@@ -753,6 +893,7 @@ function openAiStreamBody(): string {
 function openAiToolCallBody(
   toolName = 'read_current_page',
   toolArguments: Record<string, unknown> = {},
+  toolCallId?: string,
 ): string {
   const chunk = (delta: Record<string, unknown>, finishReason: string | null = null) =>
     JSON.stringify({
@@ -778,7 +919,7 @@ function openAiToolCallBody(
       tool_calls: [
         {
           index: 0,
-          id: `call-${toolName.replaceAll('_', '-')}`,
+          id: toolCallId ?? `call-${toolName.replaceAll('_', '-')}`,
           type: 'function',
           function: { name: toolName, arguments: JSON.stringify(toolArguments) },
         },

@@ -210,9 +210,17 @@ export type PageInteractionErrorCode =
   | 'ELEMENT_NOT_FOUND'
   | 'ELEMENT_NOT_INTERACTABLE'
   | 'SENSITIVE_INPUT_BLOCKED'
-  | 'INTERACTION_FAILED';
+  | 'INTERACTION_FAILED'
+  | 'VERIFICATION_FAILED';
 
 export type PageInteractionRisk = 'safe' | 'confirm' | 'blocked';
+
+export type PageInteractionVerificationEvidence =
+  | 'click_dispatched'
+  | 'input_value_matches'
+  | 'selected_option_matches'
+  | 'checked_state_matches'
+  | 'viewport_changed';
 
 /** 页面上下文脚本返回的候选元素；path 仅保存在扩展本地，不发送给模型。 */
 export interface PageInteractiveElementCandidate {
@@ -259,6 +267,19 @@ export interface PageInteractionScriptResult {
   riskReason?: string;
   error?: PageInteractionErrorCode;
   detail: string;
+  stateVerified: boolean;
+  verificationEvidence?: PageInteractionVerificationEvidence;
+}
+
+/** 延迟一个渲染周期后复核表单状态，防止受控组件把刚写入的值回滚。 */
+export interface PageElementVerificationResult {
+  version: 1;
+  ok: boolean;
+  executionUrl: string;
+  action: 'fill' | 'select' | 'check';
+  detail: string;
+  evidence?: PageInteractionVerificationEvidence;
+  error?: PageInteractionErrorCode;
 }
 
 /** 页面脚本只返回交互元数据，不跨运行时传输页面正文或表单中的其他值。 */

@@ -85,7 +85,7 @@ export default defineBackground({
         ASK_USER_TOOL,
       ],
       executeTool: async (call, signal, requestId, reportProgress) => {
-        recorder.step('chat', 'tool', `模型调用 ${call.name}`);
+        recorder.step('chat', 'tool', call.name);
         let result: GenerationToolExecutionOutcome;
         switch (call.name) {
           case 'browser_action':
@@ -120,6 +120,7 @@ export default defineBackground({
               signal,
               requestId,
               approvedToolCalls.delete(call.id),
+              reportProgress,
             );
             break;
           case 'ask_user':
@@ -128,13 +129,12 @@ export default defineBackground({
           default:
             result = {
               isError: true,
-              statusText: '工具未开放',
-              detail: `当前版本没有开放 ${call.name}。`,
-              content: `工具调用失败：${call.name} 未开放。`,
+              statusText: '工具禁用',
+              content: `未开放${call.name}`,
             };
         }
         if ('deferred' in result) return result;
-        if (!result.isError && result.nextPageSnapshot) {
+        if (result.nextPageSnapshot) {
           pageSnapshots.set(requestId, result.nextPageSnapshot);
         }
         recorder.step('chat', result.isError ? 'error' : 'tool', result.statusText, result.detail);
@@ -144,11 +144,7 @@ export default defineBackground({
         const snapshot = pageSnapshots.get(generation.requestId);
         const history = chatHistories.get(generation.requestId);
         if (!history || (deferred.kind === 'page_permission' && !snapshot)) {
-          throw new GenerationError(
-            'INVALID_RESPONSE',
-            '当前页面恢复点不完整，请重新发送问题。',
-            false,
-          );
+          throw new GenerationError('INVALID_RESPONSE', '恢复失败，请重试', false);
         }
         await savePendingPageTurn(
           createPendingAgentTurn(generation, snapshot ?? null, history, deferred.kind),
@@ -681,7 +677,7 @@ export default defineBackground({
         recorder.logError('chat', event.message.errorMessage ?? '模型请求失败。');
         recorder.finishRun('chat', 'error');
       } else if (event.message.status === 'cancelled') {
-        recorder.step('chat', 'note', '用户停止了本轮生成。');
+        recorder.step('chat', 'note', '用户停止。');
         recorder.finishRun('chat', 'cancelled');
       } else {
         recorder.finishRun('chat', 'completed');

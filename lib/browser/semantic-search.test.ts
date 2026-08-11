@@ -250,4 +250,12 @@ describe('captureBrowserPageFingerprint', () => {
     });
     document.documentElement.append(document.createElement('body'));
   });
+
+  it('detects changes near the end of a long visible page', () => {
+    document.body.innerText = `${'前部内容'.repeat(2_000)}尾部版本一`;
+    const before = captureBrowserPageFingerprint();
+    document.body.innerText = `${'前部内容'.repeat(2_000)}尾部版本二`;
+
+    expect(captureBrowserPageFingerprint().textHash).not.toBe(before.textHash);
+  });
 });

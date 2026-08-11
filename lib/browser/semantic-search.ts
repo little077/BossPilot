@@ -16,7 +16,11 @@ export function performSemanticSearch(query: string): BrowserSearchScriptResult 
     return normalized.length > maxChars ? normalized.slice(0, maxChars) : normalized;
   };
   const fingerprint = (): BrowserPageFingerprint => {
-    const text = (document.body?.innerText ?? '').slice(0, 12_000);
+    const visibleText = document.body?.innerText ?? '';
+    const text =
+      visibleText.length <= 12_000
+        ? visibleText
+        : `${visibleText.slice(0, 6_000)}\n${visibleText.slice(-6_000)}`;
     let hash = 2_166_136_261;
     for (let index = 0; index < text.length; index += 1) {
       hash ^= text.charCodeAt(index);
@@ -26,7 +30,7 @@ export function performSemanticSearch(query: string): BrowserSearchScriptResult 
       url: window.location.href,
       title: clip(document.title, 300),
       textHash: (hash >>> 0).toString(16),
-      textLength: document.body?.innerText.length ?? 0,
+      textLength: visibleText.length,
       childCount: document.body?.childElementCount ?? 0,
     };
   };
@@ -288,7 +292,11 @@ export function captureBrowserPageFingerprint(): BrowserPageFingerprint {
     const normalized = value.replaceAll('\u0000', '').replace(/\s+/gu, ' ').trim();
     return normalized.length > maxChars ? normalized.slice(0, maxChars) : normalized;
   };
-  const text = (document.body?.innerText ?? '').slice(0, 12_000);
+  const visibleText = document.body?.innerText ?? '';
+  const text =
+    visibleText.length <= 12_000
+      ? visibleText
+      : `${visibleText.slice(0, 6_000)}\n${visibleText.slice(-6_000)}`;
   let hash = 2_166_136_261;
   for (let index = 0; index < text.length; index += 1) {
     hash ^= text.charCodeAt(index);
@@ -298,7 +306,7 @@ export function captureBrowserPageFingerprint(): BrowserPageFingerprint {
     url: window.location.href,
     title: clip(document.title),
     textHash: (hash >>> 0).toString(16),
-    textLength: document.body?.innerText.length ?? 0,
+    textLength: visibleText.length,
     childCount: document.body?.childElementCount ?? 0,
   };
 }

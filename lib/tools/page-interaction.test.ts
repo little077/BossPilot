@@ -11,6 +11,7 @@ import {
   OBSERVE_PAGE_TOOL,
   PageInteractionCoordinator,
   performPageInteraction,
+  verifyPageElementState,
 } from './page-interaction';
 
 const PAGE_URL = 'https://www.zhipin.com/interaction-test';
@@ -28,6 +29,8 @@ const SNAPSHOT: PageTurnSnapshot = {
 };
 
 const tabsGet = vi.fn();
+const tabsQuery = vi.fn();
+const tabsUpdate = vi.fn();
 const tabsGoBack = vi.fn();
 const tabsGoForward = vi.fn();
 const permissionsContains = vi.fn();
@@ -36,6 +39,7 @@ const storageGet = vi.fn();
 const storageSet = vi.fn();
 const storageRemove = vi.fn();
 let sessionValue: unknown;
+let currentTabUrl = PAGE_URL;
 
 function call(
   name: 'observe_page' | 'interact_page',
@@ -61,6 +65,7 @@ function locatorByName(name: string): PageInteractiveElementCandidate {
 
 beforeEach(() => {
   sessionValue = undefined;
+  currentTabUrl = PAGE_URL;
   history.replaceState({}, '', PAGE_URL);
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
   Object.defineProperty(window, 'innerHeight', { configurable: true, value: 768 });
@@ -79,17 +84,43 @@ beforeEach(() => {
     configurable: true,
     value: vi.fn(),
   });
-  Object.defineProperty(window, 'scrollBy', { configurable: true, value: vi.fn() });
+  Object.defineProperty(window, 'scrollY', { configurable: true, writable: true, value: 0 });
+  const scrollByMock = vi.fn((options: unknown) => {
+    const top =
+      typeof options === 'object' &&
+      options !== null &&
+      'top' in options &&
+      typeof options.top === 'number'
+        ? options.top
+        : 0;
+    window.scrollY += top;
+  });
+  Object.defineProperty(window, 'scrollBy', { configurable: true, value: scrollByMock });
 
-  tabsGet.mockReset().mockResolvedValue({
+  tabsGet.mockReset().mockImplementation(async () => ({
     id: 7,
     windowId: 3,
-    url: PAGE_URL,
+    url: currentTabUrl,
     title: '交互测试',
     status: 'complete',
+  }));
+  tabsQuery.mockReset().mockImplementation(async () => [
+    {
+      id: 7,
+      windowId: 3,
+      url: currentTabUrl,
+      title: '交互测试',
+      status: 'complete',
+      active: true,
+    },
+  ]);
+  tabsUpdate.mockReset().mockImplementation(async () => tabsGet());
+  tabsGoBack.mockReset().mockImplementation(async () => {
+    currentTabUrl = 'https://www.zhipin.com/back';
   });
-  tabsGoBack.mockReset().mockResolvedValue(undefined);
-  tabsGoForward.mockReset().mockResolvedValue(undefined);
+  tabsGoForward.mockReset().mockImplementation(async () => {
+    currentTabUrl = 'https://www.zhipin.com/forward';
+  });
   permissionsContains.mockReset().mockResolvedValue(true);
   executeScript
     .mockReset()
@@ -112,7 +143,13 @@ beforeEach(() => {
     sessionValue = undefined;
   });
   vi.stubGlobal('chrome', {
-    tabs: { get: tabsGet, goBack: tabsGoBack, goForward: tabsGoForward },
+    tabs: {
+      get: tabsGet,
+      query: tabsQuery,
+      update: tabsUpdate,
+      goBack: tabsGoBack,
+      goForward: tabsGoForward,
+    },
     permissions: { contains: permissionsContains },
     scripting: { executeScript },
     storage: {
@@ -575,6 +612,139 @@ describe('performPageInteraction', () => {
   });
 });
 
+describe('verifyPageElementState', () => {
+  it('rechecks fill, select and check state without returning field values', () => {
+    setPage(`
+      <label for="name">姓名</label><input id="name" value="张三" />
+      <label for="city">城市</label><select id="city"><option value="sh" selected>上海</option></select>
+      <label><input id="updates" type="checkbox" checked />接收更新</label>
+    `);
+
+    const fill = verifyPageElementState({
+      action: 'fill',
+      locator: locatorByName('姓名'),
+      value: '张三',
+      expectedUrl: PAGE_URL,
+    });
+    const select = verifyPageElementState({
+      action: 'select',
+      locator: locatorByName('城市'),
+      value: '上海',
+      expectedUrl: PAGE_URL,
+    });
+    const check = verifyPageElementState({
+      action: 'check',
+      locator: locatorByName('接收更新'),
+      checked: true,
+      expectedUrl: PAGE_URL,
+    });
+
+    expect(fill).toMatchObject({ ok: true, evidence: 'input_value_matches' });
+    expect(select).toMatchObject({ ok: true, evidence: 'selected_option_matches' });
+    expect(check).toMatchObject({ ok: true, evidence: 'checked_state_matches' });
+    expect(JSON.stringify([fill, select, check])).not.toContain('张三');
+  });
+
+  it('reports controlled-field rollback and stale page identity', () => {
+    setPage('<label for="name">姓名</label><input id="name" value="旧值" />');
+    const locator = locatorByName('姓名');
+
+    expect(
+      verifyPageElementState({
+        action: 'fill',
+        locator,
+        value: '新值',
+        expectedUrl: PAGE_URL,
+      }),
+    ).toMatchObject({ ok: false, error: 'VERIFICATION_FAILED' });
+    expect(
+      verifyPageElementState({
+        action: 'fill',
+        locator,
+        value: '旧值',
+        expectedUrl: 'https://example.com/other',
+      }),
+    ).toMatchObject({ ok: false, error: 'STALE_ELEMENT_REFERENCE' });
+  });
+
+  it('rejects stale locator shapes and verifies editable/custom-control variants', () => {
+    setPage(`
+      <div contenteditable="true" aria-label="说明">目标说明</div>
+      <div role="switch" aria-label="通知" aria-checked="false"></div>
+      <button>普通按钮</button>
+      <select aria-label="城市"><option value="sh" selected>上海</option></select>
+    `);
+    const editable = locatorByName('说明');
+    const button = locatorByName('普通按钮');
+    const city = locatorByName('城市');
+
+    expect(
+      verifyPageElementState({
+        action: 'fill',
+        locator: editable,
+        value: '目标说明',
+        expectedUrl: PAGE_URL,
+      }),
+    ).toMatchObject({ ok: true, evidence: 'input_value_matches' });
+    expect(
+      verifyPageElementState({
+        action: 'check',
+        locator: locatorByName('通知'),
+        checked: false,
+        expectedUrl: PAGE_URL,
+      }),
+    ).toMatchObject({ ok: true, evidence: 'checked_state_matches' });
+    expect(
+      verifyPageElementState({
+        action: 'select',
+        locator: city,
+        value: 'sh',
+        expectedUrl: PAGE_URL,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      verifyPageElementState({
+        action: 'fill',
+        locator: button,
+        value: '',
+        expectedUrl: PAGE_URL,
+      }),
+    ).toMatchObject({ ok: false, error: 'VERIFICATION_FAILED' });
+    expect(
+      verifyPageElementState({
+        action: 'select',
+        locator: button,
+        value: '',
+        expectedUrl: PAGE_URL,
+      }),
+    ).toMatchObject({ ok: false, error: 'STALE_ELEMENT_REFERENCE' });
+    expect(
+      verifyPageElementState({
+        action: 'fill',
+        locator: { ...editable, path: [...editable.path, 99] },
+        value: '目标说明',
+        expectedUrl: PAGE_URL,
+      }),
+    ).toMatchObject({ ok: false, error: 'STALE_ELEMENT_REFERENCE' });
+    expect(
+      verifyPageElementState({
+        action: 'fill',
+        locator: { ...editable, tag: 'button' },
+        value: '目标说明',
+        expectedUrl: PAGE_URL,
+      }),
+    ).toMatchObject({ ok: false, error: 'STALE_ELEMENT_REFERENCE' });
+    expect(
+      verifyPageElementState({
+        action: 'fill',
+        locator: editable,
+        value: '目标说明',
+        expectedUrl: 'not a valid URL',
+      }),
+    ).toMatchObject({ ok: false, error: 'STALE_ELEMENT_REFERENCE' });
+  });
+});
+
 describe('PageInteractionCoordinator', () => {
   it('observes, stores private locators, and exposes only temporary refs to the model', async () => {
     setPage('<button>打开详情</button><label for="q">关键词</label><input id="q" />');
@@ -823,6 +993,7 @@ describe('PageInteractionCoordinator', () => {
           action: 'scroll',
           risk: 'safe',
           detail: '找不到目标',
+          stateVerified: false,
           error: 'ELEMENT_NOT_FOUND',
         },
       },
@@ -883,7 +1054,17 @@ describe('PageInteractionCoordinator', () => {
     );
     if ('deferred' in observed || observed.isError) throw new Error('Observation failed');
     const observationId = /"observationId":"([^"]+)/u.exec(observed.content)?.[1];
-    executeScript.mockResolvedValueOnce([]);
+    executeScript
+      .mockImplementationOnce(
+        async (options: { func: (...args: unknown[]) => unknown; args?: unknown[] }) => [
+          {
+            documentId: 'document-1',
+            frameId: 0,
+            result: options.func(...(options.args ?? [])),
+          },
+        ],
+      )
+      .mockResolvedValueOnce([]);
 
     await expect(
       coordinator.interact(
@@ -923,11 +1104,262 @@ describe('PageInteractionCoordinator', () => {
     const outcome = await pending;
 
     expect(document.querySelector('#result')?.textContent).toBe('已打开');
-    expect(outcome).toMatchObject({ isError: false, statusText: '点击页面控件并更新了页面观察' });
+    expect(outcome).toMatchObject({ isError: false, statusText: '已验证点击页面控件成功' });
     if (!('deferred' in outcome)) {
       expect(outcome.content).toContain('previousReferencesInvalidated');
       expect(outcome.content).toContain('"observationId":"obs-');
     }
+  });
+
+  it('does not repeat a click when the page shows no observable result', async () => {
+    vi.useFakeTimers();
+    setPage('<button id="noop">无响应按钮</button>');
+    const clicked = vi.fn();
+    document.querySelector('#noop')?.addEventListener('click', clicked);
+    const progress = vi.fn();
+    const coordinator = new PageInteractionCoordinator();
+    const observed = await coordinator.observe(
+      call('observe_page', {}),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    if ('deferred' in observed || observed.isError) throw new Error('Observation failed');
+    const observationId = /"observationId":"([^"]+)/u.exec(observed.content)?.[1];
+
+    const pending = coordinator.interact(
+      call('interact_page', { action: 'click', observationId, ref: 'e1' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+      false,
+      progress,
+    );
+    await vi.advanceTimersByTimeAsync(4_000);
+    const outcome = await pending;
+
+    expect(outcome).toMatchObject({
+      isError: true,
+      errorCode: 'VERIFICATION_FAILED',
+      statusText: '页面操作未验证成功',
+    });
+    if (!('deferred' in outcome)) expect(outcome.content).toContain('"status":"not_verified"');
+    expect(clicked).toHaveBeenCalledOnce();
+    expect(progress).toHaveBeenCalledWith(
+      '正在验证页面操作',
+      '只观察页面结果，不会重复执行刚才的动作。',
+    );
+  });
+
+  it('follows and verifies the single tab opened by a click', async () => {
+    vi.useFakeTimers();
+    setPage('<button id="open-tab">打开报告</button>');
+    const coordinator = new PageInteractionCoordinator();
+    const observed = await coordinator.observe(
+      call('observe_page', {}),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    if ('deferred' in observed || observed.isError) throw new Error('Observation failed');
+    const observationId = /"observationId":"([^"]+)/u.exec(observed.content)?.[1];
+    let queryCount = 0;
+    tabsQuery.mockImplementation(async () => {
+      queryCount += 1;
+      const original = { id: 7, windowId: 3, url: PAGE_URL, status: 'complete', active: true };
+      return queryCount === 1
+        ? [original]
+        : [
+            { ...original, active: false },
+            {
+              id: 9,
+              windowId: 3,
+              url: 'https://example.com/report',
+              title: '报告',
+              status: 'complete',
+              active: true,
+            },
+          ];
+    });
+    tabsGet.mockImplementation(async (tabId: number) =>
+      tabId === 9
+        ? {
+            id: 9,
+            windowId: 3,
+            url: 'https://example.com/report',
+            title: '报告',
+            status: 'complete',
+          }
+        : {
+            id: 7,
+            windowId: 3,
+            url: PAGE_URL,
+            title: '交互测试',
+            status: 'complete',
+          },
+    );
+    tabsUpdate.mockImplementation(async () => tabsGet(9));
+
+    const pending = coordinator.interact(
+      call('interact_page', { action: 'click', observationId, ref: 'e1' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    await vi.advanceTimersByTimeAsync(1_500);
+    const outcome = await pending;
+
+    expect(outcome).toMatchObject({
+      isError: false,
+      statusText: '已验证点击页面控件成功',
+      nextPageSnapshot: { tabId: 9, url: 'https://example.com/report' },
+    });
+    expect(tabsUpdate).toHaveBeenCalledWith(9, { active: true });
+  });
+
+  it('reports multiple newly opened tabs without guessing which one to follow', async () => {
+    vi.useFakeTimers();
+    setPage('<button>打开多个页面</button>');
+    const coordinator = new PageInteractionCoordinator();
+    const observed = await coordinator.observe(
+      call('observe_page', {}),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    if ('deferred' in observed || observed.isError) throw new Error('Observation failed');
+    const observationId = /"observationId":"([^"]+)/u.exec(observed.content)?.[1];
+    let queryCount = 0;
+    tabsQuery.mockImplementation(async () => {
+      queryCount += 1;
+      const original = { id: 7, windowId: 3, url: PAGE_URL, status: 'complete', active: true };
+      return queryCount === 1
+        ? [original]
+        : [
+            original,
+            { id: 9, windowId: 3, url: 'https://example.com/a', status: 'complete' },
+            { id: 10, windowId: 3, url: 'https://example.com/b', status: 'complete' },
+          ];
+    });
+
+    const pending = coordinator.interact(
+      call('interact_page', { action: 'click', observationId, ref: 'e1' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    const outcome = await pending;
+
+    expect(outcome).toMatchObject({
+      isError: false,
+      detail: '点击后打开了 2 个新标签页，未自动选择目标',
+      nextPageSnapshot: { tabId: 7 },
+    });
+    expect(tabsUpdate).not.toHaveBeenCalled();
+  });
+
+  it('verifies a click through same-tab navigation evidence', async () => {
+    vi.useFakeTimers();
+    setPage('<button id="navigate">进入详情</button>');
+    document.querySelector('#navigate')?.addEventListener('click', () => {
+      currentTabUrl = 'https://www.zhipin.com/detail';
+    });
+    const coordinator = new PageInteractionCoordinator();
+    const observed = await coordinator.observe(
+      call('observe_page', {}),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    if ('deferred' in observed || observed.isError) throw new Error('Observation failed');
+    const observationId = /"observationId":"([^"]+)/u.exec(observed.content)?.[1];
+
+    const pending = coordinator.interact(
+      call('interact_page', { action: 'click', observationId, ref: 'e1' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    const outcome = await pending;
+
+    expect(outcome).toMatchObject({
+      isError: false,
+      detail: '点击后页面地址已变化',
+      nextPageSnapshot: { url: 'https://www.zhipin.com/detail' },
+    });
+  });
+
+  it('fails verification when scrolling or history navigation has no effect', async () => {
+    vi.useFakeTimers();
+    setPage('<button>按钮</button>');
+    Object.defineProperty(window, 'scrollBy', { configurable: true, value: vi.fn() });
+    tabsGoBack.mockResolvedValue(undefined);
+    const coordinator = new PageInteractionCoordinator();
+
+    const scroll = coordinator.interact(
+      call('interact_page', { action: 'scroll', deltaY: 600 }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    await vi.advanceTimersByTimeAsync(1_500);
+    await expect(scroll).resolves.toMatchObject({
+      isError: true,
+      errorCode: 'VERIFICATION_FAILED',
+      detail: expect.stringContaining('视口没有发生变化'),
+    });
+
+    const back = coordinator.interact(
+      call('interact_page', { action: 'back' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    await vi.advanceTimersByTimeAsync(1_500);
+    await expect(back).resolves.toMatchObject({
+      isError: true,
+      errorCode: 'VERIFICATION_FAILED',
+      detail: expect.stringContaining('没有观察到页面地址变化'),
+    });
+  });
+
+  it('detects a controlled input that rolls back after the action', async () => {
+    vi.useFakeTimers();
+    setPage('<label for="name">姓名</label><input id="name" />');
+    const input = document.querySelector<HTMLInputElement>('#name');
+    input?.addEventListener('input', () => {
+      setTimeout(() => {
+        if (input) input.value = '';
+      }, 50);
+    });
+    const coordinator = new PageInteractionCoordinator();
+    const observed = await coordinator.observe(
+      call('observe_page', {}),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    if ('deferred' in observed || observed.isError) throw new Error('Observation failed');
+    const observationId = /"observationId":"([^"]+)/u.exec(observed.content)?.[1];
+
+    const pending = coordinator.interact(
+      call('interact_page', {
+        action: 'fill',
+        observationId,
+        ref: 'e1',
+        value: '张三',
+      }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    await vi.advanceTimersByTimeAsync(1_500);
+    const outcome = await pending;
+
+    expect(input?.value).toBe('');
+    expect(outcome).toMatchObject({ isError: true, errorCode: 'VERIFICATION_FAILED' });
   });
 
   it('defers risky clicks and executes the exact original ref after one-time approval', async () => {
@@ -1011,8 +1443,6 @@ describe('PageInteractionCoordinator', () => {
     for (const argumentsValue of [
       { action: 'scroll', deltaY: 800 },
       { action: 'wait', waitMs: 300 },
-      { action: 'back' },
-      { action: 'forward' },
     ]) {
       const pending = coordinator.interact(
         call('interact_page', argumentsValue),
@@ -1023,6 +1453,25 @@ describe('PageInteractionCoordinator', () => {
       await vi.advanceTimersByTimeAsync(1_500);
       await expect(pending).resolves.toMatchObject({ isError: false });
     }
+
+    const back = coordinator.interact(
+      call('interact_page', { action: 'back' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    await vi.advanceTimersByTimeAsync(1_500);
+    await expect(back).resolves.toMatchObject({ isError: false });
+
+    currentTabUrl = PAGE_URL;
+    const forward = coordinator.interact(
+      call('interact_page', { action: 'forward' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    await vi.advanceTimersByTimeAsync(1_500);
+    await expect(forward).resolves.toMatchObject({ isError: false });
     expect(tabsGoBack).toHaveBeenCalledWith(7);
     expect(tabsGoForward).toHaveBeenCalledWith(7);
 

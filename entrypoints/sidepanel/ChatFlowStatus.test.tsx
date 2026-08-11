@@ -265,7 +265,7 @@ describe('ChatFlowStatus', () => {
     );
 
     expect(screen.getByRole('region', { name: '页面操作权限' })).toHaveTextContent(
-      '识别并操作这个网站的搜索框',
+      '观察并操作这个网站当前页的可见控件',
     );
     fireEvent.click(screen.getByRole('button', { name: '允许操作' }));
     await waitFor(() =>
