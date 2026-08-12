@@ -66,6 +66,7 @@ export default defineConfig({
         'lib/page/extractor.ts',
         'lib/page/pending.ts',
         'lib/page/snapshot.ts',
+        'lib/portability/backup.ts',
         'lib/storage/access.ts',
         'lib/storage/config.ts',
         'lib/storage/db.ts',
@@ -85,6 +86,7 @@ export default defineConfig({
         'entrypoints/sidepanel/AgentContextSettings.tsx',
         'entrypoints/sidepanel/McpSettings.tsx',
         'entrypoints/sidepanel/AgentHealthCheck.tsx',
+        'entrypoints/sidepanel/DataPortability.tsx',
         'entrypoints/sidepanel/usePort.ts',
       ],
       thresholds: {

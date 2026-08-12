@@ -2574,6 +2574,79 @@ body {
   font-size: 10px;
 }
 
+.data-portability {
+  border-bottom: 1px solid var(--color-line);
+  padding: 18px 16px;
+}
+
+.data-portability h2 {
+  margin-top: 2px;
+  color: var(--color-ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.data-portability > p {
+  margin-top: 5px;
+  color: var(--color-ink-faint);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.data-portability-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 9px;
+  border-radius: 7px;
+  background: var(--color-canvas);
+  padding: 7px 8px;
+  color: var(--color-ink-muted);
+  font-size: 9px;
+}
+
+.data-portability-actions {
+  display: flex;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.data-portability-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: 7px;
+  background: var(--color-surface);
+  padding: 6px 9px;
+  color: var(--color-ink-muted);
+  font-size: 10px;
+}
+
+.data-portability-actions button:hover:not(:disabled) {
+  border-color: var(--color-brand);
+  color: var(--color-brand);
+}
+
+.data-portability-actions input {
+  display: none;
+}
+
+.data-portability-success,
+.data-portability-error {
+  margin-top: 8px;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.data-portability-success {
+  color: var(--color-success);
+}
+
+.data-portability-error {
+  color: var(--color-danger);
+}
+
 /* 动效降级 */
 @media (prefers-reduced-motion: reduce) {
   *,

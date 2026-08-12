@@ -80,3 +80,18 @@ test('侧边栏可启动，并在新建对话后保留本地历史', async ({ co
     )
     .toBe(1);
 });
+
+test('设置页可以运行本地 Agent 自检并提供安全备份入口', async ({ context, extensionId }) => {
+  const page = await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  await page.getByRole('button', { name: '设置' }).click();
+
+  await expect(page.getByRole('region', { name: 'Agent 运行自检' })).toBeVisible();
+  await expect(page.getByRole('region', { name: '数据备份与恢复' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '导出备份' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '恢复备份' })).toBeVisible();
+
+  await page.getByRole('button', { name: '运行自检' }).click();
+  await expect(page.getByText('默认模型')).toBeVisible();
+  await expect(page.getByText(/未发现常驻的全站网页权限/)).toBeVisible();
+});
