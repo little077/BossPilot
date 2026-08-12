@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ChatConversation, ChatMessage } from '@/lib/domain/chat';
+import type { ChatAttachment, ChatConversation, ChatMessage } from '@/lib/domain/chat';
 import { makeMessage } from '@/lib/domain/chat';
 import type { SearchTaskParams, TaskSnapshot } from '@/lib/domain/types';
 import { AGENT_PORT_NAME, type ClientMessage, type ServerMessage } from '@/lib/ipc/protocol';
@@ -477,7 +477,7 @@ export function useAgentPort() {
   ]);
 
   const sendChat = useCallback(
-    (text: string): boolean => {
+    (text: string, attachments: ChatAttachment[] = []): boolean => {
       const trimmed = text.trim();
       if (!trimmed || !ready || !connected || runningRef.current || activeChatRef.current) {
         return false;
@@ -485,7 +485,7 @@ export function useAgentPort() {
 
       const requestId = `chat-${crypto.randomUUID()}`;
       restoreSequenceRef.current += 1;
-      const userMessage = makeMessage('user', trimmed);
+      const userMessage = makeMessage('user', trimmed, attachments);
       let conversation = conversationsRef.current.find(
         ({ id }) => id === activeConversationIdRef.current,
       );

@@ -173,6 +173,9 @@ function cloneDeferred(value: DeferredGenerationTurn): DeferredGenerationTurn {
     ...value,
     message: {
       ...value.message,
+      ...(value.message.attachments
+        ? { attachments: value.message.attachments.map((attachment) => ({ ...attachment })) }
+        : {}),
       ...(value.message.modelIdentity ? { modelIdentity: { ...value.message.modelIdentity } } : {}),
       ...(value.message.usage ? { usage: { ...value.message.usage } } : {}),
       ...(value.message.reasoningActivity

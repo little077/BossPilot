@@ -324,6 +324,58 @@ describe('ChatGenerationManager', () => {
     expect(manager.getSnapshot()?.message).not.toHaveProperty('images');
   });
 
+  it('maps user text, selection, file, and image attachments into one generation turn', async () => {
+    let request: GenerationRequest | undefined;
+    const adapter: GenerationAdapter = {
+      async *stream(_target, next) {
+        request = next;
+        yield { type: 'text-delta', delta: 'done' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter);
+    await manager.start('attachments', [
+      {
+        id: 'user-attachment',
+        role: 'user',
+        content: '分析这些内容',
+        createdAt: 1,
+        attachments: [
+          {
+            id: 'selection',
+            kind: 'selection',
+            name: '当前页选中文本',
+            content: '页面 <选区>',
+            sourceOrigin: 'https://example.com',
+            sourceTitle: 'Example',
+          },
+          {
+            id: 'file',
+            kind: 'text',
+            name: 'resume.md',
+            mimeType: 'text/markdown',
+            size: 6,
+            content: '# 简历',
+          },
+          {
+            id: 'image',
+            kind: 'image',
+            name: 'screen.png',
+            mimeType: 'image/png',
+            size: 3,
+            data: 'AQID',
+          },
+        ],
+      },
+    ]);
+    expect(request?.messages[0]).toMatchObject({
+      role: 'user',
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+      content: expect.stringContaining('<user_attachments>'),
+    });
+    expect(request?.messages[0]?.content).toContain('页面 \\u003c选区>');
+  });
+
   it('strips image bytes before persisting a later deferred turn', async () => {
     const requests: GenerationRequest[] = [];
     let deferredTurn: DeferredGenerationTurn | undefined;

@@ -26,6 +26,7 @@ export default defineConfig({
       include: [
         'lib/adapter/city-codes.ts',
         'lib/adapter/zhipin.ts',
+        'lib/attachments/input.ts',
         'lib/browser/semantic-search.ts',
         'lib/browser/tab-router.ts',
         'lib/browser/visual-page.ts',

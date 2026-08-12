@@ -124,6 +124,105 @@ describe('IPC runtime validation', () => {
     expect(isClientMessage({ ...chat, messages: [{ ...message, createdAt: '1' }] })).toBe(false);
   });
 
+  it('accepts bounded safe attachments and rejects executable or oversized payloads', () => {
+    const base = {
+      type: 'chat',
+      requestId: 'request-attachments',
+      conversationId: 'conversation-1',
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: '分析附件',
+          createdAt: 1,
+          attachments: [
+            {
+              id: 'attachment-1',
+              kind: 'text',
+              name: 'resume.md',
+              mimeType: 'text/markdown',
+              size: 6,
+              content: 'resume',
+            },
+          ],
+        },
+      ],
+    };
+    expect(isClientMessage(base)).toBe(true);
+    expect(
+      isClientMessage({
+        ...base,
+        messages: [
+          {
+            ...base.messages[0],
+            attachments: [
+              {
+                id: 'x',
+                kind: 'text',
+                name: 'run.exe',
+                mimeType: 'application/octet-stream',
+                size: 1,
+                content: 'x',
+              },
+            ],
+          },
+        ],
+      }),
+    ).toBe(false);
+    const user = base.messages[0];
+    expect(
+      isClientMessage({
+        ...base,
+        messages: [
+          {
+            ...user,
+            attachments: [
+              {
+                id: 'image',
+                kind: 'image',
+                name: 'screen.png',
+                mimeType: 'image/png',
+                size: 3,
+                data: 'AQID',
+              },
+              {
+                id: 'selection',
+                kind: 'selection',
+                name: '选区',
+                content: 'selected',
+                sourceOrigin: 'https://example.com',
+                sourceTitle: 'Example',
+              },
+            ],
+          },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      isClientMessage({
+        ...base,
+        messages: [
+          {
+            ...user,
+            attachments: [
+              {
+                id: 'image',
+                kind: 'image',
+                name: 'screen.png',
+                mimeType: 'image/gif',
+                size: 3,
+                data: 'not base64!',
+              },
+            ],
+          },
+        ],
+      }),
+    ).toBe(false);
+    expect(
+      isClientMessage({ ...base, messages: [{ ...user, attachments: [{ kind: 'unknown' }] }] }),
+    ).toBe(false);
+  });
+
   it('validates optional conversation-title requests with bounded chat history', () => {
     const request = {
       type: 'summarize_conversation',
@@ -252,5 +351,6 @@ describe('IPC runtime validation', () => {
         memoryEnabled: true,
       }),
     ).toBe(false);
+    expect(isAgentContextCommand({ type: 'context:unknown' })).toBe(false);
   });
 });

@@ -2075,6 +2075,85 @@ body {
 }
 
 /* ─── 用户指令与本地记忆 ─── */
+.composer-attachments,
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.composer-attachments {
+  padding: 0 10px 7px;
+}
+
+.composer-attachment,
+.message-attachments > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 180px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 3px 5px;
+  font-size: 9px;
+  line-height: 1.2;
+}
+
+.composer-attachment > span,
+.message-attachments > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-attachment button,
+.composer-tools button {
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.composer-attachment button {
+  padding: 0;
+}
+
+.composer-attachment-error {
+  padding: 0 10px 6px;
+  color: var(--color-danger);
+  font-size: 9px;
+}
+
+.composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.composer-tools button {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  color: var(--color-text-muted);
+}
+
+.composer-tools button:hover:not(:disabled) {
+  background: var(--color-brand-soft);
+  color: var(--color-brand);
+}
+
+.message-attachments {
+  margin-top: 6px;
+}
+
+.message-attachments > span {
+  border-color: color-mix(in srgb, var(--color-surface) 55%, transparent);
+  background: color-mix(in srgb, var(--color-surface) 15%, transparent);
+  color: var(--color-surface);
+}
+
 .agent-context-settings {
   display: flex;
   flex-direction: column;

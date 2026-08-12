@@ -1,16 +1,22 @@
 import { describe, expect, it, vi } from 'vitest';
-import { makeMessage } from './chat';
+import { cloneAttachment, makeMessage } from './chat';
 
-describe('makeMessage', () => {
-  it('补齐稳定 id、角色和创建时间', () => {
-    vi.spyOn(crypto, 'randomUUID').mockReturnValue('00000000-0000-4000-8000-000000000000');
-    vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
-
-    expect(makeMessage('user', '你好')).toEqual({
-      id: '00000000-0000-4000-8000-000000000000',
-      role: 'user',
-      content: '你好',
-      createdAt: 1_700_000_000_000,
-    });
+describe('chat message attachments', () => {
+  it('creates defensive attachment copies and omits an empty list', () => {
+    vi.spyOn(crypto, 'randomUUID').mockReturnValue('00000000-0000-4000-8000-000000000001');
+    vi.spyOn(Date, 'now').mockReturnValue(10);
+    const attachment = {
+      id: 'a1',
+      kind: 'text' as const,
+      name: 'notes.txt',
+      mimeType: 'text/plain' as const,
+      size: 4,
+      content: 'test',
+    };
+    const message = makeMessage('user', 'hello', [attachment]);
+    expect(message).toMatchObject({ content: 'hello', createdAt: 10, attachments: [attachment] });
+    expect(message.attachments?.[0]).not.toBe(attachment);
+    expect(makeMessage('assistant', 'ok', [])).not.toHaveProperty('attachments');
+    expect(cloneAttachment(attachment)).toEqual(attachment);
   });
 });

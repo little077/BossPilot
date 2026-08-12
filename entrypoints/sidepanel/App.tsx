@@ -4,7 +4,9 @@
 
 import {
   Bot,
+  FileText,
   History,
+  Image,
   Loader2,
   MessageSquare,
   MessageSquarePlus,
@@ -15,6 +17,7 @@ import {
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import type { ChatAttachment } from '@/lib/domain/chat';
 import type { TaskPhase } from '@/lib/domain/types';
 import { AskUserPanel } from './AskUserPanel';
 import { ChatFlowStatus } from './ChatFlowStatus';
@@ -150,7 +153,8 @@ export default function App() {
     setViewedConversationId(tab === 'chat' ? activeConversationId : null);
   }, [activeConversationId, setViewedConversationId, tab]);
 
-  const submit = (text: string) => Boolean(text) && !chatRunning && sendChat(text);
+  const submit = (text: string, attachments: ChatAttachment[] = []) =>
+    Boolean(text || attachments.length) && !chatRunning && sendChat(text, attachments);
 
   const startNewChat = () => {
     if (chatRunning || messages.length === 0) return;
@@ -175,9 +179,9 @@ export default function App() {
 
   // 首页发送：先同步占用本轮请求，再播放沉底动画。
   // 发送被拒绝时不启动动画，避免输入框下沉后又回弹到首页。
-  const homeSend = (text: string) => {
-    if (!text || chatRunning || launching || !connected) return;
-    if (!submit(text)) return;
+  const homeSend = (text: string, attachments: ChatAttachment[]) => {
+    if ((!text && !attachments.length) || chatRunning || launching || !connected) return;
+    if (!submit(text, attachments)) return;
 
     const wrap = homeWrapRef.current;
     if (wrap) {
@@ -380,7 +384,21 @@ export default function App() {
                       key={m.id}
                       className="redscope-user-message msg-in max-w-[92%] self-end whitespace-pre-wrap rounded-[16px_16px_5px_16px] bg-brand px-3 py-2 text-xs leading-relaxed text-white"
                     >
-                      {m.content}
+                      <span>{m.content}</span>
+                      {m.attachments?.length ? (
+                        <span className="message-attachments">
+                          {m.attachments.map((attachment) => (
+                            <span key={attachment.id}>
+                              {attachment.kind === 'image' ? (
+                                <Image size={10} />
+                              ) : (
+                                <FileText size={10} />
+                              )}
+                              {attachment.name}
+                            </span>
+                          ))}
+                        </span>
+                      ) : null}
                     </div>
                   );
                 }

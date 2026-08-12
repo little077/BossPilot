@@ -313,7 +313,10 @@ function createRuntimeModel(target: ResolvedGenerationTarget, api: PiApi): Model
 
 function createContext(model: Model<Api>, request: GenerationRequest): Context {
   const hasImageInput = request.messages.some(
-    (message) => message.role === 'toolResult' && Boolean(message.images?.length),
+    (message) =>
+      (message.role === 'toolResult' || message.role === 'user') &&
+      'images' in message &&
+      Boolean(message.images?.length),
   );
   if (hasImageInput && !model.input.includes('image')) {
     throw new GenerationError(
@@ -333,7 +336,23 @@ function createContext(model: Model<Api>, request: GenerationRequest): Context {
       }
 
       if (message.role === 'user') {
-        return [{ role: 'user' as const, content, timestamp: message.createdAt }];
+        const images = 'images' in message ? message.images : undefined;
+        return [
+          {
+            role: 'user' as const,
+            content: images?.length
+              ? [
+                  { type: 'text' as const, text: content },
+                  ...images.map((image) => ({
+                    type: 'image' as const,
+                    data: image.data,
+                    mimeType: image.mimeType,
+                  })),
+                ]
+              : content,
+            timestamp: message.createdAt,
+          },
+        ];
       }
 
       if (message.role === 'toolResult') {

@@ -864,6 +864,9 @@ function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
 function cloneMessage(message: ChatMessage): ChatMessage {
   return {
     ...message,
+    ...(message.attachments
+      ? { attachments: message.attachments.map((attachment) => ({ ...attachment })) }
+      : {}),
     ...(message.modelIdentity ? { modelIdentity: { ...message.modelIdentity } } : {}),
     ...(message.usage ? { usage: { ...message.usage } } : {}),
     ...(message.reasoningActivity ? { reasoningActivity: { ...message.reasoningActivity } } : {}),
@@ -1028,7 +1031,10 @@ function cloneGenerationInputMessages(
         ...(message.images ? { images: message.images.map((image) => ({ ...image })) } : {}),
       };
     }
-    return { ...message };
+    return {
+      ...message,
+      ...(message.images ? { images: message.images.map((image) => ({ ...image })) } : {}),
+    };
   });
 }
 
@@ -1101,7 +1107,31 @@ function toGenerationInputMessages(history: ChatMessage[]): GenerationInputMessa
     if (!content) return [];
 
     if (message.role === 'user') {
-      return [{ role: 'user', content, createdAt: message.createdAt }];
+      const textAttachments = message.attachments?.filter(
+        (attachment) => attachment.kind === 'text' || attachment.kind === 'selection',
+      );
+      const attachmentText = textAttachments?.length
+        ? `\n\n<user_attachments>\n${textAttachments
+            .map((attachment) =>
+              attachment.kind === 'selection'
+                ? `<selection source="${escapeXmlAttribute(attachment.sourceOrigin)}" title="${escapeXmlAttribute(attachment.sourceTitle)}">${attachment.content.replaceAll('<', '\\u003c')}</selection>`
+                : `<text_file name="${escapeXmlAttribute(attachment.name)}">${attachment.content.replaceAll('<', '\\u003c')}</text_file>`,
+            )
+            .join('\n')}\n</user_attachments>`
+        : '';
+      const images = message.attachments?.flatMap((attachment) =>
+        attachment.kind === 'image'
+          ? [{ data: attachment.data, mimeType: attachment.mimeType }]
+          : [],
+      );
+      return [
+        {
+          role: 'user',
+          content: `${content}${attachmentText}`,
+          createdAt: message.createdAt,
+          ...(images?.length ? { images } : {}),
+        },
+      ];
     }
     if (message.error || message.status === 'error' || message.status === 'streaming') return [];
 
@@ -1114,6 +1144,10 @@ function toGenerationInputMessages(history: ChatMessage[]): GenerationInputMessa
       },
     ];
   });
+}
+
+function escapeXmlAttribute(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;');
 }
 
 function addUsage(current: GenerationUsage | undefined, next: GenerationUsage): GenerationUsage {

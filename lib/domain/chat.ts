@@ -42,6 +42,8 @@ export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  /** 用户主动附加的本地图片、文本文件或当前页选区；随会话仅保存在本机。 */
+  attachments?: ChatAttachment[];
   /** 毫秒时间戳，用于排序与回放。 */
   createdAt: number;
   /** 该条 assistant 消息是错误提示（UI 用不同样式呈现）。 */
@@ -65,6 +67,32 @@ export interface ChatMessage {
   /** Ask User 暂停点；固定显示在输入框上方，不作为消息气泡渲染。 */
   pendingUserQuestion?: PendingUserQuestion;
 }
+
+export type ChatAttachment =
+  | {
+      id: string;
+      kind: 'image';
+      name: string;
+      mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
+      size: number;
+      data: string;
+    }
+  | {
+      id: string;
+      kind: 'text';
+      name: string;
+      mimeType: 'text/plain' | 'text/markdown' | 'application/json' | 'text/csv';
+      size: number;
+      content: string;
+    }
+  | {
+      id: string;
+      kind: 'selection';
+      name: string;
+      content: string;
+      sourceOrigin: string;
+      sourceTitle: string;
+    };
 
 /** 会话标题来源；用户手动改名后，自动标题不得再次覆盖。 */
 export type ConversationTitleSource = 'fallback' | 'ai' | 'user';
@@ -96,6 +124,20 @@ export interface ChatHistorySettings {
 }
 
 /** 生成一条消息（补齐 id/createdAt）。 */
-export function makeMessage(role: ChatMessage['role'], content: string): ChatMessage {
-  return { id: crypto.randomUUID(), role, content, createdAt: Date.now() };
+export function makeMessage(
+  role: ChatMessage['role'],
+  content: string,
+  attachments?: ChatAttachment[],
+): ChatMessage {
+  return {
+    id: crypto.randomUUID(),
+    role,
+    content,
+    createdAt: Date.now(),
+    ...(attachments?.length ? { attachments: attachments.map(cloneAttachment) } : {}),
+  };
+}
+
+export function cloneAttachment(attachment: ChatAttachment): ChatAttachment {
+  return { ...attachment };
 }

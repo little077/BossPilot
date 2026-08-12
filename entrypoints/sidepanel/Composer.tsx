@@ -5,8 +5,15 @@
 import Placeholder from '@tiptap/extension-placeholder';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
-import { ArrowUp, Square } from 'lucide-react';
+import { ArrowUp, FileText, Image, Paperclip, ScanText, Square, X } from 'lucide-react';
 import { type Ref, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import {
+  attachmentFromFile,
+  MAX_ATTACHMENTS,
+  selectionAttachment,
+  validateAttachmentSet,
+} from '@/lib/attachments/input';
+import type { ChatAttachment } from '@/lib/domain/chat';
 
 export interface ComposerHandle {
   /** 外部填入文本（示例 chips 用），并聚焦到末尾 */
@@ -15,7 +22,7 @@ export interface ComposerHandle {
 }
 
 interface ComposerProps {
-  onSend: (text: string) => void;
+  onSend: (text: string, attachments: ChatAttachment[]) => void;
   running?: boolean;
   disabled?: boolean;
   onCancel?: () => void;
@@ -40,6 +47,10 @@ export function Composer({
   ref,
 }: ComposerProps) {
   const [empty, setEmpty] = useState(true);
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState('');
+  const [readingAttachment, setReadingAttachment] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // 回调与状态放进 ref，让 editor 只创建一次也能拿到最新值
   const submitRef = useRef<() => void>(() => {});
@@ -90,9 +101,12 @@ export function Composer({
   submitRef.current = () => {
     if (!editor || running || disabled) return;
     const text = editor.getText({ blockSeparator: '\n' }).trim();
-    if (!text) return;
-    onSend(text);
-    if (clearOnSend) editor.commands.clearContent(true);
+    if (!text && attachments.length === 0) return;
+    onSend(text || '请分析我附加的内容。', attachments);
+    if (clearOnSend) {
+      editor.commands.clearContent(true);
+      setAttachments([]);
+    }
   };
 
   // 任务执行中锁定编辑
@@ -108,6 +122,44 @@ export function Composer({
     focus: () => editor?.commands.focus('end'),
   }));
 
+  const addFiles = async (files: FileList | null) => {
+    if (!files?.length) return;
+    setReadingAttachment(true);
+    setAttachmentError('');
+    try {
+      const room = Math.max(0, MAX_ATTACHMENTS - attachments.length);
+      if (files.length > room) throw new Error('每条消息最多添加 3 个附件。');
+      const added = await Promise.all([...files].map(attachmentFromFile));
+      const next = [...attachments, ...added];
+      validateAttachmentSet(next);
+      setAttachments(next);
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : '附件读取失败。');
+    } finally {
+      setReadingAttachment(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const addSelection = async () => {
+    setAttachmentError('');
+    try {
+      if (attachments.length >= MAX_ATTACHMENTS) throw new Error('每条消息最多添加 3 个附件。');
+      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (tab?.id === undefined) throw new Error('没有可读取的当前页面。');
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: captureSelectionInPage,
+      });
+      if (!result?.result) throw new Error('无法读取当前页面选区。');
+      const next = [...attachments, selectionAttachment(result.result)];
+      validateAttachmentSet(next);
+      setAttachments(next);
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : '无法读取当前页面选区。');
+    }
+  };
+
   return (
     <section
       className={`composer-card rounded-2xl border border-line bg-surface transition-all duration-200 focus-within:border-brand/60 focus-within:shadow-[0_0_0_4px_color-mix(in_srgb,var(--color-brand)_10%,transparent)] ${
@@ -115,10 +167,63 @@ export function Composer({
       } ${className}`}
     >
       <EditorContent editor={editor} className="composer-editor" />
+      {attachments.length ? (
+        <fieldset className="composer-attachments" aria-label="待发送附件">
+          {attachments.map((attachment) => (
+            <span key={attachment.id} className="composer-attachment">
+              {attachment.kind === 'image' ? <Image size={10} /> : <FileText size={10} />}
+              <span>{attachment.name}</span>
+              <button
+                type="button"
+                aria-label={`移除附件 ${attachment.name}`}
+                onClick={() =>
+                  setAttachments((current) => current.filter(({ id }) => id !== attachment.id))
+                }
+              >
+                <X size={9} />
+              </button>
+            </span>
+          ))}
+        </fieldset>
+      ) : null}
+      {attachmentError ? (
+        <div className="composer-attachment-error" role="status">
+          {attachmentError}
+        </div>
+      ) : null}
       <footer className="flex items-center justify-between gap-2 px-2.5 pb-2">
-        <span className={`text-[10px] ${waitingForAnswer ? 'text-warning' : 'text-ink-faint'}`}>
-          {waitingForAnswer ? '回答后会从当前步骤继续' : 'Enter 发送 · Shift+Enter 换行'}
-        </span>
+        <div className="composer-tools">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="sr-only"
+            aria-label="选择附件文件"
+            accept="image/jpeg,image/png,image/webp,.txt,.md,.markdown,.json,.csv"
+            onChange={(event) => void addFiles(event.target.files)}
+          />
+          <button
+            type="button"
+            aria-label="添加图片或文本文件"
+            title="添加图片或文本文件"
+            disabled={running || disabled || waitingForAnswer || readingAttachment}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <Paperclip size={11} />
+          </button>
+          <button
+            type="button"
+            aria-label="附加当前页选中文本"
+            title="附加当前页选中文本"
+            disabled={running || disabled || waitingForAnswer || readingAttachment}
+            onClick={() => void addSelection()}
+          >
+            <ScanText size={11} />
+          </button>
+          <span className={`text-[10px] ${waitingForAnswer ? 'text-warning' : 'text-ink-faint'}`}>
+            {waitingForAnswer ? '回答后会从当前步骤继续' : 'Enter 发送'}
+          </span>
+        </div>
         {running ? (
           <button
             type="button"
@@ -134,7 +239,7 @@ export function Composer({
           <button
             type="button"
             className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-brand text-white transition-all duration-200 hover:bg-brand-strong hover:shadow-[0_4px_12px_color-mix(in_srgb,var(--color-brand)_35%,transparent)] active:scale-95 disabled:opacity-40 disabled:hover:shadow-none"
-            disabled={empty || disabled}
+            disabled={(empty && attachments.length === 0) || disabled}
             title="发送"
             onClick={() => submitRef.current()}
           >
@@ -144,4 +249,12 @@ export function Composer({
       </footer>
     </section>
   );
+}
+
+function captureSelectionInPage(): { text: string; origin: string; title: string } {
+  return {
+    text: window.getSelection()?.toString() ?? '',
+    origin: window.location.origin,
+    title: document.title,
+  };
 }

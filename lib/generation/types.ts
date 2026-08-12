@@ -61,6 +61,7 @@ export type GenerationInputMessage =
       role: 'user';
       content: string;
       createdAt: number;
+      images?: GenerationImageContent[];
     }
   | {
       role: 'assistant';

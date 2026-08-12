@@ -194,6 +194,36 @@ describe('pi-ai generation adapter', () => {
     );
   });
 
+  it('maps user image attachments directly to multimodal user content', async () => {
+    const calls: StreamCall[] = [];
+    const loadApi = makeLoader(
+      [{ type: 'done', reason: 'stop', message: makeAssistant('stop') }],
+      calls,
+    );
+    const adapter = createPiGenerationAdapter({ loadApi });
+    await collect(
+      adapter.stream(makeTarget({ supportsImageInput: true }), {
+        systemPrompt: 'system',
+        messages: [
+          {
+            role: 'user',
+            content: 'describe',
+            createdAt: 1,
+            images: [{ data: 'AQID', mimeType: 'image/png' }],
+          },
+        ],
+        signal: new AbortController().signal,
+      }),
+    );
+    expect(calls[0]?.context.messages[0]).toMatchObject({
+      role: 'user',
+      content: [
+        { type: 'text', text: 'describe' },
+        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      ],
+    });
+  });
+
   it('fails before the provider request if a text-only model receives an image', async () => {
     const stream = vi.fn(() => toAsyncIterable([]));
     const adapter = createPiGenerationAdapter({

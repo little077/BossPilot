@@ -80,6 +80,7 @@ export type ServerMessage =
 const MAX_CHAT_MESSAGES = 200;
 const MAX_MESSAGE_CHARS = 100_000;
 const MAX_CHAT_CHARS = 500_000;
+const MAX_CHAT_ATTACHMENT_CHARS = 6_000_000;
 
 export function isClientMessage(value: unknown): value is ClientMessage {
   if (!isRecord(value) || typeof value.type !== 'string') return false;
@@ -135,7 +136,18 @@ function isChatHistory(value: unknown): value is ChatMessage[] {
         total +
         (isRecord(message) && typeof message.content === 'string' ? message.content.length : 0),
       0,
-    ) <= MAX_CHAT_CHARS
+    ) <= MAX_CHAT_CHARS &&
+    value.reduce(
+      (total, message) =>
+        total +
+        (isRecord(message) && Array.isArray(message.attachments)
+          ? message.attachments.reduce(
+              (sum: number, attachment: unknown) => sum + attachmentPayloadChars(attachment),
+              0,
+            )
+          : 0),
+      0,
+    ) <= MAX_CHAT_ATTACHMENT_CHARS
   );
 }
 
@@ -269,8 +281,58 @@ function isChatMessage(value: unknown): value is ChatMessage {
     typeof value.content === 'string' &&
     value.content.length <= MAX_MESSAGE_CHARS &&
     typeof value.createdAt === 'number' &&
-    Number.isFinite(value.createdAt)
+    Number.isFinite(value.createdAt) &&
+    (value.attachments === undefined ||
+      (Array.isArray(value.attachments) &&
+        value.attachments.length <= 3 &&
+        value.attachments.every(isChatAttachment)))
   );
+}
+
+function isChatAttachment(value: unknown): boolean {
+  if (!isRecord(value) || !isBoundedString(value.id, 128) || !isBoundedString(value.name, 120)) {
+    return false;
+  }
+  if (value.kind === 'image') {
+    return (
+      (value.mimeType === 'image/jpeg' ||
+        value.mimeType === 'image/png' ||
+        value.mimeType === 'image/webp') &&
+      typeof value.size === 'number' &&
+      value.size >= 0 &&
+      value.size <= 2 * 1024 * 1024 &&
+      typeof value.data === 'string' &&
+      value.data.length <= 2_800_000 &&
+      /^[A-Za-z0-9+/]*={0,2}$/u.test(value.data)
+    );
+  }
+  if (value.kind === 'text') {
+    return (
+      (value.mimeType === 'text/plain' ||
+        value.mimeType === 'text/markdown' ||
+        value.mimeType === 'application/json' ||
+        value.mimeType === 'text/csv') &&
+      typeof value.size === 'number' &&
+      value.size >= 0 &&
+      value.size <= 200 * 1024 &&
+      isBoundedString(value.content, 200 * 1024)
+    );
+  }
+  return (
+    value.kind === 'selection' &&
+    isBoundedString(value.content, 8_000) &&
+    typeof value.sourceOrigin === 'string' &&
+    value.sourceOrigin.length <= 2_048 &&
+    typeof value.sourceTitle === 'string' &&
+    value.sourceTitle.length <= 200
+  );
+}
+
+function attachmentPayloadChars(value: unknown): number {
+  if (!isRecord(value)) return 0;
+  if (typeof value.data === 'string') return value.data.length;
+  if (typeof value.content === 'string') return value.content.length;
+  return 0;
 }
 
 function isBoundedString(value: unknown, maxLength: number): value is string {
