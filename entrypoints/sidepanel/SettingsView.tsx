@@ -8,6 +8,7 @@ import {
   removePageOriginAccess,
 } from '@/lib/page/access';
 import { getChatHistorySettings, setChatHistorySettings } from '@/lib/storage/config';
+import { AgentContextSettings } from './AgentContextSettings';
 import { ProviderSettings } from './ProviderSettings';
 import { SkillSettings } from './SkillSettings';
 
@@ -16,6 +17,7 @@ export function SettingsView() {
     <div className="redscope-settings flex flex-col">
       <ProviderSettings />
       <SkillSettings />
+      <AgentContextSettings />
       <ChatHistorySettings />
       <PageOriginSettings />
     </div>

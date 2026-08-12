@@ -4,8 +4,13 @@ import { defineConfig } from 'wxt';
 
 function generationChunk(id: string): string | undefined {
   const moduleId = id.replaceAll('\\', '/');
-  if (moduleId.includes('/lib/skills/') || moduleId.endsWith('/lib/tools/load-skill.ts')) {
-    return 'agent-skills';
+  if (
+    moduleId.includes('/lib/skills/') ||
+    moduleId.endsWith('/lib/tools/load-skill.ts') ||
+    moduleId.includes('/lib/memory/') ||
+    moduleId.endsWith('/lib/tools/memory.ts')
+  ) {
+    return 'agent-context';
   }
   if (
     moduleId.endsWith('/lib/tools/browser-action.ts') ||

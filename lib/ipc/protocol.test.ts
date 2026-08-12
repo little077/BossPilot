@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { isClientMessage, isProviderCommand, isSkillCommand } from './protocol';
+import {
+  isAgentContextCommand,
+  isClientMessage,
+  isProviderCommand,
+  isSkillCommand,
+} from './protocol';
 
 describe('IPC runtime validation', () => {
   it('accepts a bounded chat request and rejects malformed or oversized history', () => {
@@ -222,5 +227,30 @@ describe('IPC runtime validation', () => {
       false,
     );
     expect(isSkillCommand({ type: 'skills:unknown' })).toBe(false);
+  });
+
+  it('validates bounded local context commands', () => {
+    expect(isAgentContextCommand({ type: 'context:get' })).toBe(true);
+    expect(isAgentContextCommand({ type: 'context:clear-memories' })).toBe(true);
+    expect(
+      isAgentContextCommand({
+        type: 'context:save-settings',
+        instructions: '中文回答',
+        memoryEnabled: true,
+      }),
+    ).toBe(true);
+    expect(isAgentContextCommand({ type: 'context:add-memory', content: '偏好远程' })).toBe(true);
+    expect(
+      isAgentContextCommand({ type: 'context:update-memory', id: 'm1', content: '偏好现场' }),
+    ).toBe(true);
+    expect(isAgentContextCommand({ type: 'context:remove-memory', id: 'm1' })).toBe(true);
+    expect(isAgentContextCommand({ type: 'context:add-memory', content: '' })).toBe(false);
+    expect(
+      isAgentContextCommand({
+        type: 'context:save-settings',
+        instructions: 'x'.repeat(4_001),
+        memoryEnabled: true,
+      }),
+    ).toBe(false);
   });
 });

@@ -12,7 +12,9 @@ import { resolveActiveGenerationTarget } from '@/lib/generation/resolve';
 import type { GenerationToolExecutionOutcome } from '@/lib/generation/types';
 import {
   AGENT_PORT_NAME,
+  type AgentContextCommandResponse,
   type ClientMessage,
+  isAgentContextCommand,
   isClientMessage,
   isProviderCommand,
   isSkillCommand,
@@ -21,6 +23,8 @@ import {
   type SkillCommandResponse,
 } from '@/lib/ipc/protocol';
 import { CHAT_SYSTEM } from '@/lib/llm/prompts';
+import { buildAgentContextPrompt } from '@/lib/memory/prompt';
+import { MemoryStore } from '@/lib/memory/store';
 import { hasExactPageOriginAccess } from '@/lib/page/access';
 import {
   claimPendingPageTurn,
@@ -39,6 +43,7 @@ import { createTrustedStorageGate } from '@/lib/storage/access';
 import { ASK_USER_TOOL, askUser } from '@/lib/tools/ask-user';
 import { BROWSER_ACTION_TOOL, executeBrowserAction } from '@/lib/tools/browser-action';
 import { LOAD_SKILL_TOOL, SkillLoadCoordinator } from '@/lib/tools/load-skill';
+import { MemoryToolCoordinator, SAVE_MEMORY_TOOL, SEARCH_MEMORY_TOOL } from '@/lib/tools/memory';
 import {
   INTERACT_PAGE_TOOL,
   OBSERVE_PAGE_TOOL,
@@ -66,6 +71,9 @@ export default defineBackground({
     const providerService = new ProviderService();
     const skillStore = new SkillStore();
     const skillLoader = new SkillLoadCoordinator(skillStore);
+    const memoryStore = new MemoryStore();
+    const memoryTools = new MemoryToolCoordinator(memoryStore);
+    void chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
     const chatPorts = new Set<chrome.runtime.Port>();
     const diagnosticInputs = new Map<string, string>();
     const pageSnapshots = new Map<string, PageTurnSnapshot | null>();
@@ -81,7 +89,7 @@ export default defineBackground({
 
     const generationManager = new ChatGenerationManager({
       adapter: generationAdapter,
-      systemPrompt: async () => composeChatSystemPrompt(skillStore),
+      systemPrompt: async () => composeChatSystemPrompt(skillStore, memoryStore),
       maxOutputTokens: 8_192,
       maxAgentTurns: 200,
       maxConsecutiveIdenticalToolCalls: 3,
@@ -92,6 +100,8 @@ export default defineBackground({
         OBSERVE_VISUAL_PAGE_TOOL,
         INTERACT_PAGE_TOOL,
         LOAD_SKILL_TOOL,
+        SEARCH_MEMORY_TOOL,
+        SAVE_MEMORY_TOOL,
         ASK_USER_TOOL,
       ],
       executeTool: async (call, signal, requestId, reportProgress, context) => {
@@ -146,6 +156,10 @@ export default defineBackground({
             break;
           case 'load_skill':
             result = await skillLoader.execute(call, requestId, signal);
+            break;
+          case 'search_memory':
+          case 'save_memory':
+            result = await memoryTools.execute(call, latestUserText(requestId), signal);
             break;
           case 'ask_user':
             result = askUser(call);
@@ -231,6 +245,36 @@ export default defineBackground({
               ok: false,
               error: publicOperationError(error, ''),
             } satisfies SkillCommandResponse),
+        );
+      return true;
+    });
+
+    chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
+      if (!isAgentContextCommand(raw) || !isTrustedExtensionPage(sender)) return;
+      void requireTrustedStorage()
+        .then(async () => {
+          switch (raw.type) {
+            case 'context:get':
+              return memoryStore.view();
+            case 'context:save-settings':
+              return memoryStore.saveSettings(raw);
+            case 'context:add-memory':
+              return memoryStore.add(raw.content);
+            case 'context:update-memory':
+              return memoryStore.update(raw.id, raw.content);
+            case 'context:remove-memory':
+              return memoryStore.remove(raw.id);
+            case 'context:clear-memories':
+              return memoryStore.clear();
+          }
+        })
+        .then(
+          (state) => sendResponse({ ok: true, state } satisfies AgentContextCommandResponse),
+          (error: unknown) =>
+            sendResponse({
+              ok: false,
+              error: publicOperationError(error, ''),
+            } satisfies AgentContextCommandResponse),
         );
       return true;
     });
@@ -441,7 +485,7 @@ export default defineBackground({
 
       const lastUser = [...history].reverse().find((message) => message.role === 'user');
       diagnosticInputs.set(requestId, lastUser?.content ?? '');
-      const chatSystemPrompt = await composeChatSystemPrompt(skillStore);
+      const chatSystemPrompt = await composeChatSystemPrompt(skillStore, memoryStore);
       activeDiagnostic = {
         requestId,
         messageCount: history.length + 1,
@@ -816,9 +860,18 @@ function publicOperationError(error: unknown, secret = ''): string {
   );
 }
 
-async function composeChatSystemPrompt(skillStore: SkillStore): Promise<string> {
-  const catalog = buildSkillCatalogPrompt(await skillStore.listEnabled());
-  return catalog ? `${CHAT_SYSTEM}\n\n${catalog}` : CHAT_SYSTEM;
+async function composeChatSystemPrompt(skillStore: SkillStore, memoryStore?: MemoryStore) {
+  const [skills, context] = await Promise.all([
+    skillStore.listEnabled(),
+    memoryStore?.settings() ?? Promise.resolve(undefined),
+  ]);
+  return [
+    CHAT_SYSTEM,
+    buildSkillCatalogPrompt(skills),
+    context ? buildAgentContextPrompt(context) : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 function base64EncodeUtf8(value: string): string {

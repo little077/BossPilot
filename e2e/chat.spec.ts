@@ -300,6 +300,8 @@ test('通用当前页工具读取 Boss 岗位并附加领域增强', async ({ co
     'observe_visual_page',
     'interact_page',
     'load_skill',
+    'search_memory',
+    'save_memory',
     'ask_user',
   ]);
   expect(chatRequests[0]?.body.messages).toContainEqual(

@@ -4,6 +4,7 @@
 
 import type { ChatMessage } from '@/lib/domain/chat';
 import type { ProviderStateView, SearchTaskParams, TaskSnapshot } from '@/lib/domain/types';
+import type { AgentContextView } from '@/lib/memory/types';
 import type { SkillSettingsView } from '@/lib/skills/types';
 
 export const AGENT_PORT_NAME = 'bosspilot-agent';
@@ -177,6 +178,41 @@ export type SkillCommand =
 export type SkillCommandResponse =
   | { ok: true; state: SkillSettingsView }
   | { ok: false; error: string };
+
+export type AgentContextCommand =
+  | { type: 'context:get' }
+  | { type: 'context:save-settings'; instructions: string; memoryEnabled: boolean }
+  | { type: 'context:add-memory'; content: string }
+  | { type: 'context:update-memory'; id: string; content: string }
+  | { type: 'context:remove-memory'; id: string }
+  | { type: 'context:clear-memories' };
+
+export type AgentContextCommandResponse =
+  | { ok: true; state: AgentContextView }
+  | { ok: false; error: string };
+
+export function isAgentContextCommand(value: unknown): value is AgentContextCommand {
+  if (!isRecord(value) || typeof value.type !== 'string') return false;
+  switch (value.type) {
+    case 'context:get':
+    case 'context:clear-memories':
+      return true;
+    case 'context:save-settings':
+      return (
+        typeof value.instructions === 'string' &&
+        value.instructions.length <= 4_000 &&
+        typeof value.memoryEnabled === 'boolean'
+      );
+    case 'context:add-memory':
+      return isBoundedString(value.content, 500);
+    case 'context:update-memory':
+      return isBoundedString(value.id, 128) && isBoundedString(value.content, 500);
+    case 'context:remove-memory':
+      return isBoundedString(value.id, 128);
+    default:
+      return false;
+  }
+}
 
 export function isSkillCommand(value: unknown): value is SkillCommand {
   if (!isRecord(value) || typeof value.type !== 'string') return false;

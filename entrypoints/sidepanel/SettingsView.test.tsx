@@ -17,6 +17,9 @@ vi.mock('./ProviderSettings', () => ({
 vi.mock('./SkillSettings', () => ({
   SkillSettings: () => <section aria-label="Agent Skills">技能设置</section>,
 }));
+vi.mock('./AgentContextSettings', () => ({
+  AgentContextSettings: () => <section aria-label="用户上下文">用户上下文设置</section>,
+}));
 vi.mock('@/lib/page/access', () => accessMocks);
 vi.mock('@/lib/storage/config', () => configMocks);
 
@@ -33,6 +36,7 @@ describe('SettingsView', () => {
 
     expect(screen.getByRole('region', { name: '模型卡包与发卡台' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Agent Skills' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '用户上下文' })).toBeInTheDocument();
     expect(await screen.findByText('尚未长期允许其他网站')).toBeVisible();
     expect(screen.queryByText('评估设置')).not.toBeInTheDocument();
     expect(screen.queryByText(/我的档案/)).not.toBeInTheDocument();

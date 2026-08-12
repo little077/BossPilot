@@ -2074,6 +2074,150 @@ body {
   box-shadow: none;
 }
 
+/* ─── 用户指令与本地记忆 ─── */
+.agent-context-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.agent-instructions-label {
+  color: var(--color-text);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.agent-context-settings textarea,
+.agent-memory-add input,
+.agent-memory-card input {
+  width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 11px;
+  outline: none;
+}
+
+.agent-context-settings textarea {
+  min-height: 76px;
+  resize: vertical;
+  padding: 9px 10px;
+  line-height: 1.55;
+}
+
+.agent-context-settings textarea:focus,
+.agent-memory-add input:focus,
+.agent-memory-card input:focus {
+  border-color: var(--color-brand);
+  box-shadow: 0 0 0 2px var(--color-brand-soft);
+}
+
+.agent-context-actions,
+.agent-memory-add,
+.agent-memory-card,
+.agent-memory-card > div {
+  display: flex;
+  align-items: center;
+}
+
+.agent-context-actions {
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-context-actions small {
+  color: var(--color-text-muted);
+  font-size: 9px;
+}
+
+.agent-context-save,
+.agent-memory-clear,
+.agent-memory-add button,
+.agent-memory-card button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.agent-context-save {
+  padding: 5px 8px;
+  font-size: 10px;
+}
+
+.agent-memory-toggle {
+  margin-top: 4px;
+}
+
+.agent-memory-add {
+  gap: 6px;
+}
+
+.agent-memory-add input,
+.agent-memory-card input {
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+}
+
+.agent-memory-add button,
+.agent-memory-card button {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+}
+
+.agent-memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.agent-memory-card {
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface-subtle);
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.agent-memory-card > span,
+.agent-memory-card > input {
+  flex: 1;
+  min-width: 0;
+}
+
+.agent-memory-card > div {
+  gap: 4px;
+}
+
+.agent-memory-clear {
+  align-self: flex-end;
+  padding: 4px 7px;
+  font-size: 9px;
+}
+
+.agent-context-save:hover:not(:disabled),
+.agent-memory-clear:hover:not(:disabled),
+.agent-memory-add button:hover:not(:disabled),
+.agent-memory-card button:hover:not(:disabled) {
+  border-color: var(--color-brand);
+  color: var(--color-brand);
+}
+
 /* ─── 消息入场动画 ─── */
 .msg-in {
   animation: msg-in 260ms cubic-bezier(0.22, 0.82, 0.22, 1) both;
