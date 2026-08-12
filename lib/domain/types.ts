@@ -373,7 +373,8 @@ export type DomainToolName =
   | 'save_memory'
   | 'read_current_job'
   | 'read_visible_jobs'
-  | 'ask_user';
+  | 'ask_user'
+  | `mcp__${string}`;
 
 export interface ToolActivity {
   /** 所属生成轮次，用于权限等待卡片把用户决定精确路由回 Background。 */

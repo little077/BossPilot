@@ -16,13 +16,16 @@ import {
   type ClientMessage,
   isAgentContextCommand,
   isClientMessage,
+  isMcpCommand,
   isProviderCommand,
   isSkillCommand,
+  type McpCommandResponse,
   type ProviderCommandResponse,
   type ServerMessage,
   type SkillCommandResponse,
 } from '@/lib/ipc/protocol';
 import { CHAT_SYSTEM } from '@/lib/llm/prompts';
+import { isMcpToolName, McpService } from '@/lib/mcp/service';
 import { buildAgentContextPrompt } from '@/lib/memory/prompt';
 import { MemoryStore } from '@/lib/memory/store';
 import { hasExactPageOriginAccess } from '@/lib/page/access';
@@ -73,6 +76,7 @@ export default defineBackground({
     const skillLoader = new SkillLoadCoordinator(skillStore);
     const memoryStore = new MemoryStore();
     const memoryTools = new MemoryToolCoordinator(memoryStore);
+    const mcpService = new McpService();
     void chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
     const chatPorts = new Set<chrome.runtime.Port>();
     const diagnosticInputs = new Map<string, string>();
@@ -93,7 +97,7 @@ export default defineBackground({
       maxOutputTokens: 8_192,
       maxAgentTurns: 200,
       maxConsecutiveIdenticalToolCalls: 3,
-      tools: [
+      tools: async () => [
         READ_CURRENT_PAGE_TOOL,
         BROWSER_ACTION_TOOL,
         OBSERVE_PAGE_TOOL,
@@ -102,6 +106,7 @@ export default defineBackground({
         LOAD_SKILL_TOOL,
         SEARCH_MEMORY_TOOL,
         SAVE_MEMORY_TOOL,
+        ...(await mcpService.generationTools()),
         ASK_USER_TOOL,
       ],
       executeTool: async (call, signal, requestId, reportProgress, context) => {
@@ -165,11 +170,13 @@ export default defineBackground({
             result = askUser(call);
             break;
           default:
-            result = {
-              isError: true,
-              statusText: '工具禁用',
-              content: `未开放${call.name}`,
-            };
+            result = isMcpToolName(call.name)
+              ? await mcpService.execute(call, approvedToolCalls.delete(call.id), signal)
+              : {
+                  isError: true,
+                  statusText: '工具禁用',
+                  content: `未开放${call.name}`,
+                };
         }
         if ('deferred' in result) return result;
         if (result.nextPageSnapshot) {
@@ -275,6 +282,32 @@ export default defineBackground({
               ok: false,
               error: publicOperationError(error, ''),
             } satisfies AgentContextCommandResponse),
+        );
+      return true;
+    });
+
+    chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
+      if (!isMcpCommand(raw) || !isTrustedExtensionPage(sender)) return;
+      void requireTrustedStorage()
+        .then(async () => {
+          switch (raw.type) {
+            case 'mcp:get':
+              return mcpService.view();
+            case 'mcp:save':
+              return mcpService.addOrRefresh(raw);
+            case 'mcp:set-enabled':
+              return mcpService.setEnabled(raw.id, raw.enabled);
+            case 'mcp:remove':
+              return mcpService.remove(raw.id);
+          }
+        })
+        .then(
+          (state) => sendResponse({ ok: true, state } satisfies McpCommandResponse),
+          (error: unknown) =>
+            sendResponse({
+              ok: false,
+              error: publicOperationError(error, raw.type === 'mcp:save' ? raw.token : ''),
+            } satisfies McpCommandResponse),
         );
       return true;
     });
@@ -733,6 +766,18 @@ export default defineBackground({
               detail: '没有截取或发送当前页面截图。',
               content:
                 '视觉观察未执行：用户没有允许发送当前页面截图。请改用 DOM/文本工具；除非用户重新明确要求，否则不要再次请求截图。',
+            });
+          }
+        } else if (isMcpToolName(pending.generation.toolCall.name)) {
+          if (normalizedAnswer === '确认执行') {
+            approvedToolCalls.add(pending.generation.toolCall.id);
+            await generationManager.resumeDeferred(pending.generation, history);
+          } else {
+            await generationManager.resumeDeferred(pending.generation, history, {
+              isError: true,
+              statusText: '用户取消 MCP 外部操作',
+              detail: '用户没有确认这次 MCP 操作。',
+              content: 'MCP 操作未执行：用户选择取消。除非用户重新明确要求，否则不要重试。',
             });
           }
         } else {

@@ -5,7 +5,9 @@ import { gzipSync } from 'node:zlib';
 const outputDirectory = path.resolve('.output/chrome-mv3');
 const maximumJavaScriptBytes = 850 * 1024;
 const maximumBackgroundEntryBytes = 100 * 1024;
-const maximumExtensionBytes = 3 * 1024 * 1024;
+// 官方 MCP 2.x 客户端增加协议校验与 2025/2026 自动协商代码；未压缩预算相应留出 256 KiB，
+// 压缩后 950 KiB 的商店下载预算保持不变。
+const maximumExtensionBytes = 3.25 * 1024 * 1024;
 const maximumCompressedExtensionBytes = 950 * 1024;
 
 async function listFiles(directory) {

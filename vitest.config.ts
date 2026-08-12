@@ -45,6 +45,10 @@ export default defineConfig({
         'lib/memory/store.ts',
         'lib/memory/prompt.ts',
         'lib/memory/client.ts',
+        'lib/mcp/store.ts',
+        'lib/mcp/service.ts',
+        'lib/mcp/client.ts',
+        'lib/mcp/official-client.ts',
         'lib/skills/parser.ts',
         'lib/skills/builtin.ts',
         'lib/skills/store.ts',
@@ -77,6 +81,7 @@ export default defineConfig({
         'entrypoints/sidepanel/SettingsView.tsx',
         'entrypoints/sidepanel/SkillSettings.tsx',
         'entrypoints/sidepanel/AgentContextSettings.tsx',
+        'entrypoints/sidepanel/McpSettings.tsx',
         'entrypoints/sidepanel/usePort.ts',
       ],
       thresholds: {

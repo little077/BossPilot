@@ -13,6 +13,15 @@ function generationChunk(id: string): string | undefined {
     return 'agent-context';
   }
   if (
+    moduleId.includes('/lib/mcp/') ||
+    moduleId.includes('/@modelcontextprotocol/') ||
+    moduleId.includes('/eventsource') ||
+    moduleId.includes('/pkce-challenge/') ||
+    moduleId.includes('/jose/')
+  ) {
+    return 'mcp-client';
+  }
+  if (
     moduleId.endsWith('/lib/tools/browser-action.ts') ||
     moduleId.endsWith('/lib/tools/page-interaction.ts') ||
     moduleId.includes('/lib/browser/')

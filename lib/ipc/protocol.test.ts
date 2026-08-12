@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   isAgentContextCommand,
   isClientMessage,
+  isMcpCommand,
   isProviderCommand,
   isSkillCommand,
 } from './protocol';
@@ -352,5 +353,17 @@ describe('IPC runtime validation', () => {
       }),
     ).toBe(false);
     expect(isAgentContextCommand({ type: 'context:unknown' })).toBe(false);
+  });
+
+  it('validates MCP configuration commands without trusting the type field', () => {
+    expect(isMcpCommand({ type: 'mcp:get' })).toBe(true);
+    expect(isMcpCommand({ type: 'mcp:save', name: 'Docs', url: 'https://x/mcp', token: '' })).toBe(
+      true,
+    );
+    expect(isMcpCommand({ type: 'mcp:set-enabled', id: 's1', enabled: false })).toBe(true);
+    expect(isMcpCommand({ type: 'mcp:remove', id: 's1' })).toBe(true);
+    expect(isMcpCommand({ type: 'mcp:save', name: '', url: 'https://x', token: '' })).toBe(false);
+    expect(isMcpCommand({ type: 'mcp:set-enabled', id: 's1', enabled: 'yes' })).toBe(false);
+    expect(isMcpCommand({ type: 'mcp:unknown' })).toBe(false);
   });
 });

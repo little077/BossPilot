@@ -98,7 +98,9 @@ function createManager(
   runtimeOptions: {
     maxOutputChars?: number;
     streamUpdateIntervalMs?: number;
-    tools?: GenerationToolDefinition[];
+    tools?:
+      | GenerationToolDefinition[]
+      | (() => GenerationToolDefinition[] | Promise<GenerationToolDefinition[]>);
     executeTool?: GenerationToolExecutor;
     maxAgentTurns?: number;
     maxConsecutiveIdenticalToolCalls?: number;
@@ -1197,7 +1199,12 @@ describe('ChatGenerationManager', () => {
       },
       toolActivity: { name: 'ask_user', status: 'waiting_user' },
     });
-    expect(deferredTurn).toMatchObject({ version: 3, modelTurns: 1, systemPrompt: 'system' });
+    expect(deferredTurn).toMatchObject({
+      version: 4,
+      modelTurns: 1,
+      systemPrompt: 'system',
+      tools: [ASK_USER_TOOL],
+    });
     if (!deferredTurn) throw new Error('ask user turn was not persisted');
 
     await expect(
@@ -1383,6 +1390,32 @@ describe('ChatGenerationManager', () => {
     });
     expect(calls).toBe(1);
     expect(prompts).toEqual(['dynamic-1', 'dynamic-1']);
+  });
+
+  it('resolves a dynamic tool catalog once and persists it in version 4 pauses', async () => {
+    let deferredTurn: DeferredGenerationTurn | undefined;
+    const resolver = vi.fn(async () => [ASK_USER_TOOL]);
+    const adapter = adapterFrom(async function* () {
+      yield { type: 'tool-call', toolCall: { id: 'ask-dynamic', name: 'ask_user', arguments: {} } };
+      yield { type: 'finish', reason: 'tool', usage: USAGE };
+    });
+    const manager = createManager(adapter, () => target(), {
+      tools: resolver,
+      executeTool: async () => ({
+        deferred: true,
+        kind: 'user_input',
+        statusText: 'waiting',
+        question: 'continue?',
+        options: [{ id: 'yes', label: 'yes' }],
+        allowCustom: false,
+      }),
+      onToolDeferred: (turn) => {
+        deferredTurn = turn;
+      },
+    });
+    await manager.start('dynamic-tools', HISTORY);
+    expect(resolver).toHaveBeenCalledTimes(1);
+    expect(deferredTurn).toMatchObject({ version: 4, tools: [ASK_USER_TOOL] });
   });
 
   it('restores the persisted system prompt when a deferred turn resumes', async () => {

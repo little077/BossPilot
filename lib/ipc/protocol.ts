@@ -4,6 +4,7 @@
 
 import type { ChatMessage } from '@/lib/domain/chat';
 import type { ProviderStateView, SearchTaskParams, TaskSnapshot } from '@/lib/domain/types';
+import type { McpSettingsView } from '@/lib/mcp/types';
 import type { AgentContextView } from '@/lib/memory/types';
 import type { SkillSettingsView } from '@/lib/skills/types';
 
@@ -202,6 +203,38 @@ export type AgentContextCommand =
 export type AgentContextCommandResponse =
   | { ok: true; state: AgentContextView }
   | { ok: false; error: string };
+
+export type McpCommand =
+  | { type: 'mcp:get' }
+  | { type: 'mcp:save'; id?: string; name: string; url: string; token: string }
+  | { type: 'mcp:set-enabled'; id: string; enabled: boolean }
+  | { type: 'mcp:remove'; id: string };
+
+export type McpCommandResponse =
+  | { ok: true; state: McpSettingsView }
+  | { ok: false; error: string };
+
+export function isMcpCommand(value: unknown): value is McpCommand {
+  if (!isRecord(value) || typeof value.type !== 'string') return false;
+  switch (value.type) {
+    case 'mcp:get':
+      return true;
+    case 'mcp:save':
+      return (
+        (value.id === undefined || isBoundedString(value.id, 128)) &&
+        isBoundedString(value.name, 80) &&
+        isBoundedString(value.url, 2_048) &&
+        typeof value.token === 'string' &&
+        value.token.length <= 16_384
+      );
+    case 'mcp:set-enabled':
+      return isBoundedString(value.id, 128) && typeof value.enabled === 'boolean';
+    case 'mcp:remove':
+      return isBoundedString(value.id, 128);
+    default:
+      return false;
+  }
+}
 
 export function isAgentContextCommand(value: unknown): value is AgentContextCommand {
   if (!isRecord(value) || typeof value.type !== 'string') return false;

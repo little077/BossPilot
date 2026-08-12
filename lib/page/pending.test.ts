@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatMessage } from '@/lib/domain/chat';
 import type { PageTurnSnapshot } from '@/lib/domain/types';
 import type { DeferredGenerationTurn } from '@/lib/generation/manager';
+import type { GenerationToolDefinition } from '@/lib/generation/types';
 import {
   claimPendingPageTurn,
   clearPendingPageTurn,
@@ -119,6 +120,34 @@ describe('pending page permission turns', () => {
     await savePendingPageTurn(pending);
     await expect(loadPendingPageTurn(2_000)).resolves.toMatchObject({
       generation: { version: 3, systemPrompt: 'skill catalog snapshot' },
+    });
+  });
+
+  it('restores version 4 deferred turns with a persisted dynamic tool snapshot', async () => {
+    const properties: Record<string, unknown> = {};
+    const tools: GenerationToolDefinition[] = [
+      {
+        name: 'mcp__docs__search',
+        label: 'Docs / search',
+        description: 'Search docs',
+        parameters: { type: 'object', properties, additionalProperties: true },
+      },
+    ];
+    const pending = createPendingAgentTurn(
+      { ...DEFERRED, version: 4, systemPrompt: 'context snapshot', tools },
+      null,
+      HISTORY,
+      'user_input',
+      1_000,
+    );
+    await savePendingPageTurn(pending);
+    properties.changed = true;
+    await expect(loadPendingPageTurn(2_000)).resolves.toMatchObject({
+      generation: {
+        version: 4,
+        systemPrompt: 'context snapshot',
+        tools: [{ name: 'mcp__docs__search', parameters: { properties: {} } }],
+      },
     });
   });
 

@@ -30,7 +30,7 @@ export type ChatGenerationListener = (event: ChatGenerationEvent) => void;
 
 /** 等待真实用户手势时可安全持久化的最小生成状态，不包含 API Key 或页面正文。 */
 export interface DeferredGenerationTurn {
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
   requestId: string;
   message: ChatMessage;
   rawContent: string;
@@ -47,6 +47,8 @@ export interface DeferredGenerationTurn {
   toolAttemptSignatures?: string[];
   /** v3：本轮固定的完整 system prompt；只包含公开规则和 Skill 索引，不含凭据。 */
   systemPrompt?: string;
+  /** v4：本轮固定的工具目录，暂停恢复后不因设置变化而换掉工具。 */
+  tools?: GenerationToolDefinition[];
 }
 
 export type GenerationTargetResolver = () =>
@@ -66,7 +68,9 @@ export interface ChatGenerationManagerOptions {
   streamUpdateIntervalMs?: number;
   temperature?: number;
   /** 当前里程碑开放的高层有界工具；同一个模型回合仍只接受一次工具调用。 */
-  tools?: GenerationToolDefinition[];
+  tools?:
+    | GenerationToolDefinition[]
+    | (() => GenerationToolDefinition[] | Promise<GenerationToolDefinition[]>);
   executeTool?: GenerationToolExecutor;
   /** 包含最终回答在内的模型回合硬上限；默认 200，只作为失控保险丝。 */
   maxAgentTurns?: number;
@@ -92,6 +96,7 @@ interface ActiveTurn {
   modelTurns: number;
   toolAttemptSignatures: string[];
   systemPrompt: string;
+  tools: GenerationToolDefinition[];
 }
 
 const ABORTED = Symbol('generation-aborted');
@@ -156,6 +161,7 @@ export class ChatGenerationManager {
       modelTurns: 0,
       toolAttemptSignatures: [],
       systemPrompt: '',
+      tools: [],
     };
     this.active = turn;
 
@@ -165,6 +171,7 @@ export class ChatGenerationManager {
       target = cloneTarget(isPromiseLike(resolution) ? await resolution : resolution);
       turn.secret = target.apiKey;
       turn.systemPrompt = await resolveSystemPrompt(this.options.systemPrompt);
+      turn.tools = await resolveTools(this.options.tools);
     } catch (error) {
       this.releaseWithoutEvent(turn);
       throw sanitizeGenerationError(error);
@@ -229,6 +236,8 @@ export class ChatGenerationManager {
       turn.secret = target.apiKey;
       turn.systemPrompt =
         state.systemPrompt ?? (await resolveSystemPrompt(this.options.systemPrompt));
+      turn.tools =
+        state.tools?.map(cloneToolDefinition) ?? (await resolveTools(this.options.tools));
       const message = requireMessage(turn);
       const activity = currentToolActivity(message);
       if (!activity || activity.callId !== state.toolCall.id) {
@@ -300,12 +309,10 @@ export class ChatGenerationManager {
     }
 
     turn.modelTurns += 1;
-    const outcome = await this.runGeneration(turn, target, inputMessages, this.options.tools);
+    const outcome = await this.runGeneration(turn, target, inputMessages, turn.tools);
     if (outcome.kind === 'terminal') return outcome.message;
 
-    const toolDefinition = this.options.tools?.find(
-      (candidate) => candidate.name === outcome.toolCall.name,
-    );
+    const toolDefinition = turn.tools.find((candidate) => candidate.name === outcome.toolCall.name);
     if (!toolDefinition || !this.options.executeTool) {
       return this.finishError(
         turn,
@@ -446,7 +453,7 @@ export class ChatGenerationManager {
     syncLegacyToolActivity(message, activity);
 
     const deferred: DeferredGenerationTurn = {
-      version: 3,
+      version: 4,
       requestId: turn.requestId,
       message: cloneMessage(message),
       rawContent: turn.rawContent,
@@ -459,6 +466,7 @@ export class ChatGenerationManager {
       modelTurns: turn.modelTurns,
       toolAttemptSignatures: [...turn.toolAttemptSignatures],
       systemPrompt: turn.systemPrompt,
+      tools: turn.tools.map(cloneToolDefinition),
     };
     await this.options.onToolDeferred(deferred, result);
     this.publish(turn, 'update');
@@ -898,6 +906,7 @@ function activeTurnFromDeferred(state: DeferredGenerationTurn): ActiveTurn {
     modelTurns: state.modelTurns ?? 1,
     toolAttemptSignatures: [...(state.toolAttemptSignatures ?? [])],
     systemPrompt: state.systemPrompt ?? '',
+    tools: state.tools?.map(cloneToolDefinition) ?? [],
     ...(state.usage ? { usage: { ...state.usage } } : {}),
   };
 }
@@ -908,6 +917,25 @@ async function resolveSystemPrompt(
   if (typeof value !== 'function') return value ?? '';
   const result = value();
   return isPromiseLike(result) ? await result : result;
+}
+
+async function resolveTools(
+  value: ChatGenerationManagerOptions['tools'],
+): Promise<GenerationToolDefinition[]> {
+  const result = typeof value === 'function' ? value() : (value ?? []);
+  const tools = isPromiseLike(result) ? await result : result;
+  return tools.map(cloneToolDefinition);
+}
+
+function cloneToolDefinition(definition: GenerationToolDefinition): GenerationToolDefinition {
+  return {
+    ...definition,
+    parameters: {
+      ...definition.parameters,
+      properties: structuredClone(definition.parameters.properties),
+      ...(definition.parameters.required ? { required: [...definition.parameters.required] } : {}),
+    },
+  };
 }
 
 function cloneToolCall(call: GenerationToolCall): GenerationToolCall {

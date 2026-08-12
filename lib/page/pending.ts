@@ -158,7 +158,7 @@ function isSnapshot(value: unknown): value is PageTurnSnapshot {
 function isDeferred(value: unknown): value is DeferredGenerationTurn {
   return (
     isRecord(value) &&
-    (value.version === 1 || value.version === 2 || value.version === 3) &&
+    (value.version === 1 || value.version === 2 || value.version === 3 || value.version === 4) &&
     isShortString(value.requestId) &&
     isRecord(value.message) &&
     isRecord(value.toolCall) &&
@@ -197,6 +197,18 @@ function cloneDeferred(value: DeferredGenerationTurn): DeferredGenerationTurn {
     toolCall: { ...value.toolCall, arguments: { ...value.toolCall.arguments } },
     targetIdentity: { ...value.targetIdentity },
     ...(value.usage ? { usage: { ...value.usage } } : {}),
+    ...(value.tools
+      ? {
+          tools: value.tools.map((tool) => ({
+            ...tool,
+            parameters: {
+              ...tool.parameters,
+              properties: structuredClone(tool.parameters.properties),
+              ...(tool.parameters.required ? { required: [...tool.parameters.required] } : {}),
+            },
+          })),
+        }
+      : {}),
     ...(value.loopMessages
       ? {
           loopMessages: value.loopMessages.map((message) =>
