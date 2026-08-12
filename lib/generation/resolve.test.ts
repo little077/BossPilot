@@ -97,8 +97,49 @@ describe('resolveActiveGenerationTarget', () => {
       protocol: 'openai-responses',
       baseUrl: 'https://api.openai.com/v1',
       apiKey: 'private-key',
+      supportsImageInput: false,
     });
     expect(containsHostPermission).toHaveBeenCalledWith('https://api.openai.com/v1');
+  });
+
+  it('只根据可信模型目录标记图片输入能力', async () => {
+    const state: StoredProviderState = {
+      version: 1,
+      connections: {
+        openai: {
+          providerId: 'openai',
+          baseUrl: 'https://api.openai.com/v1',
+          apiKey: 'private-key',
+          models: [{ id: 'gpt-4.1', name: 'GPT-4.1' }],
+          selectedModelId: 'gpt-4.1',
+        },
+      },
+      activeModel: { providerId: 'openai', modelId: 'gpt-4.1' },
+    };
+
+    await expect(
+      resolveActiveGenerationTarget({
+        store: createStore(state),
+        containsHostPermission: vi.fn(async () => true),
+      }),
+    ).resolves.toMatchObject({ supportsImageInput: true });
+    await expect(
+      resolveActiveGenerationTarget({
+        store: createStore(configuredState('custom', { apiKey: '' })),
+        containsHostPermission: vi.fn(async () => true),
+      }),
+    ).resolves.toMatchObject({ supportsImageInput: false });
+    await expect(
+      resolveActiveGenerationTarget({
+        store: createStore(
+          configuredState('custom', {
+            apiKey: '',
+            imageInputModelIds: ['model-1'],
+          }),
+        ),
+        containsHostPermission: vi.fn(async () => true),
+      }),
+    ).resolves.toMatchObject({ supportsImageInput: true });
   });
 
   it('自定义厂商使用已保存的规范化地址', async () => {

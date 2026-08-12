@@ -142,7 +142,7 @@ function PageOriginSettings() {
       </div>
       <p className="page-origin-copy">
         BossPilot
-        只会在模型确实需要当前页面时读取可见纯文本，并把回答所需内容发送给当前模型供应商。这里可以撤销之前允许的网站。
+        默认只读取回答所需的可见文本；视觉任务会先说明原因并逐次询问，截图中的已填写字段会被遮挡。这里可以撤销之前允许的网站。
       </p>
       {notice ? (
         <div className="page-origin-notice" role="status">

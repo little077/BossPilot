@@ -138,6 +138,8 @@ export interface ProviderConnectionView {
   apiKeyLastFour: string;
   models: ProviderModel[];
   selectedModelId?: string;
+  /** 用户为自定义兼容端点显式声明的图片输入模型；未知模型默认不在此列表。 */
+  imageInputModelIds?: string[];
   configuredAt?: number;
 }
 
@@ -213,6 +215,12 @@ export type PageInteractionErrorCode =
   | 'INTERACTION_FAILED'
   | 'VERIFICATION_FAILED';
 
+export type VisualObservationErrorCode =
+  | 'VISION_MODEL_REQUIRED'
+  | 'VISUAL_CAPTURE_FAILED'
+  | 'VISUAL_CAPTURE_TOO_LARGE'
+  | 'STALE_VISUAL_OBSERVATION';
+
 export type PageInteractionRisk = 'safe' | 'confirm' | 'blocked';
 
 export type PageInteractionVerificationEvidence =
@@ -255,6 +263,18 @@ export interface PageInteractionObservationResult {
   elements: PageInteractiveElementCandidate[];
   viewport: PageViewportSnapshot;
   truncated: boolean;
+}
+
+/** 截图前注入的临时标记层结果；不包含页面正文或输入值。 */
+export interface PageVisualOverlayResult {
+  version: 1;
+  ok: boolean;
+  executionUrl: string;
+  token: string;
+  markerCount: number;
+  maskedFieldCount: number;
+  error?: 'STALE_VISUAL_OBSERVATION' | 'VISUAL_CAPTURE_FAILED';
+  detail: string;
 }
 
 /** 自包含动作脚本的跨运行时返回值。 */
@@ -346,6 +366,7 @@ export type DomainToolName =
   | 'read_current_page'
   | 'browser_action'
   | 'observe_page'
+  | 'observe_visual_page'
   | 'interact_page'
   | 'read_current_job'
   | 'read_visible_jobs'
@@ -382,6 +403,7 @@ export interface ToolActivity {
     | 'CANCELLED'
     | BrowserActionErrorCode
     | PageInteractionErrorCode
+    | VisualObservationErrorCode
     | PageReadErrorCode;
 }
 

@@ -61,6 +61,13 @@ export class ProviderService {
             apiKey,
             models,
             ...(selectedModelId ? { selectedModelId } : {}),
+            ...(current?.imageInputModelIds
+              ? {
+                  imageInputModelIds: current.imageInputModelIds.filter((modelId) =>
+                    models.some(({ id }) => id === modelId),
+                  ),
+                }
+              : {}),
             configuredAt: this.now(),
           };
           if (
@@ -74,6 +81,10 @@ export class ProviderService {
       case 'providers:select':
         return this.mutate((state) =>
           selectModel(state, command.providerId, command.modelId, this.now()),
+        );
+      case 'providers:set-image-input':
+        return this.mutate((state) =>
+          setImageInputCapability(state, command.providerId, command.modelId, command.enabled),
         );
       case 'providers:add-manual-model':
         return this.mutate((state) => {
@@ -165,6 +176,28 @@ function addManualModel(
   return selectModel(state, providerId, modelId, configuredAt);
 }
 
+function setImageInputCapability(
+  state: StoredProviderState,
+  providerId: string,
+  rawModelId: string,
+  enabled: boolean,
+): StoredProviderState {
+  const provider = requireProvider(providerId);
+  if (!provider.custom) {
+    throw new ProviderServiceError('内置厂商的视觉能力由可信模型目录管理。');
+  }
+  const connection = requireConnection(state, providerId);
+  const modelId = requireString(rawModelId, '模型 ID');
+  if (!connection.models.some(({ id }) => id === modelId)) {
+    throw new ProviderServiceError('该模型不在当前目录中。');
+  }
+  const current = new Set(connection.imageInputModelIds ?? []);
+  if (enabled) current.add(modelId);
+  else current.delete(modelId);
+  connection.imageInputModelIds = [...current];
+  return state;
+}
+
 function removeProvider(state: StoredProviderState, providerId: string): StoredProviderState {
   requireProvider(providerId);
   if (!state.connections[providerId]) return state;
@@ -211,6 +244,9 @@ function toStateView(state: StoredProviderState): ProviderStateView {
       hasApiKey: Boolean(connection.apiKey),
       apiKeyLastFour: connection.apiKey.slice(-4),
       models: connection.models.map((model) => ({ ...model })),
+      ...(connection.imageInputModelIds?.length
+        ? { imageInputModelIds: [...connection.imageInputModelIds] }
+        : {}),
       ...(connection.selectedModelId ? { selectedModelId: connection.selectedModelId } : {}),
       ...(connection.configuredAt ? { configuredAt: connection.configuredAt } : {}),
     }));
@@ -231,6 +267,9 @@ function cloneState(state: StoredProviderState): StoredProviderState {
         {
           ...connection,
           models: connection.models.map((model) => ({ ...model })),
+          ...(connection.imageInputModelIds
+            ? { imageInputModelIds: [...connection.imageInputModelIds] }
+            : {}),
         },
       ]),
     ),

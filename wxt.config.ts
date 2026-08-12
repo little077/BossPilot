@@ -11,6 +11,12 @@ function generationChunk(id: string): string | undefined {
   ) {
     return 'browser-action';
   }
+  if (
+    moduleId.endsWith('/lib/generation/manager.ts') ||
+    moduleId.endsWith('/lib/generation/conversation-title.ts')
+  ) {
+    return 'generation-core';
+  }
   if (!moduleId.includes('/node_modules/')) return undefined;
 
   if (moduleId.includes('/@earendil-works/pi-ai/')) return 'generation-pi';

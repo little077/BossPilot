@@ -2,6 +2,7 @@
 // 职责：仅在 Background 的可信上下文中，把已选模型和私密凭据解析为一次生成调用的目标。
 
 import { GenerationError } from '@/lib/generation/errors';
+import { knownModelSupportsImageInput } from '@/lib/generation/pi-adapter';
 import type { ResolvedGenerationTarget } from '@/lib/generation/types';
 import {
   containsProviderHostPermission,
@@ -76,6 +77,10 @@ export async function resolveActiveGenerationTarget(
     protocol: provider.generation,
     baseUrl,
     apiKey: provider.id === 'ollama' ? '' : apiKey,
+    supportsImageInput:
+      knownModelSupportsImageInput(provider.id, identity.modelId) ||
+      (provider.custom === true &&
+        connection.imageInputModelIds?.includes(identity.modelId) === true),
   };
 }
 

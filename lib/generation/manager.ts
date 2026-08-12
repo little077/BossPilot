@@ -337,6 +337,13 @@ export class ChatGenerationManager {
           turn.controller.signal,
           turn.requestId,
           (statusText, detail) => this.updateToolActivity(turn, statusText, detail),
+          {
+            model: {
+              providerLabel: target.providerLabel,
+              modelName: target.modelName,
+              supportsImageInput: target.supportsImageInput === true,
+            },
+          },
         ),
         turn.controller.signal,
       ));
@@ -382,6 +389,7 @@ export class ChatGenerationManager {
         toolCallId: toolCall.id,
         toolName: toolCall.name,
         content: execution.content,
+        ...(execution.images ? { images: execution.images.map((image) => ({ ...image })) } : {}),
         isError: execution.isError,
         createdAt: this.now(),
       },
@@ -439,7 +447,8 @@ export class ChatGenerationManager {
       targetIdentity: { ...target.identity },
       ...(turn.usage ? { usage: { ...turn.usage } } : {}),
       deferredAt: this.now(),
-      loopMessages: cloneGenerationInputMessages(loopMessages),
+      // 截图属于短时模型上下文，不能写入 chrome.storage.session。
+      loopMessages: cloneGenerationInputMessages(loopMessages, false),
       modelTurns: turn.modelTurns,
       toolAttemptSignatures: [...turn.toolAttemptSignatures],
     };
@@ -976,6 +985,7 @@ function trailingIdenticalCount(signatures: string[], target: string): number {
 
 function cloneGenerationInputMessages(
   messages: GenerationInputMessage[],
+  includeImages = true,
 ): GenerationInputMessage[] {
   return messages.map((message) => {
     if (message.role === 'assistant') {
@@ -984,6 +994,19 @@ function cloneGenerationInputMessages(
         ...(message.toolCalls
           ? { toolCalls: message.toolCalls.map((call) => cloneToolCall(call)) }
           : {}),
+      };
+    }
+    if (message.role === 'toolResult') {
+      if (!includeImages && message.images) {
+        const { images: _images, ...withoutImages } = message;
+        return {
+          ...withoutImages,
+          content: `${message.content}\n[视觉截图未持久化；如仍需要视觉信息，请重新观察页面。]`,
+        };
+      }
+      return {
+        ...message,
+        ...(message.images ? { images: message.images.map((image) => ({ ...image })) } : {}),
       };
     }
     return { ...message };

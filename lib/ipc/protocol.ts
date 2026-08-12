@@ -151,6 +151,12 @@ export type ProviderCommand =
     }
   | { type: 'providers:select'; providerId: string; modelId: string }
   | {
+      type: 'providers:set-image-input';
+      providerId: string;
+      modelId: string;
+      enabled: boolean;
+    }
+  | {
       type: 'providers:add-manual-model';
       providerId: string;
       modelId: string;
@@ -174,6 +180,12 @@ export function isProviderCommand(value: unknown): value is ProviderCommand {
       return isBoundedString(value.providerId, 64);
     case 'providers:select':
       return isBoundedString(value.providerId, 64) && isBoundedString(value.modelId, 256);
+    case 'providers:set-image-input':
+      return (
+        isBoundedString(value.providerId, 64) &&
+        isBoundedString(value.modelId, 256) &&
+        typeof value.enabled === 'boolean'
+      );
     case 'providers:connect':
       return (
         isBoundedString(value.providerId, 64) &&

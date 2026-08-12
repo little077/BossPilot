@@ -223,4 +223,45 @@ describe('ProviderSettings', () => {
     );
     expect(within(card).getByText('使用中 ✦')).toBeInTheDocument();
   });
+
+  it('仅为自定义端点提供显式图片输入能力开关', async () => {
+    const user = userEvent.setup();
+    const customConnection: ProviderConnectionView = {
+      providerId: 'custom',
+      baseUrl: 'https://gateway.example.com/v1',
+      hasApiKey: true,
+      apiKeyLastFour: '5678',
+      models: [{ id: 'team-vision', name: 'Team Vision' }],
+      selectedModelId: 'team-vision',
+    };
+    const enabledConnection: ProviderConnectionView = {
+      ...customConnection,
+      imageInputModelIds: ['team-vision'],
+    };
+    sendProviderCommandMock
+      .mockResolvedValueOnce(
+        stateWith(customConnection, { providerId: 'custom', modelId: 'team-vision' }),
+      )
+      .mockResolvedValueOnce(
+        stateWith(enabledConnection, { providerId: 'custom', modelId: 'team-vision' }),
+      );
+
+    render(<ProviderSettings />);
+    const card = await screen.findByRole('article', { name: '自定义端点 模型配置' });
+    const imageInput = within(card).getByRole('switch', {
+      name: 'team-vision 支持图片输入',
+    });
+    expect(imageInput).not.toBeChecked();
+
+    await user.click(imageInput);
+
+    expect(sendProviderCommandMock).toHaveBeenNthCalledWith(2, {
+      type: 'providers:set-image-input',
+      providerId: 'custom',
+      modelId: 'team-vision',
+      enabled: true,
+    });
+    await waitFor(() => expect(imageInput).toBeChecked());
+    expect(screen.getByText('team-vision 已声明支持图片输入。')).toBeVisible();
+  });
 });

@@ -297,6 +297,7 @@ test('通用当前页工具读取 Boss 岗位并附加领域增强', async ({ co
     'read_current_page',
     'browser_action',
     'observe_page',
+    'observe_visual_page',
     'interact_page',
     'ask_user',
   ]);
@@ -678,6 +679,132 @@ test('通用页面 Agent 先观察控件，高风险提交经用户确认后恢�
       }),
     ]),
   );
+});
+
+test('视觉观察逐次授权，缺少 activeTab 时安全失败且不泄露页面字段', async ({
+  context,
+  extensionId,
+}) => {
+  const chatRequests: CapturedChatRequest[] = [];
+  const targetUrl = 'https://www.zhipin.com/bosspilot-visual-e2e';
+
+  await context.route(`${BASE_URL}/models`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ data: [{ id: MODEL_ID, name: 'Boss Stream Test' }] }),
+    });
+  });
+  await context.route(`${BASE_URL}/chat/completions`, async (route) => {
+    const request = await captureChatRequest(route.request());
+    chatRequests.push(request);
+    const toolContent =
+      request.body.messages
+        ?.filter(({ role, content }) => role === 'tool' && typeof content === 'string')
+        .map(({ content }) => content as string)
+        .join('\n') ?? '';
+    const observationId = /"observationId":"([^"]+)"/u.exec(toolContent)?.[1];
+    const body =
+      chatRequests.length === 1
+        ? openAiToolCallBody(
+            'observe_visual_page',
+            {
+              reason: '需要确认无文字图标按钮的位置和含义',
+              query: '筛选图标',
+            },
+            'call-observe-visual',
+          )
+        : observationId
+          ? openAiToolCallBody(
+              'interact_page',
+              { action: 'click', observationId, ref: 'e1' },
+              'call-click-visual-ref',
+            )
+          : openAiFinalAnswerBody(
+              'chatcmpl-visual-permission-e2e',
+              '当前没有临时截图权限，请在目标页面点击 BossPilot 扩展图标后重试。',
+            );
+    await route.fulfill({
+      status: 200,
+      headers: {
+        'access-control-allow-origin': '*',
+        'cache-control': 'no-cache',
+        'content-type': 'text/event-stream; charset=utf-8',
+      },
+      body,
+    });
+  });
+  await context.route(targetUrl, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: `<!doctype html>
+        <html lang="zh-CN">
+          <head><title>视觉观察验收</title></head>
+          <body>
+            <main>
+              <button id="filter" type="button" aria-label="筛选">⚙</button>
+              <input aria-label="候选人备注" value="candidate-private-note" />
+              <output id="result">筛选面板未打开</output>
+            </main>
+            <script>
+              document.querySelector('#filter').addEventListener('click', () => {
+                document.querySelector('#result').textContent = '筛选面板已打开';
+              });
+            </script>
+          </body>
+        </html>`,
+    });
+  });
+
+  const panel = await context.newPage();
+  await panel.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  await panel.getByRole('button', { name: '设置' }).click();
+  await panel.getByRole('button', { name: /显示更多/ }).click();
+  await panel.getByRole('button', { name: /自定义端点/ }).click();
+  const card = panel.getByRole('article', { name: '自定义端点 模型配置' });
+  await card.getByLabel('Base URL（OpenAI 兼容端点）').fill(BASE_URL);
+  await card.getByLabel('API Key（仅存本机）').fill(SECRET);
+  await card.getByRole('button', { name: '开通' }).click();
+  await card.getByRole('button', { name: 'Boss Stream Test' }).click();
+  await card.getByRole('switch', { name: 'boss-stream-test 支持图片输入' }).click();
+  await expect(panel.getByText('boss-stream-test 已声明支持图片输入。')).toBeVisible();
+
+  const target = await context.newPage();
+  await target.goto(targetUrl);
+  await target.bringToFront();
+
+  await panel.getByRole('button', { name: '对话', exact: true }).click();
+  await panel
+    .locator('.composer-editor [contenteditable="true"]')
+    .fill('请用视觉查看页面，并打开筛选图标');
+  await panel.getByRole('button', { name: '发送' }).evaluate((button: HTMLElement) => {
+    button.click();
+  });
+
+  const askPanel = panel.locator('.ask-user-panel');
+  await expect(askPanel).toContainText('当前可见区域截图');
+  await expect(askPanel).toContainText('需要确认无文字图标按钮的位置和含义');
+  await expect(target.locator('#result')).toHaveText('筛选面板未打开');
+  await askPanel.locator('.ask-user-option').filter({ hasText: '仅本次允许' }).click();
+  await askPanel.getByRole('button', { name: '继续执行' }).click();
+
+  await expect.poll(() => chatRequests.length).toBe(2);
+  const visualToolResults =
+    chatRequests[1]?.body.messages
+      ?.filter(({ role, content }) => role === 'tool' && typeof content === 'string')
+      .map(({ content }) => content as string) ?? [];
+  expect(visualToolResults.at(-1)).toContain('未把截图发送给模型');
+  expect(visualToolResults.at(-1)).toContain('点击 BossPilot 扩展图标');
+  expect(JSON.stringify(chatRequests[1]?.body.messages ?? [])).not.toContain('data:image/');
+  await expect(target.locator('#result')).toHaveText('筛选面板未打开');
+  await expect(panel.locator('.redscope-ai-message')).toContainText(
+    '当前没有临时截图权限，请在目标页面点击 BossPilot 扩展图标后重试。',
+  );
+  expect(JSON.stringify(chatRequests)).not.toContain('candidate-private-note');
+
+  const stored = await panel.evaluate(async () => chrome.storage.local.get(null));
+  expect(JSON.stringify(stored)).not.toContain('data:image/');
 });
 
 test('页面 Agent 跟随点击打开的新标签页并继续执行', async ({ context, extensionId }) => {

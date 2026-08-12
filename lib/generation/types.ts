@@ -8,6 +8,7 @@ import type {
   PageInteractionErrorCode,
   PageReadErrorCode,
   PageTurnSnapshot,
+  VisualObservationErrorCode,
 } from '@/lib/domain/types';
 
 /**
@@ -28,6 +29,13 @@ export interface ResolvedGenerationTarget {
   protocol: GenerationProtocol;
   baseUrl: string;
   apiKey: string;
+  /** 未知或自定义模型默认 false，避免把截图误发给纯文本端点。 */
+  supportsImageInput?: boolean;
+}
+
+export interface GenerationImageContent {
+  data: string;
+  mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
 }
 
 export interface GenerationToolDefinition {
@@ -66,6 +74,7 @@ export type GenerationInputMessage =
       toolCallId: string;
       toolName: string;
       content: string;
+      images?: GenerationImageContent[];
       isError: boolean;
       createdAt: number;
     };
@@ -92,6 +101,8 @@ export type GenerationEvent =
 
 export interface GenerationToolExecutionResult {
   content: string;
+  /** 只在当前 Agent 循环内传给模型，不进入 ChatMessage、历史记录或诊断日志。 */
+  images?: GenerationImageContent[];
   isError: boolean;
   statusText: string;
   detail?: string;
@@ -106,6 +117,7 @@ export interface GenerationToolExecutionResult {
     | 'CANCELLED'
     | BrowserActionErrorCode
     | PageInteractionErrorCode
+    | VisualObservationErrorCode
     | PageReadErrorCode;
   sourceOrigin?: string;
   sourceTitle?: string;
@@ -152,11 +164,20 @@ export type GenerationToolExecutionOutcome =
   | GenerationToolExecutionResult
   | GenerationToolDeferredResult;
 
+export interface GenerationToolExecutionContext {
+  model: {
+    providerLabel: string;
+    modelName: string;
+    supportsImageInput: boolean;
+  };
+}
+
 export type GenerationToolExecutor = (
   call: GenerationToolCall,
   signal: AbortSignal,
   requestId: string,
   reportProgress: (statusText: string, detail?: string) => void,
+  context: GenerationToolExecutionContext,
 ) => Promise<GenerationToolExecutionOutcome>;
 
 export interface GenerationAdapter {

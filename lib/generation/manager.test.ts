@@ -57,6 +57,17 @@ const ASK_USER_TOOL: GenerationToolDefinition = {
   },
 };
 
+const VISUAL_TOOL: GenerationToolDefinition = {
+  name: 'observe_visual_page',
+  label: '视觉观察当前页面',
+  description: '获取脱敏页面截图',
+  parameters: {
+    type: 'object',
+    properties: {},
+    additionalProperties: false,
+  },
+};
+
 function target(
   providerId = 'openai',
   modelId = 'gpt-test',
@@ -259,6 +270,112 @@ describe('ChatGenerationManager', () => {
     expect(events.some(({ message }) => message.toolActivity?.status === 'succeeded')).toBe(true);
     reportLateProgress?.('不应覆盖最终状态', '晚到进度');
     expect(manager.getSnapshot()?.message.toolActivity?.statusText).toBe('已读取当前岗位');
+  });
+
+  it('keeps image tool results only in the live loop and passes a credential-free model context', async () => {
+    const requests: GenerationRequest[] = [];
+    const executeTool = vi.fn<GenerationToolExecutor>().mockResolvedValue({
+      isError: false,
+      statusText: '已完成视觉观察',
+      content: 'visual observation metadata',
+      images: [{ data: 'YWJj', mimeType: 'image/jpeg' }],
+    });
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        requests.push(request);
+        if (requests.length === 1) {
+          yield {
+            type: 'tool-call',
+            toolCall: { id: 'visual-1', name: 'observe_visual_page', arguments: {} },
+          };
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'text-delta', delta: '我已经看到了页面。' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const visualTarget = { ...target(), supportsImageInput: true };
+    const manager = createManager(adapter, () => visualTarget, {
+      tools: [VISUAL_TOOL],
+      executeTool,
+    });
+
+    await expect(manager.start('request-visual', HISTORY)).resolves.toMatchObject({
+      status: 'completed',
+      content: '我已经看到了页面。',
+    });
+    expect(requests[1]?.messages).toContainEqual(
+      expect.objectContaining({
+        role: 'toolResult',
+        images: [{ data: 'YWJj', mimeType: 'image/jpeg' }],
+      }),
+    );
+    const executionContext = executeTool.mock.calls[0]?.[4];
+    expect(executionContext).toEqual({
+      model: {
+        providerLabel: 'openai',
+        modelName: 'gpt-test',
+        supportsImageInput: true,
+      },
+    });
+    expect(executionContext).not.toHaveProperty('apiKey');
+    expect(manager.getSnapshot()?.message).not.toHaveProperty('images');
+  });
+
+  it('strips image bytes before persisting a later deferred turn', async () => {
+    const requests: GenerationRequest[] = [];
+    let deferredTurn: DeferredGenerationTurn | undefined;
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        requests.push(request);
+        if (requests.length === 1) {
+          yield {
+            type: 'tool-call',
+            toolCall: { id: 'visual-1', name: 'observe_visual_page', arguments: {} },
+          };
+        } else {
+          yield {
+            type: 'tool-call',
+            toolCall: { id: 'ask-2', name: 'ask_user', arguments: {} },
+          };
+        }
+        yield { type: 'finish', reason: 'tool', usage: USAGE };
+      },
+    };
+    const executeTool = vi.fn<GenerationToolExecutor>().mockImplementation(async (call) =>
+      call.name === 'observe_visual_page'
+        ? {
+            isError: false,
+            statusText: '已完成视觉观察',
+            content: 'visual metadata',
+            images: [{ data: 'private-base64', mimeType: 'image/jpeg' }],
+          }
+        : {
+            deferred: true,
+            kind: 'user_input',
+            statusText: '等待回答',
+            question: '继续吗？',
+            options: [{ id: 'yes', label: '继续' }],
+            allowCustom: false,
+          },
+    );
+    const manager = createManager(adapter, () => ({ ...target(), supportsImageInput: true }), {
+      tools: [VISUAL_TOOL, ASK_USER_TOOL],
+      executeTool,
+      onToolDeferred: (turn) => {
+        deferredTurn = turn;
+      },
+    });
+
+    await manager.start('request-visual-deferred', HISTORY);
+    expect(deferredTurn?.loopMessages).toContainEqual(
+      expect.objectContaining({
+        role: 'toolResult',
+        content: expect.stringContaining('视觉截图未持久化'),
+      }),
+    );
+    expect(JSON.stringify(deferredTurn)).not.toContain('private-base64');
   });
 
   it('continues through multiple tool turns and keeps a complete activity timeline', async () => {

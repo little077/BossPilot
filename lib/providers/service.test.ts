@@ -250,6 +250,66 @@ describe('ProviderService', () => {
     expect(harness.read().connections.custom?.apiKey).toBe('optional-private-key');
   });
 
+  it('lets only custom endpoints explicitly declare image-capable catalog models', async () => {
+    const initial: StoredProviderState = {
+      version: 1,
+      connections: {
+        custom: connection('custom', {
+          models: [
+            { id: 'text-model', name: 'Text Model' },
+            { id: 'vision-model', name: 'Vision Model' },
+          ],
+          selectedModelId: 'vision-model',
+        }),
+        openai: connection('openai', {
+          models: [{ id: 'gpt-4.1', name: 'GPT-4.1' }],
+          selectedModelId: 'gpt-4.1',
+        }),
+      },
+      activeModel: { providerId: 'custom', modelId: 'vision-model' },
+    };
+    const harness = createStoreHarness(initial);
+    const service = new ProviderService(harness.store);
+
+    const enabled = await service.handle({
+      type: 'providers:set-image-input',
+      providerId: 'custom',
+      modelId: 'vision-model',
+      enabled: true,
+    });
+    expect(enabled.connections.find(({ providerId }) => providerId === 'custom')).toMatchObject({
+      imageInputModelIds: ['vision-model'],
+    });
+    expect(JSON.stringify(enabled)).not.toContain('custom-secret');
+
+    const disabled = await service.handle({
+      type: 'providers:set-image-input',
+      providerId: 'custom',
+      modelId: 'vision-model',
+      enabled: false,
+    });
+    expect(
+      disabled.connections.find(({ providerId }) => providerId === 'custom')?.imageInputModelIds,
+    ).toBeUndefined();
+
+    await expect(
+      service.handle({
+        type: 'providers:set-image-input',
+        providerId: 'custom',
+        modelId: 'missing-model',
+        enabled: true,
+      }),
+    ).rejects.toBeInstanceOf(ProviderServiceError);
+    await expect(
+      service.handle({
+        type: 'providers:set-image-input',
+        providerId: 'openai',
+        modelId: 'gpt-4.1',
+        enabled: true,
+      }),
+    ).rejects.toBeInstanceOf(ProviderServiceError);
+  });
+
   it('removes an active provider and clears selection without automatic fallback', async () => {
     const initial: StoredProviderState = {
       version: 1,

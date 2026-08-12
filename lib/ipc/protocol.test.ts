@@ -144,6 +144,22 @@ describe('IPC runtime validation', () => {
     ).toBe(true);
     expect(
       isProviderCommand({
+        type: 'providers:set-image-input',
+        providerId: 'custom',
+        modelId: 'vision-model',
+        enabled: true,
+      }),
+    ).toBe(true);
+    expect(
+      isProviderCommand({
+        type: 'providers:set-image-input',
+        providerId: 'custom',
+        modelId: 'vision-model',
+        enabled: 'yes',
+      }),
+    ).toBe(false);
+    expect(
+      isProviderCommand({
         type: 'providers:connect',
         providerId: 'openai',
         apiKey: 'secret',

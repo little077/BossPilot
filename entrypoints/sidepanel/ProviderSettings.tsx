@@ -193,6 +193,33 @@ export function ProviderSettings() {
     }
   };
 
+  const setImageInput = async (
+    provider: ProviderDefinition,
+    connection: ProviderConnectionView,
+    enabled: boolean,
+  ) => {
+    if (!connection.selectedModelId) return;
+    setProviderBusy(provider.id, true);
+    try {
+      const next = await sendProviderCommand({
+        type: 'providers:set-image-input',
+        providerId: provider.id,
+        modelId: connection.selectedModelId,
+        enabled,
+      });
+      setState(next);
+      setNotice(
+        enabled
+          ? `${connection.selectedModelId} 已声明支持图片输入。`
+          : `${connection.selectedModelId} 已恢复为仅文本模型。`,
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setProviderBusy(provider.id, false);
+    }
+  };
+
   const removeProvider = async (provider: ProviderDefinition) => {
     setProviderBusy(provider.id, true);
     try {
@@ -265,6 +292,7 @@ export function ProviderSettings() {
                 onDraft={(patch) => updateDraft(provider.id, patch)}
                 onConnect={() => void connectProvider(provider, connection)}
                 onSelect={(modelId) => void selectModel(provider, modelId)}
+                onImageInput={(enabled) => void setImageInput(provider, connection, enabled)}
                 onAddManual={() => void addManualModel(provider, connection)}
                 onRemove={() => void removeProvider(provider)}
               />
@@ -327,6 +355,7 @@ interface ProviderCardProps {
   onDraft: (patch: Partial<ProviderDraft>) => void;
   onConnect: () => void;
   onSelect: (modelId: string) => void;
+  onImageInput: (enabled: boolean) => void;
   onAddManual: () => void;
   onRemove: () => void;
 }
@@ -342,6 +371,7 @@ function ProviderCard({
   onDraft,
   onConnect,
   onSelect,
+  onImageInput,
   onAddManual,
   onRemove,
 }: ProviderCardProps) {
@@ -473,6 +503,27 @@ function ProviderCard({
             </div>
           </div>
         )}
+
+        {provider.custom && connection.selectedModelId ? (
+          <label className="provider-vision-toggle">
+            <span>
+              <strong>该模型支持图片输入</strong>
+              <small>仅在端点确实支持视觉内容时开启；截图仍会逐次询问。</small>
+            </span>
+            <input
+              type="checkbox"
+              role="switch"
+              aria-label={`${connection.selectedModelId} 支持图片输入`}
+              aria-checked={
+                connection.imageInputModelIds?.includes(connection.selectedModelId) ?? false
+              }
+              checked={connection.imageInputModelIds?.includes(connection.selectedModelId) ?? false}
+              disabled={busy}
+              onChange={(event) => onImageInput(event.target.checked)}
+            />
+            <span className="provider-vision-switch" aria-hidden />
+          </label>
+        ) : null}
 
         {showManual && (
           <div className="provider-manual-model">

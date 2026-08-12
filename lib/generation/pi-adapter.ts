@@ -119,6 +119,15 @@ const CATALOG_MODELS: Readonly<Record<string, readonly Model<Api>[]>> = {
 };
 const CATALOG_PROVIDER_IDS = new Set(Object.keys(CATALOG_MODELS));
 
+/** 只信任随 pi-ai 发布的模型元数据；未知端点不会靠名称猜测视觉能力。 */
+export function knownModelSupportsImageInput(providerId: string, modelId: string): boolean {
+  return (
+    CATALOG_MODELS[providerId]?.some(
+      (model) => model.id === modelId && model.input.includes('image'),
+    ) ?? false
+  );
+}
+
 const EMPTY_USAGE: Usage = {
   input: 0,
   output: 0,
@@ -285,7 +294,7 @@ function createRuntimeModel(target: ResolvedGenerationTarget, api: PiApi): Model
     provider: target.identity.providerId,
     baseUrl: target.baseUrl,
     reasoning: false,
-    input: ['text'],
+    input: target.supportsImageInput ? ['text', 'image'] : ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: DEFAULT_CONTEXT_WINDOW,
     maxTokens: DEFAULT_MAX_OUTPUT_TOKENS,
@@ -303,6 +312,16 @@ function createRuntimeModel(target: ResolvedGenerationTarget, api: PiApi): Model
 }
 
 function createContext(model: Model<Api>, request: GenerationRequest): Context {
+  const hasImageInput = request.messages.some(
+    (message) => message.role === 'toolResult' && Boolean(message.images?.length),
+  );
+  if (hasImageInput && !model.input.includes('image')) {
+    throw new GenerationError(
+      'INVALID_RESPONSE',
+      '当前模型不支持图片输入，请切换到支持视觉的模型后重试。',
+      false,
+    );
+  }
   return {
     systemPrompt: request.systemPrompt,
     messages: request.messages.flatMap<Context['messages'][number]>((message) => {
@@ -323,7 +342,14 @@ function createContext(model: Model<Api>, request: GenerationRequest): Context {
             role: 'toolResult' as const,
             toolCallId: message.toolCallId,
             toolName: message.toolName,
-            content: [{ type: 'text' as const, text: content }],
+            content: [
+              { type: 'text' as const, text: content },
+              ...(message.images ?? []).map((image) => ({
+                type: 'image' as const,
+                data: image.data,
+                mimeType: image.mimeType,
+              })),
+            ],
             isError: message.isError,
             timestamp: message.createdAt,
           },

@@ -28,6 +28,7 @@ export default defineConfig({
         'lib/adapter/zhipin.ts',
         'lib/browser/semantic-search.ts',
         'lib/browser/tab-router.ts',
+        'lib/browser/visual-page.ts',
         'lib/diagnostics/recorder.ts',
         'lib/diagnostics/page-structure.ts',
         'lib/diagnostics/redaction.ts',

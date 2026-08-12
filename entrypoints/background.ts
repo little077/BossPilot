@@ -37,6 +37,7 @@ import { BROWSER_ACTION_TOOL, executeBrowserAction } from '@/lib/tools/browser-a
 import {
   INTERACT_PAGE_TOOL,
   OBSERVE_PAGE_TOOL,
+  OBSERVE_VISUAL_PAGE_TOOL,
   PageInteractionCoordinator,
 } from '@/lib/tools/page-interaction';
 import { READ_CURRENT_PAGE_TOOL, readCurrentPage } from '@/lib/tools/read-current-page';
@@ -81,10 +82,11 @@ export default defineBackground({
         READ_CURRENT_PAGE_TOOL,
         BROWSER_ACTION_TOOL,
         OBSERVE_PAGE_TOOL,
+        OBSERVE_VISUAL_PAGE_TOOL,
         INTERACT_PAGE_TOOL,
         ASK_USER_TOOL,
       ],
-      executeTool: async (call, signal, requestId, reportProgress) => {
+      executeTool: async (call, signal, requestId, reportProgress, context) => {
         recorder.step('chat', 'tool', call.name);
         let result: GenerationToolExecutionOutcome;
         switch (call.name) {
@@ -111,6 +113,17 @@ export default defineBackground({
               pageSnapshots.get(requestId) ?? null,
               signal,
               requestId,
+            );
+            break;
+          case 'observe_visual_page':
+            result = await pageInteraction.observeVisual(
+              call,
+              pageSnapshots.get(requestId) ?? null,
+              signal,
+              requestId,
+              approvedToolCalls.delete(call.id),
+              reportProgress,
+              context,
             );
             break;
           case 'interact_page':
@@ -525,12 +538,16 @@ export default defineBackground({
               sourceTitle: pendingActivity?.sourceTitle ?? pending.snapshot.title,
               sourceUrl: pendingActivity?.sourceUrl ?? pending.snapshot.safeUrl,
             };
+        if (permissionAvailable && pending.generation.toolCall.name === 'observe_visual_page') {
+          approvedToolCalls.add(pending.generation.toolCall.id);
+        }
         await generationManager.resumeDeferred(
           pending.generation,
           pageContextHistory(history, pending.snapshot),
           override,
         );
       } finally {
+        approvedToolCalls.delete(pending.generation.toolCall.id);
         const nextPending = await loadPendingPageTurn().catch(() => null);
         if (nextPending?.requestId !== requestId) {
           await pageInteraction.clear(requestId).catch(() => void 0);
@@ -626,6 +643,19 @@ export default defineBackground({
               detail: '用户选择不执行这次可能产生外部影响的页面操作。',
               content:
                 '页面操作未执行：用户没有确认本次高风险动作。不要重试相同动作，除非用户重新明确要求。',
+            });
+          }
+        } else if (pending.generation.toolCall.name === 'observe_visual_page') {
+          if (normalizedAnswer === '仅本次允许') {
+            approvedToolCalls.add(pending.generation.toolCall.id);
+            await generationManager.resumeDeferred(pending.generation, history);
+          } else {
+            await generationManager.resumeDeferred(pending.generation, history, {
+              isError: true,
+              statusText: '用户取消视觉观察',
+              detail: '没有截取或发送当前页面截图。',
+              content:
+                '视觉观察未执行：用户没有允许发送当前页面截图。请改用 DOM/文本工具；除非用户重新明确要求，否则不要再次请求截图。',
             });
           }
         } else {

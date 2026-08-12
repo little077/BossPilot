@@ -14,6 +14,7 @@ export interface StoredProviderConnection {
   apiKey: string;
   models: ProviderModel[];
   selectedModelId?: string;
+  imageInputModelIds?: string[];
   configuredAt?: number;
 }
 
@@ -119,6 +120,17 @@ function parseConnection(providerId: string, value: unknown): StoredProviderConn
       })
     : [];
   const selectedModelId = readString(value.selectedModelId);
+  const knownModelIds = new Set(models.map(({ id }) => id));
+  const imageInputModelIds = Array.isArray(value.imageInputModelIds)
+    ? [
+        ...new Set(
+          value.imageInputModelIds.flatMap((item) => {
+            const id = readString(item);
+            return id && knownModelIds.has(id) ? [id] : [];
+          }),
+        ),
+      ].slice(0, 256)
+    : [];
   const configuredAt =
     typeof value.configuredAt === 'number' && Number.isFinite(value.configuredAt)
       ? value.configuredAt
@@ -130,6 +142,7 @@ function parseConnection(providerId: string, value: unknown): StoredProviderConn
     apiKey,
     models,
     ...(selectedModelId ? { selectedModelId } : {}),
+    ...(imageInputModelIds.length > 0 ? { imageInputModelIds } : {}),
     ...(configuredAt ? { configuredAt } : {}),
   };
 }

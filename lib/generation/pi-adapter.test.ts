@@ -13,6 +13,7 @@ import type { ChatMessage } from '@/lib/domain/chat';
 import { GenerationError } from '@/lib/generation/errors';
 import {
   createPiGenerationAdapter,
+  knownModelSupportsImageInput,
   type PiApi,
   type PiApiLoader,
   type PiCatalogProvider,
@@ -58,6 +59,13 @@ afterEach(() => {
 });
 
 describe('pi-ai generation adapter', () => {
+  it('uses trusted catalog metadata instead of guessing visual support from model names', () => {
+    expect(knownModelSupportsImageInput('openai', 'gpt-4.1')).toBe(true);
+    expect(knownModelSupportsImageInput('openai', 'o3-mini')).toBe(false);
+    expect(knownModelSupportsImageInput('custom', 'gpt-4.1')).toBe(false);
+    expect(knownModelSupportsImageInput('openai', 'unknown-vision-model')).toBe(false);
+  });
+
   it('maps chat history, request controls, streamed text, and usage', async () => {
     const calls: StreamCall[] = [];
     const partial = makeAssistant('stop');
@@ -145,6 +153,72 @@ describe('pi-ai generation adapter', () => {
       maxTokens: 2_048,
       temperature: 0.4,
     });
+  });
+
+  it('maps bounded image tool results to pi-ai image content for visual models', async () => {
+    const calls: StreamCall[] = [];
+    const loadApi = makeLoader(
+      [{ type: 'done', reason: 'stop', message: makeAssistant('stop') }],
+      calls,
+    );
+    const adapter = createPiGenerationAdapter({ loadApi });
+
+    await collect(
+      adapter.stream(makeTarget({ supportsImageInput: true }), {
+        systemPrompt: 'system',
+        messages: [
+          message('user', '查看页面', 1),
+          {
+            role: 'toolResult',
+            toolCallId: 'visual-1',
+            toolName: 'observe_visual_page',
+            content: 'visual metadata',
+            images: [{ data: 'YWJj', mimeType: 'image/jpeg' }],
+            isError: false,
+            createdAt: 2,
+          },
+        ],
+        signal: new AbortController().signal,
+      }),
+    );
+
+    expect(calls[0]?.model.input).toEqual(['text', 'image']);
+    expect(calls[0]?.context.messages).toContainEqual(
+      expect.objectContaining({
+        role: 'toolResult',
+        content: [
+          { type: 'text', text: 'visual metadata' },
+          { type: 'image', data: 'YWJj', mimeType: 'image/jpeg' },
+        ],
+      }),
+    );
+  });
+
+  it('fails before the provider request if a text-only model receives an image', async () => {
+    const stream = vi.fn(() => toAsyncIterable([]));
+    const adapter = createPiGenerationAdapter({
+      loadApi: async () => stream,
+    });
+    const request: GenerationRequest = {
+      systemPrompt: 'system',
+      messages: [
+        {
+          role: 'toolResult',
+          toolCallId: 'visual-1',
+          toolName: 'observe_visual_page',
+          content: 'visual metadata',
+          images: [{ data: 'YWJj', mimeType: 'image/jpeg' }],
+          isError: false,
+          createdAt: 2,
+        },
+      ],
+      signal: new AbortController().signal,
+    };
+
+    await expect(collect(adapter.stream(makeTarget(), request))).rejects.toThrow(
+      '当前模型不支持图片输入',
+    );
+    expect(stream).not.toHaveBeenCalled();
   });
 
   it('maps protocol-neutral tools, tool calls, and tool results', async () => {

@@ -4,11 +4,12 @@ import type {
   PageInteractiveElementCandidate,
   PageTurnSnapshot,
 } from '@/lib/domain/types';
-import type { GenerationToolCall } from '@/lib/generation/types';
+import type { GenerationToolCall, GenerationToolExecutionContext } from '@/lib/generation/types';
 import {
   captureInteractivePage,
   INTERACT_PAGE_TOOL,
   OBSERVE_PAGE_TOOL,
+  OBSERVE_VISUAL_PAGE_TOOL,
   PageInteractionCoordinator,
   performPageInteraction,
   verifyPageElementState,
@@ -33,6 +34,7 @@ const tabsQuery = vi.fn();
 const tabsUpdate = vi.fn();
 const tabsGoBack = vi.fn();
 const tabsGoForward = vi.fn();
+const captureVisibleTab = vi.fn();
 const permissionsContains = vi.fn();
 const executeScript = vi.fn();
 const storageGet = vi.fn();
@@ -42,11 +44,19 @@ let sessionValue: unknown;
 let currentTabUrl = PAGE_URL;
 
 function call(
-  name: 'observe_page' | 'interact_page',
+  name: 'observe_page' | 'observe_visual_page' | 'interact_page',
   argumentsValue: Record<string, unknown>,
 ): GenerationToolCall {
   return { id: 'call-1', name, arguments: argumentsValue };
 }
+
+const VISION_CONTEXT: GenerationToolExecutionContext = {
+  model: {
+    providerLabel: 'OpenAI',
+    modelName: 'Vision Test',
+    supportsImageInput: true,
+  },
+};
 
 function setPage(body: string): void {
   document.title = '交互测试';
@@ -121,6 +131,7 @@ beforeEach(() => {
   tabsGoForward.mockReset().mockImplementation(async () => {
     currentTabUrl = 'https://www.zhipin.com/forward';
   });
+  captureVisibleTab.mockReset().mockResolvedValue('data:image/jpeg;base64,YWJj');
   permissionsContains.mockReset().mockResolvedValue(true);
   executeScript
     .mockReset()
@@ -149,6 +160,7 @@ beforeEach(() => {
       update: tabsUpdate,
       goBack: tabsGoBack,
       goForward: tabsGoForward,
+      captureVisibleTab,
     },
     permissions: { contains: permissionsContains },
     scripting: { executeScript },
@@ -175,6 +187,179 @@ describe('page interaction tool contracts', () => {
       parameters: { required: ['action'], additionalProperties: false },
     });
     expect(INTERACT_PAGE_TOOL.description).toContain('密码和文件输入始终禁止');
+    expect(OBSERVE_VISUAL_PAGE_TOOL).toMatchObject({
+      name: 'observe_visual_page',
+      parameters: { required: ['reason'], additionalProperties: false },
+    });
+  });
+});
+
+describe('visual page observation', () => {
+  it('fails closed before page access when the selected model has no image capability', async () => {
+    const coordinator = new PageInteractionCoordinator();
+    const result = await coordinator.observeVisual(
+      call('observe_visual_page', { reason: '需要读取图表' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-vision',
+      false,
+      undefined,
+      {
+        model: { ...VISION_CONTEXT.model, supportsImageInput: false },
+      },
+    );
+
+    expect(result).toMatchObject({ isError: true, errorCode: 'VISION_MODEL_REQUIRED' });
+    expect(executeScript).not.toHaveBeenCalled();
+    expect(captureVisibleTab).not.toHaveBeenCalled();
+  });
+
+  it('requires a bounded reason and a normal bound web page', async () => {
+    const coordinator = new PageInteractionCoordinator();
+    await expect(
+      coordinator.observeVisual(
+        call('observe_visual_page', {}),
+        SNAPSHOT,
+        new AbortController().signal,
+        'request-vision',
+        false,
+        undefined,
+        VISION_CONTEXT,
+      ),
+    ).resolves.toMatchObject({ isError: true, errorCode: 'VISUAL_CAPTURE_FAILED' });
+    await expect(
+      coordinator.observeVisual(
+        call('observe_visual_page', { reason: '看图' }),
+        null,
+        new AbortController().signal,
+        'request-vision',
+        false,
+        undefined,
+        VISION_CONTEXT,
+      ),
+    ).resolves.toMatchObject({ isError: true, errorCode: 'STALE_VISUAL_OBSERVATION' });
+  });
+
+  it('asks for one-time consent after proving page access without taking a screenshot', async () => {
+    setPage('<button type="button" aria-label="筛选"></button>');
+    const coordinator = new PageInteractionCoordinator();
+    const result = await coordinator.observeVisual(
+      call('observe_visual_page', { reason: '图标没有可读文字' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-vision',
+      false,
+      undefined,
+      VISION_CONTEXT,
+    );
+
+    expect(result).toMatchObject({
+      deferred: true,
+      kind: 'user_input',
+      statusText: '等待视觉观察授权',
+      allowCustom: false,
+      options: [
+        { id: 'allow-once', label: '仅本次允许' },
+        { id: 'cancel-visual', label: '取消' },
+      ],
+    });
+    expect(result).toHaveProperty('question', expect.stringContaining('OpenAI · Vision Test'));
+    expect(captureVisibleTab).not.toHaveBeenCalled();
+  });
+
+  it('explains screenshot transmission in the exact-origin permission prompt', async () => {
+    permissionsContains.mockResolvedValue(false);
+    executeScript.mockRejectedValueOnce(new Error('Cannot access contents of the page'));
+    const coordinator = new PageInteractionCoordinator();
+    const result = await coordinator.observeVisual(
+      call('observe_visual_page', { reason: '读取画布' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-vision',
+      false,
+      undefined,
+      VISION_CONTEXT,
+    );
+
+    expect(result).toMatchObject({ deferred: true, kind: 'page_permission' });
+    expect(result).toHaveProperty('detail', expect.stringContaining('当前可见区域截图'));
+  });
+
+  it('returns a marked image block and reusable grounded refs only after approval', async () => {
+    setPage(`
+      <label>关键词<input value="private query"></label>
+      <button type="button" aria-label="打开筛选"></button>
+    `);
+    const progress = vi.fn();
+    const coordinator = new PageInteractionCoordinator();
+    const result = await coordinator.observeVisual(
+      call('observe_visual_page', { reason: '需要识别无文字图标', limit: 30 }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-vision',
+      true,
+      progress,
+      VISION_CONTEXT,
+    );
+
+    expect(result).toMatchObject({
+      isError: false,
+      statusText: '已完成视觉观察',
+      images: [{ data: 'YWJj', mimeType: 'image/jpeg' }],
+    });
+    if ('deferred' in result) throw new Error('unexpected deferred visual result');
+    expect(result.content).toContain('"observationId":"obs-');
+    expect(result.content).toContain('"ref":"e1"');
+    expect(result.content).not.toContain('private query');
+    expect(captureVisibleTab).toHaveBeenCalledOnce();
+    expect(progress).toHaveBeenCalledWith(
+      '正在获取页面视觉信息',
+      expect.stringContaining('不写入历史'),
+    );
+    expect(document.querySelector('[id^="bosspilot-visual-"]')).toBeNull();
+  });
+
+  it('returns a bounded visual error without attaching an invalid image', async () => {
+    setPage('<button type="button">查看图表</button>');
+    captureVisibleTab.mockResolvedValue('invalid-image');
+    const coordinator = new PageInteractionCoordinator();
+    const result = await coordinator.observeVisual(
+      call('observe_visual_page', { reason: '读取图表' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-vision',
+      true,
+      undefined,
+      VISION_CONTEXT,
+    );
+
+    expect(result).toMatchObject({ isError: true, errorCode: 'VISUAL_CAPTURE_FAILED' });
+    expect(result).not.toHaveProperty('images');
+  });
+
+  it('turns Chrome activeTab capture rejection into an actionable bounded error', async () => {
+    setPage('<button type="button">查看图表</button>');
+    captureVisibleTab.mockRejectedValue(
+      new Error("Either the '<all_urls>' or 'activeTab' permission is required."),
+    );
+    const coordinator = new PageInteractionCoordinator();
+    const result = await coordinator.observeVisual(
+      call('observe_visual_page', { reason: '读取图表' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-vision',
+      true,
+      undefined,
+      VISION_CONTEXT,
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      errorCode: 'VISUAL_CAPTURE_FAILED',
+      detail: expect.stringContaining('点击 BossPilot 扩展图标'),
+      content: expect.stringContaining('未把截图发送给模型'),
+    });
+    expect(result).not.toHaveProperty('images');
   });
 });
 
