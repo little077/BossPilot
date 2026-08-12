@@ -30,7 +30,7 @@ export type ChatGenerationListener = (event: ChatGenerationEvent) => void;
 
 /** 等待真实用户手势时可安全持久化的最小生成状态，不包含 API Key 或页面正文。 */
 export interface DeferredGenerationTurn {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   requestId: string;
   message: ChatMessage;
   rawContent: string;
@@ -45,6 +45,8 @@ export interface DeferredGenerationTurn {
   toolCallSignatures?: string[];
   /** 相同调用且相同可观察结果的紧凑签名，用于跨 Ask User/权限暂停恢复无进展检测。 */
   toolAttemptSignatures?: string[];
+  /** v3：本轮固定的完整 system prompt；只包含公开规则和 Skill 索引，不含凭据。 */
+  systemPrompt?: string;
 }
 
 export type GenerationTargetResolver = () =>
@@ -56,7 +58,7 @@ export interface ChatGenerationManagerOptions {
   adapter: GenerationAdapter;
   createMessageId?: () => string;
   now?: () => number;
-  systemPrompt?: string;
+  systemPrompt?: string | (() => string | Promise<string>);
   maxOutputTokens?: number;
   /** 即使上游忽略 token 参数，也不得突破的 UTF-16 字符硬上限。 */
   maxOutputChars?: number;
@@ -89,6 +91,7 @@ interface ActiveTurn {
   usage?: GenerationUsage;
   modelTurns: number;
   toolAttemptSignatures: string[];
+  systemPrompt: string;
 }
 
 const ABORTED = Symbol('generation-aborted');
@@ -152,6 +155,7 @@ export class ChatGenerationManager {
       updatePending: false,
       modelTurns: 0,
       toolAttemptSignatures: [],
+      systemPrompt: '',
     };
     this.active = turn;
 
@@ -160,6 +164,7 @@ export class ChatGenerationManager {
       const resolution = this.options.resolveTarget();
       target = cloneTarget(isPromiseLike(resolution) ? await resolution : resolution);
       turn.secret = target.apiKey;
+      turn.systemPrompt = await resolveSystemPrompt(this.options.systemPrompt);
     } catch (error) {
       this.releaseWithoutEvent(turn);
       throw sanitizeGenerationError(error);
@@ -222,6 +227,8 @@ export class ChatGenerationManager {
         );
       }
       turn.secret = target.apiKey;
+      turn.systemPrompt =
+        state.systemPrompt ?? (await resolveSystemPrompt(this.options.systemPrompt));
       const message = requireMessage(turn);
       const activity = currentToolActivity(message);
       if (!activity || activity.callId !== state.toolCall.id) {
@@ -439,7 +446,7 @@ export class ChatGenerationManager {
     syncLegacyToolActivity(message, activity);
 
     const deferred: DeferredGenerationTurn = {
-      version: 2,
+      version: 3,
       requestId: turn.requestId,
       message: cloneMessage(message),
       rawContent: turn.rawContent,
@@ -451,6 +458,7 @@ export class ChatGenerationManager {
       loopMessages: cloneGenerationInputMessages(loopMessages, false),
       modelTurns: turn.modelTurns,
       toolAttemptSignatures: [...turn.toolAttemptSignatures],
+      systemPrompt: turn.systemPrompt,
     };
     await this.options.onToolDeferred(deferred, result);
     this.publish(turn, 'update');
@@ -467,7 +475,7 @@ export class ChatGenerationManager {
     turn.pendingToolCall = undefined;
     const iterator = this.options.adapter
       .stream(target, {
-        systemPrompt: this.options.systemPrompt ?? '',
+        systemPrompt: turn.systemPrompt,
         messages,
         signal: turn.controller.signal,
         ...(tools?.length ? { tools } : {}),
@@ -845,10 +853,12 @@ function cloneTarget(target: ResolvedGenerationTarget): ResolvedGenerationTarget
   };
 }
 
-function isPromiseLike(
-  value: ResolvedGenerationTarget | Promise<ResolvedGenerationTarget>,
-): value is Promise<ResolvedGenerationTarget> {
-  return typeof Reflect.get(value, 'then') === 'function';
+function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
+  return (
+    (typeof value === 'object' || typeof value === 'function') &&
+    value !== null &&
+    typeof Reflect.get(value, 'then') === 'function'
+  );
 }
 
 function cloneMessage(message: ChatMessage): ChatMessage {
@@ -884,8 +894,17 @@ function activeTurnFromDeferred(state: DeferredGenerationTurn): ActiveTurn {
     pendingToolCall: cloneToolCall(state.toolCall),
     modelTurns: state.modelTurns ?? 1,
     toolAttemptSignatures: [...(state.toolAttemptSignatures ?? [])],
+    systemPrompt: state.systemPrompt ?? '',
     ...(state.usage ? { usage: { ...state.usage } } : {}),
   };
+}
+
+async function resolveSystemPrompt(
+  value: ChatGenerationManagerOptions['systemPrompt'],
+): Promise<string> {
+  if (typeof value !== 'function') return value ?? '';
+  const result = value();
+  return isPromiseLike(result) ? await result : result;
 }
 
 function cloneToolCall(call: GenerationToolCall): GenerationToolCall {

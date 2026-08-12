@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isClientMessage, isProviderCommand } from './protocol';
+import { isClientMessage, isProviderCommand, isSkillCommand } from './protocol';
 
 describe('IPC runtime validation', () => {
   it('accepts a bounded chat request and rejects malformed or oversized history', () => {
@@ -207,5 +207,20 @@ describe('IPC runtime validation', () => {
     expect(isProviderCommand({ type: 'providers:issue', providerId: '' })).toBe(false);
     expect(isProviderCommand({ type: 'unknown' })).toBe(false);
     expect(isProviderCommand(null)).toBe(false);
+  });
+
+  it('validates bounded skill setting commands', () => {
+    expect(isSkillCommand({ type: 'skills:get' })).toBe(true);
+    expect(
+      isSkillCommand({ type: 'skills:set-enabled', name: 'boss-job-search', enabled: false }),
+    ).toBe(true);
+    expect(isSkillCommand({ type: 'skills:set-enabled', name: '', enabled: true })).toBe(false);
+    expect(
+      isSkillCommand({ type: 'skills:set-enabled', name: 'x'.repeat(65), enabled: true }),
+    ).toBe(false);
+    expect(isSkillCommand({ type: 'skills:set-enabled', name: 'boss', enabled: 'yes' })).toBe(
+      false,
+    );
+    expect(isSkillCommand({ type: 'skills:unknown' })).toBe(false);
   });
 });

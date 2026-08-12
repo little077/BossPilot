@@ -9,11 +9,13 @@ import {
 } from '@/lib/page/access';
 import { getChatHistorySettings, setChatHistorySettings } from '@/lib/storage/config';
 import { ProviderSettings } from './ProviderSettings';
+import { SkillSettings } from './SkillSettings';
 
 export function SettingsView() {
   return (
     <div className="redscope-settings flex flex-col">
       <ProviderSettings />
+      <SkillSettings />
       <ChatHistorySettings />
       <PageOriginSettings />
     </div>

@@ -2,7 +2,7 @@
   "name": "bosspilot",
   "description": "BossPilot — 通用浏览器 AI 助手，并为 Boss 直聘提供求职增强（BYOK / 本地优先 / 开源）",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.9.0",
   "license": "MIT",
   "type": "module",
   "keywords": [
@@ -69,7 +69,8 @@
     "react-dom": "^19.0.0",
     "react-markdown": "^9.0.1",
     "remark-gfm": "^4.0.0",
-    "turndown": "^7.2.0"
+    "turndown": "^7.2.0",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.7",

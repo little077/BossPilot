@@ -917,6 +917,80 @@ body {
   padding-top: 13px;
 }
 
+.skill-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--color-line);
+  padding-top: 13px;
+}
+
+.skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.skill-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid var(--color-line);
+  border-radius: 12px;
+  background: var(--color-surface);
+  padding: 10px;
+}
+
+.skill-card-icon {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--color-surface-mint);
+  color: var(--color-brand);
+}
+
+.skill-card-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.skill-card-copy strong {
+  color: var(--color-ink);
+  font-size: 10px;
+}
+
+.skill-card-copy > span {
+  color: var(--color-ink-faint);
+  font-size: 8.5px;
+  line-height: 1.5;
+}
+
+.skill-card-copy small {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--color-brand);
+  font-size: 8px;
+}
+
+.skill-toggle {
+  position: relative;
+  cursor: pointer;
+}
+
+.skill-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
 .chat-history-toggle {
   position: relative;
   display: flex;
@@ -1021,6 +1095,20 @@ body {
   position: relative;
   z-index: 1;
   margin-right: 3px;
+}
+
+.skill-toggle:has(input:focus-visible) .chat-history-switch {
+  box-shadow: 0 0 0 3px var(--color-surface-mint);
+}
+
+.skill-toggle input:checked + .chat-history-switch {
+  border-color: var(--color-brand);
+  background: var(--color-surface-mint);
+}
+
+.skill-toggle input:checked + .chat-history-switch::after {
+  background: var(--color-brand);
+  transform: translateX(12px);
 }
 
 /* ─── 设置页：模型卡包 ─── */

@@ -108,6 +108,20 @@ describe('pending page permission turns', () => {
     });
   });
 
+  it('restores version 3 deferred turns with a persisted dynamic prompt snapshot', async () => {
+    const pending = createPendingAgentTurn(
+      { ...DEFERRED, version: 3, systemPrompt: 'skill catalog snapshot' },
+      null,
+      HISTORY,
+      'user_input',
+      1_000,
+    );
+    await savePendingPageTurn(pending);
+    await expect(loadPendingPageTurn(2_000)).resolves.toMatchObject({
+      generation: { version: 3, systemPrompt: 'skill catalog snapshot' },
+    });
+  });
+
   it('defensively clones all optional generation snapshots before persistence', () => {
     const enriched: DeferredGenerationTurn = {
       ...DEFERRED,

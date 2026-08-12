@@ -368,6 +368,7 @@ export type DomainToolName =
   | 'observe_page'
   | 'observe_visual_page'
   | 'interact_page'
+  | 'load_skill'
   | 'read_current_job'
   | 'read_visible_jobs'
   | 'ask_user';

@@ -15,8 +15,10 @@ import {
   type ClientMessage,
   isClientMessage,
   isProviderCommand,
+  isSkillCommand,
   type ProviderCommandResponse,
   type ServerMessage,
+  type SkillCommandResponse,
 } from '@/lib/ipc/protocol';
 import { CHAT_SYSTEM } from '@/lib/llm/prompts';
 import { hasExactPageOriginAccess } from '@/lib/page/access';
@@ -31,9 +33,12 @@ import {
 import { capturePageTurnSnapshot, pageContextHistory } from '@/lib/page/snapshot';
 import { orchestrator } from '@/lib/pipeline/orchestrator';
 import { ProviderService } from '@/lib/providers/service';
+import { buildSkillCatalogPrompt } from '@/lib/skills/prompt';
+import { SkillStore } from '@/lib/skills/store';
 import { createTrustedStorageGate } from '@/lib/storage/access';
 import { ASK_USER_TOOL, askUser } from '@/lib/tools/ask-user';
 import { BROWSER_ACTION_TOOL, executeBrowserAction } from '@/lib/tools/browser-action';
+import { LOAD_SKILL_TOOL, SkillLoadCoordinator } from '@/lib/tools/load-skill';
 import {
   INTERACT_PAGE_TOOL,
   OBSERVE_PAGE_TOOL,
@@ -59,6 +64,8 @@ export default defineBackground({
     chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => void 0);
 
     const providerService = new ProviderService();
+    const skillStore = new SkillStore();
+    const skillLoader = new SkillLoadCoordinator(skillStore);
     const chatPorts = new Set<chrome.runtime.Port>();
     const diagnosticInputs = new Map<string, string>();
     const pageSnapshots = new Map<string, PageTurnSnapshot | null>();
@@ -74,7 +81,7 @@ export default defineBackground({
 
     const generationManager = new ChatGenerationManager({
       adapter: generationAdapter,
-      systemPrompt: CHAT_SYSTEM,
+      systemPrompt: async () => composeChatSystemPrompt(skillStore),
       maxOutputTokens: 8_192,
       maxAgentTurns: 200,
       maxConsecutiveIdenticalToolCalls: 3,
@@ -84,6 +91,7 @@ export default defineBackground({
         OBSERVE_PAGE_TOOL,
         OBSERVE_VISUAL_PAGE_TOOL,
         INTERACT_PAGE_TOOL,
+        LOAD_SKILL_TOOL,
         ASK_USER_TOOL,
       ],
       executeTool: async (call, signal, requestId, reportProgress, context) => {
@@ -135,6 +143,9 @@ export default defineBackground({
               approvedToolCalls.delete(call.id),
               reportProgress,
             );
+            break;
+          case 'load_skill':
+            result = await skillLoader.execute(call, requestId, signal);
             break;
           case 'ask_user':
             result = askUser(call);
@@ -201,6 +212,25 @@ export default defineBackground({
               error: publicOperationError(error, secret),
             } satisfies ProviderCommandResponse);
           },
+        );
+      return true;
+    });
+
+    chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
+      if (!isSkillCommand(raw) || !isTrustedExtensionPage(sender)) return;
+      void requireTrustedStorage()
+        .then(() =>
+          raw.type === 'skills:get'
+            ? skillStore.list()
+            : skillStore.setEnabled(raw.name, raw.enabled),
+        )
+        .then(
+          (state) => sendResponse({ ok: true, state } satisfies SkillCommandResponse),
+          (error: unknown) =>
+            sendResponse({
+              ok: false,
+              error: publicOperationError(error, ''),
+            } satisfies SkillCommandResponse),
         );
       return true;
     });
@@ -411,14 +441,15 @@ export default defineBackground({
 
       const lastUser = [...history].reverse().find((message) => message.role === 'user');
       diagnosticInputs.set(requestId, lastUser?.content ?? '');
+      const chatSystemPrompt = await composeChatSystemPrompt(skillStore);
       activeDiagnostic = {
         requestId,
         messageCount: history.length + 1,
         promptChars:
-          CHAT_SYSTEM.length +
+          chatSystemPrompt.length +
           history.reduce((total, message) => total + message.content.length, 0),
         messages: [
-          { role: 'system', content: CHAT_SYSTEM },
+          { role: 'system', content: chatSystemPrompt },
           ...history.map((message) => ({ role: message.role, content: message.content })),
         ],
         startedAt: Date.now(),
@@ -440,6 +471,7 @@ export default defineBackground({
         const pending = await loadPendingPageTurn().catch(() => null);
         if (pending?.requestId !== requestId)
           await pageInteraction.clear(requestId).catch(() => void 0);
+        if (pending?.requestId !== requestId) skillLoader.clear(requestId);
         diagnosticInputs.delete(requestId);
         pageSnapshots.delete(requestId);
         chatHistories.delete(requestId);
@@ -551,6 +583,7 @@ export default defineBackground({
         const nextPending = await loadPendingPageTurn().catch(() => null);
         if (nextPending?.requestId !== requestId) {
           await pageInteraction.clear(requestId).catch(() => void 0);
+          skillLoader.clear(requestId);
         }
         diagnosticInputs.delete(requestId);
         pageSnapshots.delete(requestId);
@@ -676,6 +709,7 @@ export default defineBackground({
         const nextPending = await loadPendingPageTurn().catch(() => null);
         if (nextPending?.requestId !== requestId) {
           await pageInteraction.clear(requestId).catch(() => void 0);
+          skillLoader.clear(requestId);
         }
         diagnosticInputs.delete(requestId);
         pageSnapshots.delete(requestId);
@@ -780,6 +814,11 @@ function publicOperationError(error: unknown, secret = ''): string {
   return (
     redact(withoutExactSecret).replace(/\s+/g, ' ').trim().slice(0, 360) || '操作失败，请稍后重试。'
   );
+}
+
+async function composeChatSystemPrompt(skillStore: SkillStore): Promise<string> {
+  const catalog = buildSkillCatalogPrompt(await skillStore.listEnabled());
+  return catalog ? `${CHAT_SYSTEM}\n\n${catalog}` : CHAT_SYSTEM;
 }
 
 function base64EncodeUtf8(value: string): string {

@@ -158,7 +158,7 @@ function isSnapshot(value: unknown): value is PageTurnSnapshot {
 function isDeferred(value: unknown): value is DeferredGenerationTurn {
   return (
     isRecord(value) &&
-    (value.version === 1 || value.version === 2) &&
+    (value.version === 1 || value.version === 2 || value.version === 3) &&
     isShortString(value.requestId) &&
     isRecord(value.message) &&
     isRecord(value.toolCall) &&

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boss 求职搜索"
+  short_description: "在 Boss 直聘执行可验证的岗位搜索、分析与比较流程"
+  default_prompt: "使用 $boss-job-search 帮我在 Boss 直聘搜索并评估符合条件的岗位。"

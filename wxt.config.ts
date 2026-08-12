@@ -4,6 +4,9 @@ import { defineConfig } from 'wxt';
 
 function generationChunk(id: string): string | undefined {
   const moduleId = id.replaceAll('\\', '/');
+  if (moduleId.includes('/lib/skills/') || moduleId.endsWith('/lib/tools/load-skill.ts')) {
+    return 'agent-skills';
+  }
   if (
     moduleId.endsWith('/lib/tools/browser-action.ts') ||
     moduleId.endsWith('/lib/tools/page-interaction.ts') ||

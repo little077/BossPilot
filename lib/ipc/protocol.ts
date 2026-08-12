@@ -4,6 +4,7 @@
 
 import type { ChatMessage } from '@/lib/domain/chat';
 import type { ProviderStateView, SearchTaskParams, TaskSnapshot } from '@/lib/domain/types';
+import type { SkillSettingsView } from '@/lib/skills/types';
 
 export const AGENT_PORT_NAME = 'bosspilot-agent';
 
@@ -168,6 +169,24 @@ export type ProviderCommand =
 export type ProviderCommandResponse =
   | { ok: true; state: ProviderStateView }
   | { ok: false; error: string };
+
+export type SkillCommand =
+  | { type: 'skills:get' }
+  | { type: 'skills:set-enabled'; name: string; enabled: boolean };
+
+export type SkillCommandResponse =
+  | { ok: true; state: SkillSettingsView }
+  | { ok: false; error: string };
+
+export function isSkillCommand(value: unknown): value is SkillCommand {
+  if (!isRecord(value) || typeof value.type !== 'string') return false;
+  if (value.type === 'skills:get') return true;
+  return (
+    value.type === 'skills:set-enabled' &&
+    isBoundedString(value.name, 64) &&
+    typeof value.enabled === 'boolean'
+  );
+}
 
 export function isProviderCommand(value: unknown): value is ProviderCommand {
   if (!isRecord(value) || typeof value.type !== 'string') return false;

@@ -106,6 +106,7 @@ function createManager(
       turn: DeferredGenerationTurn,
       result: GenerationToolDeferredResult,
     ) => void | Promise<void>;
+    systemPrompt?: string | (() => string | Promise<string>);
   } = {},
 ) {
   return new ChatGenerationManager({
@@ -113,7 +114,7 @@ function createManager(
     resolveTarget,
     createMessageId: () => 'assistant-1',
     now: () => 20,
-    systemPrompt: 'system',
+    systemPrompt: runtimeOptions.systemPrompt ?? 'system',
     streamUpdateIntervalMs: 0,
     ...runtimeOptions,
   });
@@ -1144,7 +1145,7 @@ describe('ChatGenerationManager', () => {
       },
       toolActivity: { name: 'ask_user', status: 'waiting_user' },
     });
-    expect(deferredTurn).toMatchObject({ version: 2, modelTurns: 1 });
+    expect(deferredTurn).toMatchObject({ version: 3, modelTurns: 1, systemPrompt: 'system' });
     if (!deferredTurn) throw new Error('ask user turn was not persisted');
 
     await expect(
@@ -1296,5 +1297,89 @@ describe('ChatGenerationManager', () => {
     expect(secondRequest?.messages).toContainEqual(
       expect.objectContaining({ role: 'toolResult', isError: true }),
     );
+  });
+
+  it('resolves an async system prompt once and keeps the snapshot across tool turns', async () => {
+    const prompts: string[] = [];
+    let calls = 0;
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        prompts.push(request.systemPrompt);
+        if (prompts.length === 1) {
+          yield {
+            type: 'tool-call',
+            toolCall: { id: 'call-prompt', name: 'read_current_job', arguments: {} },
+          };
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'text-delta', delta: 'done' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool: async () => ({ isError: false, statusText: 'ok', content: 'page' }),
+      systemPrompt: async () => {
+        calls += 1;
+        return `dynamic-${calls}`;
+      },
+    });
+
+    await expect(manager.start('dynamic-prompt', HISTORY)).resolves.toMatchObject({
+      status: 'completed',
+    });
+    expect(calls).toBe(1);
+    expect(prompts).toEqual(['dynamic-1', 'dynamic-1']);
+  });
+
+  it('restores the persisted system prompt when a deferred turn resumes', async () => {
+    const prompts: string[] = [];
+    const state: DeferredGenerationTurn = {
+      version: 3,
+      requestId: 'request-prompt-snapshot',
+      message: {
+        id: 'assistant-prompt-snapshot',
+        role: 'assistant',
+        content: '',
+        createdAt: 1,
+        status: 'streaming',
+        toolActivity: {
+          requestId: 'request-prompt-snapshot',
+          callId: 'call-1',
+          name: 'read_current_job',
+          label: '读取当前岗位',
+          status: 'waiting_permission',
+          statusText: '等待权限',
+          startedAt: 1,
+        },
+      },
+      rawContent: '',
+      toolCall: { id: 'call-1', name: 'read_current_job', arguments: {} },
+      targetIdentity: { providerId: 'openai', modelId: 'gpt-test' },
+      deferredAt: 1,
+      systemPrompt: 'persisted-catalog',
+    };
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        prompts.push(request.systemPrompt);
+        yield { type: 'text-delta', delta: 'resumed' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const resolver = vi.fn(async () => 'new-catalog');
+    const manager = createManager(adapter, () => target(), {
+      systemPrompt: resolver,
+      tools: [READ_JOB_TOOL],
+      executeTool: async () => ({ isError: false, statusText: 'unused', content: 'unused' }),
+    });
+
+    await manager.resumeDeferred(state, HISTORY, {
+      isError: false,
+      statusText: 'granted',
+      content: 'page',
+    });
+    expect(prompts).toEqual(['persisted-catalog']);
+    expect(resolver).not.toHaveBeenCalled();
   });
 });
