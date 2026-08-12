@@ -14,6 +14,7 @@ import {
 import { useEffect, useState } from 'react';
 import type { ChatMessage } from '@/lib/domain/chat';
 import type { ReasoningActivity, ToolActivity } from '@/lib/domain/types';
+import { summarizeAgentRun } from '@/lib/evals/run-summary';
 
 interface ChatFlowStatusProps {
   message: ChatMessage;
@@ -28,7 +29,8 @@ export function ChatFlowStatus({ message, onResolvePagePermission }: ChatFlowSta
   const activities = (
     message.toolActivities ?? (message.toolActivity ? [message.toolActivity] : [])
   ).filter(({ name }) => name !== 'ask_user');
-  if (!message.reasoningActivity && activities.length === 0) return null;
+  const run = summarizeAgentRun(message);
+  if (!message.reasoningActivity && activities.length === 0 && !run) return null;
 
   return (
     <div className="chat-flow-status">
@@ -36,8 +38,54 @@ export function ChatFlowStatus({ message, onResolvePagePermission }: ChatFlowSta
       {activities.map((activity) => (
         <ToolStep key={activity.callId} activity={activity} onResolve={onResolvePagePermission} />
       ))}
+      {run ? (
+        <details className="agent-run-summary">
+          <summary>运行详情</summary>
+          <dl>
+            <div className="agent-run-row">
+              <dt>状态</dt>
+              <dd>{runStatusLabel(run.status)}</dd>
+            </div>
+            <div className="agent-run-row">
+              <dt>模型</dt>
+              <dd>{run.model}</dd>
+            </div>
+            <div className="agent-run-row">
+              <dt>工具</dt>
+              <dd>
+                {run.toolCalls} 次 · 成功 {run.succeededTools} · 失败 {run.failedTools}
+              </dd>
+            </div>
+            {run.durationMs !== undefined ? (
+              <div className="agent-run-row">
+                <dt>执行耗时</dt>
+                <dd>{formatDuration(run.durationMs)}</dd>
+              </div>
+            ) : null}
+            {run.totalTokens !== undefined ? (
+              <div className="agent-run-row">
+                <dt>Token</dt>
+                <dd>{run.totalTokens.toLocaleString()}</dd>
+              </div>
+            ) : null}
+            {run.cost !== undefined && run.cost > 0 ? (
+              <div className="agent-run-row">
+                <dt>模型成本</dt>
+                <dd>${run.cost.toFixed(6)}</dd>
+              </div>
+            ) : null}
+          </dl>
+        </details>
+      ) : null}
     </div>
   );
+}
+
+function runStatusLabel(status: NonNullable<ReturnType<typeof summarizeAgentRun>>['status']) {
+  if (status === 'running') return '执行中';
+  if (status === 'completed') return '已完成';
+  if (status === 'cancelled') return '已取消';
+  return '出错';
 }
 
 function ReasoningStep({ activity }: { activity: ReasoningActivity }) {

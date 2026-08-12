@@ -9,6 +9,7 @@ import {
 } from '@/lib/page/access';
 import { getChatHistorySettings, setChatHistorySettings } from '@/lib/storage/config';
 import { AgentContextSettings } from './AgentContextSettings';
+import { AgentHealthCheckPanel } from './AgentHealthCheck';
 import { McpSettings } from './McpSettings';
 import { ProviderSettings } from './ProviderSettings';
 import { SkillSettings } from './SkillSettings';
@@ -20,6 +21,7 @@ export function SettingsView() {
       <SkillSettings />
       <AgentContextSettings />
       <McpSettings />
+      <AgentHealthCheckPanel />
       <ChatHistorySettings />
       <PageOriginSettings />
     </div>

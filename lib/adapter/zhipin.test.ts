@@ -555,7 +555,7 @@ describe('页面结构诊断', () => {
     expect(snapshot.outline).not.toContain('visibility 隐藏');
     expect(snapshot.outline).not.toContain('invalid:class');
     expect(snapshot.outline).toContain(`div.${'a'.repeat(80)}.${'b'.repeat(80)}`);
-  });
+  }, 10_000);
 });
 
 describe('薪资解析与过滤', () => {

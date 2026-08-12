@@ -23,6 +23,9 @@ vi.mock('./AgentContextSettings', () => ({
 vi.mock('./McpSettings', () => ({
   McpSettings: () => <section aria-label="MCP 工具">MCP 设置</section>,
 }));
+vi.mock('./AgentHealthCheck', () => ({
+  AgentHealthCheckPanel: () => <section aria-label="Agent 运行自检">自检</section>,
+}));
 vi.mock('@/lib/page/access', () => accessMocks);
 vi.mock('@/lib/storage/config', () => configMocks);
 
@@ -41,6 +44,7 @@ describe('SettingsView', () => {
     expect(screen.getByRole('region', { name: 'Agent Skills' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: '用户上下文' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'MCP 工具' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Agent 运行自检' })).toBeInTheDocument();
     expect(await screen.findByText('尚未长期允许其他网站')).toBeVisible();
     expect(screen.queryByText('评估设置')).not.toBeInTheDocument();
     expect(screen.queryByText(/我的档案/)).not.toBeInTheDocument();

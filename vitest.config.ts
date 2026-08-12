@@ -35,6 +35,8 @@ export default defineConfig({
         'lib/diagnostics/redaction.ts',
         'lib/diagnostics/report.ts',
         'lib/domain/chat.ts',
+        'lib/evals/health.ts',
+        'lib/evals/run-summary.ts',
         'lib/generation/conversation-title.ts',
         'lib/generation/errors.ts',
         'lib/generation/manager.ts',
@@ -82,6 +84,7 @@ export default defineConfig({
         'entrypoints/sidepanel/SkillSettings.tsx',
         'entrypoints/sidepanel/AgentContextSettings.tsx',
         'entrypoints/sidepanel/McpSettings.tsx',
+        'entrypoints/sidepanel/AgentHealthCheck.tsx',
         'entrypoints/sidepanel/usePort.ts',
       ],
       thresholds: {

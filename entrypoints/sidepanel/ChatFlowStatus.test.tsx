@@ -302,4 +302,44 @@ describe('ChatFlowStatus', () => {
       'https://example.com/docs',
     );
   });
+
+  it('shows persisted run metrics on demand', () => {
+    render(
+      <ChatFlowStatus
+        message={{
+          ...BASE_MESSAGE,
+          status: 'completed',
+          modelIdentity: { providerId: 'openai', modelId: 'gpt-test' },
+          usage: {
+            inputTokens: 10,
+            outputTokens: 5,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            totalTokens: 15,
+            cost: 0.01,
+          },
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByText('运行详情'));
+    expect(screen.getByText('openai / gpt-test')).toBeVisible();
+    expect(screen.getByText('$0.010000')).toBeVisible();
+  });
+
+  it.each([
+    ['cancelled', '已取消'],
+    ['error', '出错'],
+  ] as const)('labels a %s run in the persisted details', (status, label) => {
+    render(
+      <ChatFlowStatus
+        message={{
+          ...BASE_MESSAGE,
+          status,
+          modelIdentity: { providerId: 'openai', modelId: 'gpt-test' },
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByText('运行详情'));
+    expect(screen.getByText(label)).toBeVisible();
+  });
 });

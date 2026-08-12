@@ -216,6 +216,46 @@ body {
   margin-bottom: 7px;
 }
 
+.agent-run-summary {
+  margin-top: 6px;
+  border-top: 1px solid var(--color-line);
+  padding-top: 5px;
+  color: var(--color-ink-muted);
+  font-size: 10px;
+}
+
+.agent-run-summary summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--color-ink-faint);
+  user-select: none;
+}
+
+.agent-run-summary dl {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+  border-radius: 8px;
+  background: var(--color-canvas);
+  padding: 7px 8px;
+}
+
+.agent-run-row {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 7px;
+}
+
+.agent-run-summary dt {
+  color: var(--color-ink-faint);
+}
+
+.agent-run-summary dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--color-ink-muted);
+}
+
 .chat-reasoning {
   overflow: hidden;
   border: 1px solid var(--color-line);
@@ -2429,6 +2469,109 @@ body {
   100% {
     transform: translateX(340%);
   }
+}
+
+.agent-health-settings {
+  border-bottom: 1px solid var(--color-line);
+  padding: 18px 16px;
+}
+
+.agent-health-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.agent-health-head h2 {
+  margin-top: 2px;
+  color: var(--color-ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.agent-health-head p {
+  margin-top: 4px;
+  max-width: 280px;
+  color: var(--color-ink-faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.agent-health-head button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: 7px;
+  background: var(--color-surface);
+  padding: 6px 8px;
+  color: var(--color-ink-muted);
+  font-size: 10px;
+}
+
+.agent-health-head button:hover:not(:disabled) {
+  border-color: var(--color-brand);
+  color: var(--color-brand);
+}
+
+.agent-health-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.agent-health-list li {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 7px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-canvas);
+  padding: 7px 8px;
+}
+
+.agent-health-icon {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--color-surface);
+  color: var(--color-ink-faint);
+}
+
+.agent-health-list .is-pass .agent-health-icon {
+  color: var(--color-success);
+}
+
+.agent-health-list .is-warning .agent-health-icon {
+  color: var(--color-warning);
+}
+
+.agent-health-list strong,
+.agent-health-list small {
+  display: block;
+}
+
+.agent-health-list strong {
+  color: var(--color-ink-muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.agent-health-list small {
+  margin-top: 2px;
+  color: var(--color-ink-faint);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.agent-health-error {
+  margin-top: 8px;
+  color: var(--color-danger);
+  font-size: 10px;
 }
 
 /* 动效降级 */
