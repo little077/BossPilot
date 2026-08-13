@@ -59,6 +59,34 @@ describe('IPC runtime validation', () => {
     expect(isClientMessage([])).toBe(false);
   });
 
+  it('validates conversation-scoped run lifecycle commands', () => {
+    const messages = [{ id: 'user-1', role: 'user', content: '继续', createdAt: 1 }];
+    for (const type of ['run:start', 'run:retry', 'run:resume'] as const) {
+      expect(
+        isClientMessage({ type, runId: 'run-1', conversationId: 'conversation-1', messages }),
+      ).toBe(true);
+    }
+    expect(
+      isClientMessage({
+        type: 'run:steer',
+        runId: 'run-1',
+        conversationId: 'conversation-1',
+        content: '只保留最近一年',
+      }),
+    ).toBe(true);
+    expect(
+      isClientMessage({ type: 'run:cancel', runId: 'run-1', conversationId: 'conversation-1' }),
+    ).toBe(true);
+    expect(
+      isClientMessage({
+        type: 'run:steer',
+        runId: '',
+        conversationId: 'conversation-1',
+        content: 'x',
+      }),
+    ).toBe(false);
+  });
+
   it('validates durable page-permission decisions with the same bounded history rules', () => {
     const valid = {
       type: 'page_permission_result',

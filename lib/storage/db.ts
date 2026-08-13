@@ -2,13 +2,23 @@
 // 对话会话与消息本地落库，冷启动/重连可回放。仅本地存储，无云同步、无遥测。
 
 import Dexie, { type Table } from 'dexie';
-import type { ChatConversation, ChatMessage, StoredChatMessage } from '@/lib/domain/chat';
+import type {
+  ChatConversation,
+  ChatMessage,
+  CompactionSummary,
+  ConversationRuntimeSettings,
+  RunCheckpoint,
+  StoredChatMessage,
+} from '@/lib/domain/chat';
 
 const PREVIEW_CHARS = 80;
 
 class BossPilotDb extends Dexie {
   conversations!: Table<ChatConversation, string>;
   messages!: Table<StoredChatMessage, string>;
+  conversationRuntimeSettings!: Table<ConversationRuntimeSettings, string>;
+  runCheckpoints!: Table<RunCheckpoint, string>;
+  compactionSummaries!: Table<CompactionSummary, string>;
 
   constructor() {
     super('bosspilot');
@@ -45,6 +55,13 @@ class BossPilotDb extends Dexie {
           message.conversationId = conversationId;
         });
       });
+    this.version(3).stores({
+      conversations: 'id, ordinal, updatedAt, unread',
+      messages: 'id, conversationId, [conversationId+createdAt], createdAt',
+      conversationRuntimeSettings: 'conversationId, updatedAt',
+      runCheckpoints: 'id, runId, conversationId, [conversationId+createdAt], createdAt',
+      compactionSummaries: 'id, runId, conversationId, [conversationId+createdAt], createdAt',
+    });
   }
 }
 
@@ -145,6 +162,36 @@ export function createConversation(ordinal: number, now = Date.now()): ChatConve
     messageCount: 0,
     unread: false,
   };
+}
+
+export async function loadConversationRuntimeSettings(
+  conversationId: string,
+): Promise<ConversationRuntimeSettings | null> {
+  return (await db.conversationRuntimeSettings.get(conversationId)) ?? null;
+}
+
+export async function saveConversationRuntimeSettings(
+  settings: ConversationRuntimeSettings,
+): Promise<void> {
+  await db.conversationRuntimeSettings.put(structuredClone(settings));
+}
+
+export async function saveRunCheckpoint(checkpoint: RunCheckpoint): Promise<void> {
+  await db.runCheckpoints.put(structuredClone(checkpoint));
+}
+
+export async function latestRunCheckpoint(conversationId: string): Promise<RunCheckpoint | null> {
+  const rows = await db.runCheckpoints
+    .where('[conversationId+createdAt]')
+    .between([conversationId, Dexie.minKey], [conversationId, Dexie.maxKey])
+    .reverse()
+    .limit(1)
+    .toArray();
+  return rows[0] ?? null;
+}
+
+export async function saveCompactionSummary(summary: CompactionSummary): Promise<void> {
+  await db.compactionSummaries.put(structuredClone(summary));
 }
 
 function messagePreview(message: ChatMessage): string {

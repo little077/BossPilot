@@ -1,8 +1,9 @@
 // ─── 对话生成会话管理器 ───
 // 职责：固定单轮模型、串行执行有界 Agent 循环、保存可恢复快照，并统一收口取消与错误终态。
 
-import type { ChatMessage, GenerationUsage } from '@/lib/domain/chat';
+import type { ChatMessage, GenerationUsage, ThinkingLevel } from '@/lib/domain/chat';
 import type { ModelIdentity } from '@/lib/domain/types';
+import { estimateGenerationTokens } from '@/lib/generation/compaction';
 import { GenerationError, isAbortError, sanitizeGenerationError } from '@/lib/generation/errors';
 import type {
   GenerationAdapter,
@@ -62,6 +63,9 @@ export interface ChatGenerationManagerOptions {
   now?: () => number;
   systemPrompt?: string | (() => string | Promise<string>);
   maxOutputTokens?: number;
+  generationSettings?: () =>
+    | { maxOutputTokens?: number; thinkingLevel?: ThinkingLevel }
+    | Promise<{ maxOutputTokens?: number; thinkingLevel?: ThinkingLevel }>;
   /** 即使上游忽略 token 参数，也不得突破的 UTF-16 字符硬上限。 */
   maxOutputChars?: number;
   /** 全量流快照的最小广播间隔；终态不受该间隔影响。 */
@@ -76,6 +80,14 @@ export interface ChatGenerationManagerOptions {
   maxAgentTurns?: number;
   /** 相同工具、参数和可观察结果最多连续出现几次；默认 3，防止无进展空转。 */
   maxConsecutiveIdenticalToolCalls?: number;
+  /** 模型上下文估算上限；达到阈值后在下一次模型边界压缩。 */
+  contextWindowTokens?: number;
+  compactionThreshold?: number;
+  compactMessages?: (
+    target: ResolvedGenerationTarget,
+    messages: GenerationInputMessage[],
+    signal: AbortSignal,
+  ) => Promise<GenerationInputMessage[]>;
   onToolDeferred?: (
     turn: DeferredGenerationTurn,
     result: GenerationToolDeferredResult,
@@ -97,6 +109,8 @@ interface ActiveTurn {
   toolAttemptSignatures: string[];
   systemPrompt: string;
   tools: GenerationToolDefinition[];
+  /** 用户在工具执行期间追加的约束；只在下一次模型调用边界注入。 */
+  pendingSteering: Array<{ content: string; createdAt: number }>;
 }
 
 const ABORTED = Symbol('generation-aborted');
@@ -107,6 +121,7 @@ export const DEFAULT_MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS = 3;
 
 type StreamOutcome =
   | { kind: 'tool'; toolCall: GenerationToolCall }
+  | { kind: 'steer' }
   | { kind: 'terminal'; message: ChatMessage };
 
 export class ChatGenerationManager {
@@ -117,6 +132,8 @@ export class ChatGenerationManager {
   private readonly streamUpdateIntervalMs: number;
   private readonly maxAgentTurns: number;
   private readonly maxConsecutiveIdenticalToolCalls: number;
+  private readonly contextWindowTokens: number;
+  private readonly compactionThreshold: number;
   private active?: ActiveTurn;
   private replay?: ChatGenerationEvent;
 
@@ -131,6 +148,8 @@ export class ChatGenerationManager {
       options.maxConsecutiveIdenticalToolCalls,
       DEFAULT_MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS,
     );
+    this.contextWindowTokens = positiveInteger(options.contextWindowTokens, 128_000);
+    this.compactionThreshold = Math.min(0.95, Math.max(0.5, options.compactionThreshold ?? 0.8));
   }
 
   get isRunning(): boolean {
@@ -162,6 +181,7 @@ export class ChatGenerationManager {
       toolAttemptSignatures: [],
       systemPrompt: '',
       tools: [],
+      pendingSteering: [],
     };
     this.active = turn;
 
@@ -308,9 +328,72 @@ export class ChatGenerationManager {
       );
     }
 
+    let preparedMessages = inputMessages;
+    if (
+      this.options.compactMessages &&
+      estimateGenerationTokens(inputMessages) >= this.contextWindowTokens * this.compactionThreshold
+    ) {
+      const message = requireMessage(turn);
+      message.reasoningActivity = {
+        status: 'running',
+        summary: '正在压缩较早的对话上下文',
+        startedAt: this.now(),
+      };
+      this.publish(turn, 'update');
+      preparedMessages = await this.options.compactMessages(
+        target,
+        cloneGenerationInputMessages(inputMessages),
+        turn.controller.signal,
+      );
+      if (turn.controller.signal.aborted) return this.finishCancelled(turn);
+      message.reasoningActivity = {
+        status: 'completed',
+        summary: '已压缩较早上下文并保留任务进度',
+        startedAt: message.reasoningActivity.startedAt,
+        finishedAt: this.now(),
+      };
+      this.publish(turn, 'update');
+    }
+
     turn.modelTurns += 1;
-    const outcome = await this.runGeneration(turn, target, inputMessages, turn.tools);
+    const outcome = await this.runGeneration(turn, target, preparedMessages, turn.tools);
     if (outcome.kind === 'terminal') return outcome.message;
+
+    if (outcome.kind === 'steer') {
+      const steering = turn.pendingSteering.splice(0);
+      const continuedMessages: GenerationInputMessage[] = [
+        ...preparedMessages,
+        ...(turn.rawContent.trim()
+          ? [
+              {
+                role: 'assistant' as const,
+                content: turn.rawContent,
+                createdAt: requireMessage(turn).createdAt,
+                finishReason: 'stop' as const,
+              },
+            ]
+          : []),
+        ...steering.map((item) => ({
+          role: 'user' as const,
+          content: [
+            '<user_steering>',
+            item.content,
+            '</user_steering>',
+            '这是用户在任务执行期间追加的约束。保留已经成功的步骤，从当前进度调整后续行动。',
+          ].join('\n'),
+          createdAt: item.createdAt,
+        })),
+      ];
+      if (turn.rawContent.trim()) turn.rawContent += '\n\n';
+      const message = requireMessage(turn);
+      message.reasoningActivity = {
+        status: 'running',
+        summary: '正在根据追加指令调整后续步骤',
+        startedAt: this.now(),
+      };
+      this.publish(turn, 'update');
+      return await this.runAgentLoop(turn, target, continuedMessages);
+    }
 
     const toolDefinition = turn.tools.find((candidate) => candidate.name === outcome.toolCall.name);
     if (!toolDefinition || !this.options.executeTool) {
@@ -325,7 +408,13 @@ export class ChatGenerationManager {
     }
 
     this.beginToolActivity(turn, outcome.toolCall, toolDefinition);
-    return await this.executeAndContinueTool(turn, target, inputMessages, outcome.toolCall, true);
+    return await this.executeAndContinueTool(
+      turn,
+      target,
+      preparedMessages,
+      outcome.toolCall,
+      true,
+    );
   }
 
   private async executeAndContinueTool(
@@ -481,15 +570,20 @@ export class ChatGenerationManager {
     tools?: GenerationToolDefinition[],
   ): Promise<StreamOutcome> {
     turn.pendingToolCall = undefined;
+    const dynamicSettings = this.options.generationSettings
+      ? await this.options.generationSettings()
+      : {};
     const iterator = this.options.adapter
       .stream(target, {
         systemPrompt: turn.systemPrompt,
         messages,
         signal: turn.controller.signal,
         ...(tools?.length ? { tools } : {}),
-        ...(this.options.maxOutputTokens === undefined
+        ...(dynamicSettings.maxOutputTokens === undefined &&
+        this.options.maxOutputTokens === undefined
           ? {}
-          : { maxOutputTokens: this.options.maxOutputTokens }),
+          : { maxOutputTokens: dynamicSettings.maxOutputTokens ?? this.options.maxOutputTokens }),
+        ...(dynamicSettings.thinkingLevel ? { thinkingLevel: dynamicSettings.thinkingLevel } : {}),
         ...(this.options.temperature === undefined
           ? {}
           : { temperature: this.options.temperature }),
@@ -528,6 +622,17 @@ export class ChatGenerationManager {
     if (!this.active.controller.signal.aborted) {
       this.active.controller.abort();
     }
+    return true;
+  }
+
+  /**
+   * 不打断正在进行的网络流或页面工具；在当前模型回合结束后注入下一轮。
+   * 返回 false 表示该请求已不再运行，调用方应把内容作为普通新一轮发送。
+   */
+  steer(requestId: string, content: string, createdAt = this.now()): boolean {
+    const normalized = content.replaceAll('\u0000', '').trim().slice(0, 20_000);
+    if (!this.active || this.active.requestId !== requestId || !normalized) return false;
+    this.active.pendingSteering.push({ content: normalized, createdAt });
     return true;
   }
 
@@ -631,6 +736,9 @@ export class ChatGenerationManager {
               new GenerationError('INVALID_RESPONSE', '模型工具调用没有正确结束。', true),
             ),
           };
+        }
+        if (turn.pendingSteering.length > 0) {
+          return { kind: 'steer' };
         }
         this.completeReasoning(turn, '已完成问题分析');
         return {
@@ -907,6 +1015,7 @@ function activeTurnFromDeferred(state: DeferredGenerationTurn): ActiveTurn {
     toolAttemptSignatures: [...(state.toolAttemptSignatures ?? [])],
     systemPrompt: state.systemPrompt ?? '',
     tools: state.tools?.map(cloneToolDefinition) ?? [],
+    pendingSteering: [],
     ...(state.usage ? { usage: { ...state.usage } } : {}),
   };
 }

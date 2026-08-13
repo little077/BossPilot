@@ -123,6 +123,36 @@ export interface ChatHistorySettings {
   autoTitle: boolean;
 }
 
+export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high';
+
+/** 每条会话独立的模型运行偏好；未设置字段继承全局 Provider。 */
+export interface ConversationRuntimeSettings {
+  conversationId: string;
+  modelIdentity?: ModelIdentity;
+  thinkingLevel: ThinkingLevel;
+  contextWindowTokens: number;
+  maxOutputTokens: number;
+  updatedAt: number;
+}
+
+export interface RunCheckpoint {
+  id: string;
+  runId: string;
+  conversationId: string;
+  historyMessageIds: string[];
+  phase: 'queued' | 'running' | 'waiting_user' | 'stable' | 'interrupted';
+  createdAt: number;
+}
+
+export interface CompactionSummary {
+  id: string;
+  runId: string;
+  conversationId: string;
+  summary: string;
+  sourceMessageIds: string[];
+  createdAt: number;
+}
+
 /** 生成一条消息（补齐 id/createdAt）。 */
 export function makeMessage(
   role: ChatMessage['role'],

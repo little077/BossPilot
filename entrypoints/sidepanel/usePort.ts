@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChatAttachment, ChatConversation, ChatMessage } from '@/lib/domain/chat';
 import { makeMessage } from '@/lib/domain/chat';
 import type { SearchTaskParams, TaskSnapshot } from '@/lib/domain/types';
+import type { AgentRunSnapshot } from '@/lib/generation/registry';
 import { AGENT_PORT_NAME, type ClientMessage, type ServerMessage } from '@/lib/ipc/protocol';
 import { requestPageOriginAccess } from '@/lib/page/access';
 import { getChatHistorySettings } from '@/lib/storage/config';
@@ -59,9 +60,8 @@ export function useAgentPort() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [conversations, setConversations] = useState<ChatConversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
-  const [runningConversationId, setRunningConversationId] = useState<string | null>(null);
+  const [runs, setRuns] = useState<AgentRunSnapshot[]>([]);
   const [historyError, setHistoryError] = useState('');
-  const [chatRunning, setChatRunning] = useState(false);
   const [ready, setReady] = useState(false);
   const [connected, setConnected] = useState(false);
   const [pendingParams, setPendingParams] = useState<SearchTaskParams | null>(null);
@@ -73,8 +73,8 @@ export function useAgentPort() {
   const activeConversationIdRef = useRef<string | null>(null);
   const viewedConversationIdRef = useRef<string | null>(null);
   const nextOrdinalRef = useRef(1);
-  const activeChatRef = useRef<ActiveChat | null>(null);
-  const runningRef = useRef(false);
+  const activeChatsRef = useRef(new Map<string, ActiveChat>());
+  const runsRef = useRef<AgentRunSnapshot[]>([]);
   const awaitingChatSyncRef = useRef(false);
   const restoreSequenceRef = useRef(0);
   const titleRequestsRef = useRef(
@@ -83,12 +83,35 @@ export function useAgentPort() {
   const attemptedTitleMessageIdsRef = useRef(new Map<string, string>());
   const queuedTitleHistoriesRef = useRef(new Map<string, ChatMessage[]>());
 
-  const setRunning = useCallback((value: boolean, conversationId: string | null = null) => {
-    runningRef.current = value;
-    setChatRunning(value);
-    const nextConversationId = value ? conversationId : null;
-    setRunningConversationId(nextConversationId);
-  }, []);
+  const activeRuns = runs.filter(
+    (run) => run.status === 'queued' || run.status === 'running' || run.status === 'waiting_user',
+  );
+  const runningConversationIds = [...new Set(activeRuns.map((run) => run.conversationId))];
+  const runningConversationId = runningConversationIds[0] ?? null;
+  const chatRunning = activeRuns.length > 0;
+  const currentConversationRunning = activeConversationId
+    ? runningConversationIds.includes(activeConversationId)
+    : false;
+
+  const setConversationRunning = useCallback(
+    (value: boolean, conversationId: string, requestId?: string) => {
+      const next = value
+        ? [
+            ...runsRef.current.filter((run) => run.conversationId !== conversationId),
+            {
+              runId: requestId ?? `local-${conversationId}`,
+              requestId: requestId ?? `local-${conversationId}`,
+              conversationId,
+              status: 'running' as const,
+              updatedAt: Date.now(),
+            },
+          ]
+        : runsRef.current.filter((run) => run.conversationId !== conversationId);
+      runsRef.current = next;
+      setRuns(next);
+    },
+    [],
+  );
 
   const replaceMessages = useCallback((next: ChatMessage[]) => {
     const conversationId = activeConversationIdRef.current;
@@ -119,14 +142,12 @@ export function useAgentPort() {
   }, []);
 
   const upsertConversation = useCallback((conversation: ChatConversation) => {
-    setConversations((previous) => {
-      const next = sortConversations([
-        conversation,
-        ...previous.filter((item) => item.id !== conversation.id),
-      ]);
-      conversationsRef.current = next;
-      return next;
-    });
+    const next = sortConversations([
+      conversation,
+      ...conversationsRef.current.filter((item) => item.id !== conversation.id),
+    ]);
+    conversationsRef.current = next;
+    setConversations(next);
   }, []);
 
   const upsertMessage = useCallback(
@@ -274,28 +295,35 @@ export function useAgentPort() {
       return true;
     };
 
-    const handleStreamMessage = (requestId: string, message: ChatMessage, terminal: boolean) => {
-      const active = activeChatRef.current;
-      /*
-       * subscribe 后 Background 会先回放权威 stream snapshot，再发送 chat_state。
-       * 这个短窗口允许把本地断线前的旧 requestId 改绑到后台当前轮次；同步完成后
-       * 仍严格拒绝其他 requestId，避免多窗口的延迟事件篡改正在显示的回复。
-       */
-      if (active && active.requestId !== requestId && !awaitingChatSyncRef.current) return;
-      if (active && active.requestId !== requestId) {
-        interruptActiveAssistant(active, REPLACED_REQUEST_MESSAGE);
+    const handleStreamMessage = (
+      requestId: string,
+      conversationHint: string | undefined,
+      message: ChatMessage,
+      terminal: boolean,
+    ) => {
+      const active = [...activeChatsRef.current.values()].find(
+        (candidate) => candidate.requestId === requestId,
+      );
+      const legacyActive = activeConversationIdRef.current
+        ? activeChatsRef.current.get(activeConversationIdRef.current)
+        : undefined;
+      if (!conversationHint && legacyActive && legacyActive.requestId !== requestId) {
+        if (!awaitingChatSyncRef.current) return;
+        interruptActiveAssistant(legacyActive, REPLACED_REQUEST_MESSAGE);
+        activeChatsRef.current.delete(legacyActive.conversationId);
       }
-
       const conversationId =
-        active?.requestId === requestId
-          ? active.conversationId
-          : (active?.conversationId ?? activeConversationIdRef.current);
+        conversationHint ?? active?.conversationId ?? activeConversationIdRef.current;
       if (!conversationId) return;
 
-      activeChatRef.current = terminal
-        ? null
-        : { requestId, conversationId, messageId: message.id };
-      setRunning(!terminal, conversationId);
+      if (terminal) activeChatsRef.current.delete(conversationId);
+      else
+        activeChatsRef.current.set(conversationId, {
+          requestId,
+          conversationId,
+          messageId: message.id,
+        });
+      setConversationRunning(!terminal, conversationId, requestId);
       const historySnapshot = upsertMessage(conversationId, message);
       if (terminal) {
         saveChatMessage(conversationId, message, { unread: true });
@@ -318,35 +346,48 @@ export function useAgentPort() {
             port.postMessage({ type: 'subscribe' } satisfies ClientMessage);
             break;
           case 'chat_state': {
-            if (message.running) {
-              if (message.requestId) {
-                const active = activeChatRef.current;
-                if (active && active.requestId !== message.requestId) {
-                  interruptActiveAssistant(active, REPLACED_REQUEST_MESSAGE);
+            // 兼容旧后台；新后台以 run_state 为唯一运行状态来源。
+            if (message.running && message.requestId) {
+              const active = [...activeChatsRef.current.values()].find(
+                (candidate) => candidate.requestId === message.requestId,
+              );
+              const conversationId = active?.conversationId ?? activeConversationIdRef.current;
+              if (conversationId) {
+                const previous = activeChatsRef.current.get(conversationId);
+                if (previous && previous.requestId !== message.requestId) {
+                  interruptActiveAssistant(previous, REPLACED_REQUEST_MESSAGE);
                 }
-                const conversationId =
-                  active?.conversationId ?? activeConversationIdRef.current ?? '';
-                if (conversationId) {
-                  activeChatRef.current = {
-                    requestId: message.requestId,
-                    conversationId,
-                    ...(active?.requestId === message.requestId && active.messageId
-                      ? { messageId: active.messageId }
-                      : {}),
-                  };
-                }
-                setRunning(true, conversationId || null);
-              } else {
-                setRunning(true, activeChatRef.current?.conversationId ?? null);
+                activeChatsRef.current.set(conversationId, {
+                  requestId: message.requestId,
+                  conversationId,
+                  ...(active?.messageId ? { messageId: active.messageId } : {}),
+                });
+                setConversationRunning(true, conversationId, message.requestId);
               }
-              awaitingChatSyncRef.current = false;
-              setConnected(true);
-              break;
+            } else if (!message.running && runsRef.current.length > 0) {
+              for (const active of activeChatsRef.current.values()) {
+                interruptActiveAssistant(active, DISCONNECTED_REQUEST_MESSAGE);
+              }
+              activeChatsRef.current.clear();
+              runsRef.current = [];
+              setRuns([]);
             }
-
-            const interrupted = activeChatRef.current;
-            if (interrupted && runningRef.current) {
-              const finalized = interruptActiveAssistant(interrupted, DISCONNECTED_REQUEST_MESSAGE);
+            awaitingChatSyncRef.current = false;
+            setConnected(true);
+            break;
+          }
+          case 'run_state':
+            for (const active of activeChatsRef.current.values()) {
+              const authoritative = message.runs.find((run) => run.requestId === active.requestId);
+              if (
+                authoritative &&
+                authoritative.status !== 'interrupted' &&
+                authoritative.status !== 'error' &&
+                authoritative.status !== 'cancelled'
+              ) {
+                continue;
+              }
+              const finalized = interruptActiveAssistant(active, DISCONNECTED_REQUEST_MESSAGE);
               if (!finalized) {
                 const errorMessage: ChatMessage = {
                   ...makeMessage('assistant', ''),
@@ -354,16 +395,16 @@ export function useAgentPort() {
                   status: 'error',
                   errorMessage: DISCONNECTED_REQUEST_MESSAGE,
                 };
-                upsertMessage(interrupted.conversationId, errorMessage);
-                saveChatMessage(interrupted.conversationId, errorMessage, { unread: true });
+                upsertMessage(active.conversationId, errorMessage);
+                saveChatMessage(active.conversationId, errorMessage, { unread: true });
               }
+              activeChatsRef.current.delete(active.conversationId);
             }
-            activeChatRef.current = null;
-            setRunning(false);
+            runsRef.current = message.runs;
+            setRuns(message.runs);
             awaitingChatSyncRef.current = false;
             setConnected(true);
             break;
-          }
           case 'snapshot':
             setSnapshot(message.snapshot);
             break;
@@ -372,11 +413,11 @@ export function useAgentPort() {
             break;
           case 'stream_start':
           case 'stream_update':
-            handleStreamMessage(message.requestId, message.message, false);
+            handleStreamMessage(message.requestId, message.conversationId, message.message, false);
             break;
           case 'stream_end':
           case 'stream_error':
-            handleStreamMessage(message.requestId, message.message, true);
+            handleStreamMessage(message.requestId, message.conversationId, message.message, true);
             break;
           case 'conversation_title': {
             if (
@@ -406,11 +447,17 @@ export function useAgentPort() {
             }
             break;
           case 'error': {
-            const active = activeChatRef.current;
-            if (message.requestId && (!active || message.requestId !== active.requestId)) break;
+            const active = message.requestId
+              ? [...activeChatsRef.current.values()].find(
+                  (candidate) => candidate.requestId === message.requestId,
+                )
+              : activeChatsRef.current.get(activeConversationIdRef.current ?? '');
+            if (message.requestId && !active) break;
             const finalized = active ? interruptActiveAssistant(active, message.text) : false;
-            activeChatRef.current = null;
-            setRunning(false);
+            if (active) {
+              activeChatsRef.current.delete(active.conversationId);
+              setConversationRunning(false, active.conversationId);
+            }
             if (!finalized) {
               const errorMessage: ChatMessage = {
                 ...makeMessage('assistant', ''),
@@ -453,13 +500,13 @@ export function useAgentPort() {
     getConversationMessages,
     requestConversationTitle,
     saveChatMessage,
-    setRunning,
+    setConversationRunning,
     upsertConversation,
     upsertMessage,
   ]);
 
   useEffect(() => {
-    if (!ready || !connected || chatRunning || !activeConversationId) return;
+    if (!ready || !connected || currentConversationRunning || !activeConversationId) return;
     const conversation = conversations.find(({ id }) => id === activeConversationId);
     if (conversation?.titleSource !== 'fallback') return;
     const last = messages.at(-1);
@@ -468,7 +515,7 @@ export function useAgentPort() {
     }
   }, [
     activeConversationId,
-    chatRunning,
+    currentConversationRunning,
     connected,
     conversations,
     messages,
@@ -479,9 +526,7 @@ export function useAgentPort() {
   const sendChat = useCallback(
     (text: string, attachments: ChatAttachment[] = []): boolean => {
       const trimmed = text.trim();
-      if (!trimmed || !ready || !connected || runningRef.current || activeChatRef.current) {
-        return false;
-      }
+      if (!trimmed || !ready || !connected) return false;
 
       const requestId = `chat-${crypto.randomUUID()}`;
       restoreSequenceRef.current += 1;
@@ -497,13 +542,37 @@ export function useAgentPort() {
         upsertConversation(conversation);
       }
 
+      const activeRun = runsRef.current.find(
+        (run) =>
+          run.conversationId === conversation?.id &&
+          (run.status === 'running' || run.status === 'waiting_user' || run.status === 'queued'),
+      );
+      if (activeRun) {
+        if (activeRun.status !== 'running' || attachments.length > 0) return false;
+        const steeringMessage = makeMessage('user', trimmed);
+        const next = [...messagesRef.current, steeringMessage];
+        if (
+          !send({
+            type: 'run:steer',
+            runId: activeRun.runId,
+            conversationId: conversation.id,
+            content: trimmed,
+          })
+        )
+          return false;
+        replaceMessages(next);
+        upsertConversation(optimisticConversationMessage(conversation, steeringMessage));
+        saveChatMessage(conversation.id, steeringMessage, { unread: false });
+        return true;
+      }
+
       const previousMessages = messagesRef.current;
       const next = [...previousMessages, userMessage];
       const wasAwaitingChatSync = awaitingChatSyncRef.current;
       awaitingChatSyncRef.current = false;
-      activeChatRef.current = { requestId, conversationId: conversation.id };
+      activeChatsRef.current.set(conversation.id, { requestId, conversationId: conversation.id });
       replaceMessages(next);
-      setRunning(true, conversation.id);
+      setConversationRunning(true, conversation.id, requestId);
       upsertConversation(optimisticConversationMessage(conversation, userMessage));
 
       if (
@@ -515,9 +584,9 @@ export function useAgentPort() {
         })
       ) {
         awaitingChatSyncRef.current = wasAwaitingChatSync;
-        activeChatRef.current = null;
+        activeChatsRef.current.delete(conversation.id);
         replaceMessages(previousMessages);
-        setRunning(false);
+        setConversationRunning(false, conversation.id);
         if (isNewConversation) {
           activeConversationIdRef.current = null;
           setActiveConversationId(null);
@@ -543,20 +612,47 @@ export function useAgentPort() {
       replaceMessages,
       saveChatMessage,
       send,
-      setRunning,
+      setConversationRunning,
       upsertConversation,
     ],
   );
 
   const cancelChat = useCallback(() => {
-    const requestId = activeChatRef.current?.requestId;
+    const conversationId = activeConversationIdRef.current;
+    const requestId = conversationId
+      ? (activeChatsRef.current.get(conversationId)?.requestId ??
+        runsRef.current.find((run) => run.conversationId === conversationId)?.requestId)
+      : undefined;
     if (!requestId) return;
     send({ type: 'cancel', scope: 'chat', requestId });
   }, [send]);
 
+  const retryChat = useCallback((): boolean => {
+    const conversationId = activeConversationIdRef.current;
+    if (!conversationId || runsRef.current.some((run) => run.conversationId === conversationId)) {
+      return false;
+    }
+    const history = getConversationMessages(conversationId);
+    const last = history.at(-1);
+    if (last?.role !== 'assistant' || !last.error || !last.retryable) return false;
+    const messages = history.slice(0, -1);
+    if (!messages.some((message) => message.role === 'user')) return false;
+    const runId = `retry-${crypto.randomUUID()}`;
+    activeChatsRef.current.set(conversationId, { requestId: runId, conversationId });
+    setConversationRunning(true, conversationId, runId);
+    if (!send({ type: 'run:retry', runId, conversationId, messages })) {
+      activeChatsRef.current.delete(conversationId);
+      setConversationRunning(false, conversationId);
+      return false;
+    }
+    return true;
+  }, [getConversationMessages, send, setConversationRunning]);
+
   const resolvePagePermission = useCallback(
     async (requestId: string, permissionPattern: string, allow: boolean): Promise<boolean> => {
-      const active = activeChatRef.current;
+      const active = [...activeChatsRef.current.values()].find(
+        (candidate) => candidate.requestId === requestId,
+      );
       if (!active || active.requestId !== requestId) return false;
 
       let granted = false;
@@ -580,7 +676,9 @@ export function useAgentPort() {
 
   const resolveAskUser = useCallback(
     async (requestId: string, answer: string): Promise<boolean> => {
-      const active = activeChatRef.current;
+      const active = [...activeChatsRef.current.values()].find(
+        (candidate) => candidate.requestId === requestId,
+      );
       const normalized = answer.replaceAll('\u0000', '').trim().slice(0, 2_000);
       if (!active || active.requestId !== requestId || !normalized) return false;
       return send({
@@ -598,7 +696,6 @@ export function useAgentPort() {
   }, [send]);
 
   const startNewConversation = useCallback(() => {
-    if (runningRef.current || activeChatRef.current) return;
     restoreSequenceRef.current += 1;
     activeConversationIdRef.current = null;
     setActiveConversationId(null);
@@ -660,6 +757,8 @@ export function useAgentPort() {
     conversations,
     activeConversationId,
     runningConversationId,
+    runningConversationIds,
+    runs,
     historyError,
     chatRunning,
     ready,
@@ -669,6 +768,7 @@ export function useAgentPort() {
     send,
     sendChat,
     cancelChat,
+    retryChat,
     resolvePagePermission,
     resolveAskUser,
     downloadDiagnostics,

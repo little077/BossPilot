@@ -24,6 +24,8 @@ export interface ComposerHandle {
 interface ComposerProps {
   onSend: (text: string, attachments: ChatAttachment[]) => void;
   running?: boolean;
+  /** 运行中允许发送纯文本约束；附件仍需等下一轮。 */
+  allowSteering?: boolean;
   disabled?: boolean;
   onCancel?: () => void;
   autoFocus?: boolean;
@@ -38,6 +40,7 @@ interface ComposerProps {
 export function Composer({
   onSend,
   running = false,
+  allowSteering = false,
   disabled = false,
   onCancel,
   autoFocus = false,
@@ -58,7 +61,9 @@ export function Composer({
   placeholderRef.current = waitingForAnswer
     ? 'Agent 正在等待上方问题的回答…'
     : running
-      ? '正在生成，可点击右侧停止…'
+      ? allowSteering
+        ? '可追加约束，Agent 会在安全步骤后调整…'
+        : '正在生成，可点击右侧停止…'
       : disabled
         ? '正在连接 BossPilot…'
         : '输入消息，Enter 发送';
@@ -99,7 +104,7 @@ export function Composer({
   });
 
   submitRef.current = () => {
-    if (!editor || running || disabled) return;
+    if (!editor || (running && !allowSteering) || disabled) return;
     const text = editor.getText({ blockSeparator: '\n' }).trim();
     if (!text && attachments.length === 0) return;
     onSend(text || '请分析我附加的内容。', attachments);
@@ -109,10 +114,10 @@ export function Composer({
     }
   };
 
-  // 任务执行中锁定编辑
+  // 允许 steering 时运行中仍可编辑，但附件操作保持锁定。
   useEffect(() => {
-    editor?.setEditable(!running && !disabled && !waitingForAnswer);
-  }, [disabled, editor, running, waitingForAnswer]);
+    editor?.setEditable((!running || allowSteering) && !disabled && !waitingForAnswer);
+  }, [allowSteering, disabled, editor, running, waitingForAnswer]);
 
   useImperativeHandle(ref, () => ({
     setText: (text: string) => {
@@ -225,16 +230,30 @@ export function Composer({
           </span>
         </div>
         {running ? (
-          <button
-            type="button"
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-danger/10 text-danger transition-all duration-200 hover:bg-danger/20 hover:shadow-sm active:scale-95"
-            title="停止生成"
-            aria-label="停止生成"
-            onClick={onCancel}
-            disabled={disabled}
-          >
-            <Square size={12} className="fill-current" />
-          </button>
+          <div className="flex items-center gap-1">
+            {allowSteering ? (
+              <button
+                type="button"
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-brand text-white transition-all duration-200 active:scale-95 disabled:opacity-40"
+                disabled={empty || disabled}
+                title="追加指令"
+                aria-label="追加指令"
+                onClick={() => submitRef.current()}
+              >
+                <ArrowUp size={14} />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-danger/10 text-danger transition-all duration-200 hover:bg-danger/20 hover:shadow-sm active:scale-95"
+              title="停止生成"
+              aria-label="停止生成"
+              onClick={onCancel}
+              disabled={disabled}
+            >
+              <Square size={12} className="fill-current" />
+            </button>
+          </div>
         ) : (
           <button
             type="button"

@@ -4,6 +4,7 @@
 
 import type { ChatMessage } from '@/lib/domain/chat';
 import type { ProviderStateView, SearchTaskParams, TaskSnapshot } from '@/lib/domain/types';
+import type { AgentRunSnapshot } from '@/lib/generation/registry';
 import type { McpSettingsView } from '@/lib/mcp/types';
 import type { AgentContextView } from '@/lib/memory/types';
 import type { SkillSettingsView } from '@/lib/skills/types';
@@ -17,6 +18,12 @@ export type ClientMessage =
   | { type: 'subscribe' }
   /** 流式对话：发送完整会话历史（由侧边栏持有并持久化，SW 无状态更健壮）。 */
   | { type: 'chat'; requestId: string; conversationId: string; messages: ChatMessage[] }
+  /** 新运行时协议；chat 保留为兼容别名。 */
+  | { type: 'run:start'; runId: string; conversationId: string; messages: ChatMessage[] }
+  | { type: 'run:steer'; runId: string; conversationId: string; content: string }
+  | { type: 'run:retry'; runId: string; conversationId: string; messages: ChatMessage[] }
+  | { type: 'run:cancel'; runId: string; conversationId: string }
+  | { type: 'run:resume'; runId: string; conversationId: string; messages: ChatMessage[] }
   /** 主回复完成后的可选低成本标题生成；只返回短标题，不接触本地存储。 */
   | {
       type: 'summarize_conversation';
@@ -58,6 +65,7 @@ export type ClientMessage =
 export type ServerMessage =
   | { type: 'connected' }
   | { type: 'chat_state'; running: boolean; requestId?: string }
+  | { type: 'run_state'; runs: AgentRunSnapshot[] }
   /** 任务快照全量广播（phase/进度/已采集岗位）。 */
   | { type: 'snapshot'; snapshot: TaskSnapshot }
   /** parse_only 的结果：解析出的参数，交 UI 渲染成可编辑任务卡片。 */
@@ -65,14 +73,14 @@ export type ServerMessage =
   /** 一条面向用户的日志/提示（追加到对话流）。 */
   | { type: 'log'; level: 'info' | 'warn' | 'error'; text: string }
   /** 流式对话开始：UI 追加一条空的 assistant 消息占位（messageId 用于对齐）。 */
-  | { type: 'stream_start'; requestId: string; message: ChatMessage }
+  | { type: 'stream_start'; requestId: string; conversationId?: string; message: ChatMessage }
   /**
    * 每次发送当前 assistant 全量快照，而不是让 UI 依赖从未丢失过任何 delta。
    * 断线重连后可以安全地用同一 message.id 覆盖恢复。
    */
-  | { type: 'stream_update'; requestId: string; message: ChatMessage }
-  | { type: 'stream_end'; requestId: string; message: ChatMessage }
-  | { type: 'stream_error'; requestId: string; message: ChatMessage }
+  | { type: 'stream_update'; requestId: string; conversationId?: string; message: ChatMessage }
+  | { type: 'stream_end'; requestId: string; conversationId?: string; message: ChatMessage }
+  | { type: 'stream_error'; requestId: string; conversationId?: string; message: ChatMessage }
   | { type: 'conversation_title'; requestId: string; conversationId: string; title: string }
   | { type: 'conversation_title_error'; requestId: string; conversationId: string }
   /** 出错。 */
@@ -99,6 +107,22 @@ export function isClientMessage(value: unknown): value is ClientMessage {
         isBoundedString(value.conversationId, 128) &&
         isChatHistory(value.messages)
       );
+    case 'run:start':
+    case 'run:retry':
+    case 'run:resume':
+      return (
+        isBoundedString(value.runId, 128) &&
+        isBoundedString(value.conversationId, 128) &&
+        isChatHistory(value.messages)
+      );
+    case 'run:steer':
+      return (
+        isBoundedString(value.runId, 128) &&
+        isBoundedString(value.conversationId, 128) &&
+        isBoundedString(value.content, 20_000)
+      );
+    case 'run:cancel':
+      return isBoundedString(value.runId, 128) && isBoundedString(value.conversationId, 128);
     case 'page_permission_result':
       return (
         isBoundedString(value.requestId, 128) &&

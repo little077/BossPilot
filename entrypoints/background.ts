@@ -4,12 +4,17 @@ import { redact } from '@/lib/diagnostics/redaction';
 import { buildDiagnosticsReport, diagnosticsFileName } from '@/lib/diagnostics/report';
 import type { ChatMessage } from '@/lib/domain/chat';
 import type { PageTurnSnapshot } from '@/lib/domain/types';
+import { compactGenerationContext } from '@/lib/generation/compaction';
 import { generateConversationTitle } from '@/lib/generation/conversation-title';
 import { GenerationError, sanitizeGenerationError } from '@/lib/generation/errors';
 import { type ChatGenerationEvent, ChatGenerationManager } from '@/lib/generation/manager';
 import { createPiGenerationAdapter } from '@/lib/generation/pi-adapter';
-import { resolveActiveGenerationTarget } from '@/lib/generation/resolve';
-import type { GenerationToolExecutionOutcome } from '@/lib/generation/types';
+import { AgentRunRegistry, createChromeRunRegistryStore } from '@/lib/generation/registry';
+import { resolveActiveGenerationTarget, resolveGenerationTarget } from '@/lib/generation/resolve';
+import type {
+  GenerationToolExecutionOutcome,
+  GenerationToolExecutionResult,
+} from '@/lib/generation/types';
 import {
   AGENT_PORT_NAME,
   type AgentContextCommandResponse,
@@ -34,6 +39,7 @@ import {
   clearPendingPageTurn,
   createPendingAgentTurn,
   historyMatchesPending,
+  listPendingPageTurns,
   loadPendingPageTurn,
   savePendingPageTurn,
 } from '@/lib/page/pending';
@@ -43,6 +49,11 @@ import { ProviderService } from '@/lib/providers/service';
 import { buildSkillCatalogPrompt } from '@/lib/skills/prompt';
 import { SkillStore } from '@/lib/skills/store';
 import { createTrustedStorageGate } from '@/lib/storage/access';
+import {
+  loadConversationRuntimeSettings,
+  saveConversationRuntimeSettings,
+  saveRunCheckpoint,
+} from '@/lib/storage/db';
 import { ASK_USER_TOOL, askUser } from '@/lib/tools/ask-user';
 import { BROWSER_ACTION_TOOL, executeBrowserAction } from '@/lib/tools/browser-action';
 import { LOAD_SKILL_TOOL, SkillLoadCoordinator } from '@/lib/tools/load-skill';
@@ -56,6 +67,7 @@ import {
 import { READ_CURRENT_PAGE_TOOL, readCurrentPage } from '@/lib/tools/read-current-page';
 
 interface ActiveDiagnostic {
+  conversationId: string;
   requestId: string;
   messageCount: number;
   promptChars: number;
@@ -85,134 +97,203 @@ export default defineBackground({
     const cancelledPendingRequests = new Set<string>();
     const approvedToolCalls = new Set<string>();
     const latestUserText = (requestId: string) => diagnosticInputs.get(requestId) ?? '';
-    let activeDiagnostic: ActiveDiagnostic | null = null;
+    const activeDiagnostics = new Map<string, ActiveDiagnostic>();
 
     const generationAdapter = createPiGenerationAdapter();
     const pageInteraction = new PageInteractionCoordinator();
     const titleControllers = new Map<string, { controller: AbortController; requestId: string }>();
 
-    const generationManager = new ChatGenerationManager({
-      adapter: generationAdapter,
-      systemPrompt: async () => composeChatSystemPrompt(skillStore, memoryStore),
-      maxOutputTokens: 8_192,
-      maxAgentTurns: 200,
-      maxConsecutiveIdenticalToolCalls: 3,
-      tools: async () => [
-        READ_CURRENT_PAGE_TOOL,
-        BROWSER_ACTION_TOOL,
-        OBSERVE_PAGE_TOOL,
-        OBSERVE_VISUAL_PAGE_TOOL,
-        INTERACT_PAGE_TOOL,
-        LOAD_SKILL_TOOL,
-        SEARCH_MEMORY_TOOL,
-        SAVE_MEMORY_TOOL,
-        ...(await mcpService.generationTools()),
-        ASK_USER_TOOL,
-      ],
-      executeTool: async (call, signal, requestId, reportProgress, context) => {
-        recorder.step('chat', 'tool', call.name);
-        let result: GenerationToolExecutionOutcome;
-        switch (call.name) {
-          case 'browser_action':
-            result = await executeBrowserAction(
-              call,
-              pageSnapshots.get(requestId) ?? null,
-              latestUserText(requestId),
-              signal,
-              reportProgress,
-            );
-            if (!('deferred' in result) && !result.isError) {
-              const nextSnapshot =
-                result.nextPageSnapshot ?? (await capturePageTurnSnapshot().catch(() => null));
-              pageSnapshots.set(requestId, nextSnapshot);
+    const runRegistry = new AgentRunRegistry(
+      (conversationId, publish) => {
+        const generationManager = new ChatGenerationManager({
+          adapter: generationAdapter,
+          systemPrompt: async () => composeChatSystemPrompt(skillStore, memoryStore),
+          maxOutputTokens: 8_192,
+          generationSettings: async () => {
+            const settings = await loadConversationRuntimeSettings(conversationId);
+            return settings
+              ? {
+                  maxOutputTokens: settings.maxOutputTokens,
+                  thinkingLevel: settings.thinkingLevel,
+                }
+              : {};
+          },
+          maxAgentTurns: 200,
+          maxConsecutiveIdenticalToolCalls: 3,
+          contextWindowTokens: 128_000,
+          compactionThreshold: 0.8,
+          compactMessages: (target, messages, signal) =>
+            compactGenerationContext(generationAdapter, target, messages, signal),
+          tools: async () => [
+            READ_CURRENT_PAGE_TOOL,
+            BROWSER_ACTION_TOOL,
+            OBSERVE_PAGE_TOOL,
+            OBSERVE_VISUAL_PAGE_TOOL,
+            INTERACT_PAGE_TOOL,
+            LOAD_SKILL_TOOL,
+            SEARCH_MEMORY_TOOL,
+            SAVE_MEMORY_TOOL,
+            ...(await mcpService.generationTools()),
+            ASK_USER_TOOL,
+          ],
+          executeTool: async (call, signal, requestId, reportProgress, context) => {
+            recorder.step('chat', 'tool', call.name);
+            let result: GenerationToolExecutionOutcome;
+            switch (call.name) {
+              case 'browser_action':
+                result = await executeBrowserAction(
+                  call,
+                  pageSnapshots.get(requestId) ?? null,
+                  latestUserText(requestId),
+                  signal,
+                  reportProgress,
+                );
+                if (!('deferred' in result) && !result.isError) {
+                  const nextSnapshot =
+                    result.nextPageSnapshot ?? (await capturePageTurnSnapshot().catch(() => null));
+                  pageSnapshots.set(requestId, nextSnapshot);
+                }
+                break;
+              case 'read_current_page':
+                result = await readCurrentPage(pageSnapshots.get(requestId) ?? null, signal);
+                break;
+              case 'observe_page':
+                result = await pageInteraction.observe(
+                  call,
+                  pageSnapshots.get(requestId) ?? null,
+                  signal,
+                  requestId,
+                );
+                break;
+              case 'observe_visual_page':
+                result = await pageInteraction.observeVisual(
+                  call,
+                  pageSnapshots.get(requestId) ?? null,
+                  signal,
+                  requestId,
+                  approvedToolCalls.delete(call.id),
+                  reportProgress,
+                  context,
+                );
+                break;
+              case 'interact_page':
+                result = await pageInteraction.interact(
+                  call,
+                  pageSnapshots.get(requestId) ?? null,
+                  signal,
+                  requestId,
+                  approvedToolCalls.delete(call.id),
+                  reportProgress,
+                );
+                break;
+              case 'load_skill':
+                result = await skillLoader.execute(call, requestId, signal);
+                break;
+              case 'search_memory':
+              case 'save_memory':
+                result = await memoryTools.execute(call, latestUserText(requestId), signal);
+                break;
+              case 'ask_user':
+                result = askUser(call);
+                break;
+              default:
+                result = isMcpToolName(call.name)
+                  ? await mcpService.execute(call, approvedToolCalls.delete(call.id), signal)
+                  : {
+                      isError: true,
+                      statusText: '工具禁用',
+                      content: `未开放${call.name}`,
+                    };
             }
-            break;
-          case 'read_current_page':
-            result = await readCurrentPage(pageSnapshots.get(requestId) ?? null, signal);
-            break;
-          case 'observe_page':
-            result = await pageInteraction.observe(
-              call,
-              pageSnapshots.get(requestId) ?? null,
-              signal,
-              requestId,
+            if ('deferred' in result) return result;
+            if (result.nextPageSnapshot) {
+              pageSnapshots.set(requestId, result.nextPageSnapshot);
+            }
+            recorder.step(
+              'chat',
+              result.isError ? 'error' : 'tool',
+              result.statusText,
+              result.detail,
             );
-            break;
-          case 'observe_visual_page':
-            result = await pageInteraction.observeVisual(
-              call,
-              pageSnapshots.get(requestId) ?? null,
-              signal,
-              requestId,
-              approvedToolCalls.delete(call.id),
-              reportProgress,
-              context,
+            return result;
+          },
+          onToolDeferred: async (generation, deferred) => {
+            const snapshot = pageSnapshots.get(generation.requestId);
+            const history = chatHistories.get(generation.requestId);
+            if (!history || (deferred.kind === 'page_permission' && !snapshot)) {
+              throw new GenerationError('INVALID_RESPONSE', '恢复失败，请重试', false);
+            }
+            await savePendingPageTurn(
+              createPendingAgentTurn(
+                generation,
+                snapshot ?? null,
+                history,
+                deferred.kind,
+                Date.now(),
+                conversationId,
+              ),
             );
-            break;
-          case 'interact_page':
-            result = await pageInteraction.interact(
-              call,
-              pageSnapshots.get(requestId) ?? null,
-              signal,
-              requestId,
-              approvedToolCalls.delete(call.id),
-              reportProgress,
+          },
+          resolveTarget: async () => {
+            await requireTrustedStorage();
+            const target = await resolveActiveGenerationTarget();
+            const activeDiagnostic = [...activeDiagnostics.values()].find(
+              (item) => item.conversationId === conversationId && !item.targetResolved,
             );
-            break;
-          case 'load_skill':
-            result = await skillLoader.execute(call, requestId, signal);
-            break;
-          case 'search_memory':
-          case 'save_memory':
-            result = await memoryTools.execute(call, latestUserText(requestId), signal);
-            break;
-          case 'ask_user':
-            result = askUser(call);
-            break;
-          default:
-            result = isMcpToolName(call.name)
-              ? await mcpService.execute(call, approvedToolCalls.delete(call.id), signal)
-              : {
-                  isError: true,
-                  statusText: '工具禁用',
-                  content: `未开放${call.name}`,
-                };
-        }
-        if ('deferred' in result) return result;
-        if (result.nextPageSnapshot) {
-          pageSnapshots.set(requestId, result.nextPageSnapshot);
-        }
-        recorder.step('chat', result.isError ? 'error' : 'tool', result.statusText, result.detail);
-        return result;
+            if (activeDiagnostic) {
+              activeDiagnostic.targetResolved = true;
+              recorder.beginRun('chat', latestUserText(activeDiagnostic.requestId), {
+                model: target.identity.modelId,
+                baseUrl: target.baseUrl,
+              });
+            }
+            return target;
+          },
+        });
+        generationManager.subscribe((event) => {
+          publish(event);
+          broadcast(chatPorts, generationEventToServerMessage(event, conversationId));
+          finishDiagnostics(event);
+          if (event.type === 'end' || event.type === 'error') {
+            const historyMessageIds = chatHistories.get(event.requestId)?.map(({ id }) => id) ?? [];
+            void saveRunCheckpoint({
+              id: `checkpoint-${crypto.randomUUID()}`,
+              runId: event.requestId,
+              conversationId,
+              historyMessageIds,
+              phase:
+                event.message.status === 'cancelled'
+                  ? 'interrupted'
+                  : event.type === 'error'
+                    ? 'interrupted'
+                    : 'stable',
+              createdAt: Date.now(),
+            }).catch(() => void 0);
+          }
+          if (event.type === 'start' && event.message.modelIdentity) {
+            void loadConversationRuntimeSettings(conversationId)
+              .then(async (settings) => {
+                if (!settings) {
+                  await saveConversationRuntimeSettings({
+                    conversationId,
+                    modelIdentity: event.message.modelIdentity,
+                    thinkingLevel: 'off',
+                    contextWindowTokens: 128_000,
+                    maxOutputTokens: 8_192,
+                    updatedAt: Date.now(),
+                  });
+                }
+              })
+              .catch(() => void 0);
+          }
+        });
+        return generationManager;
       },
-      onToolDeferred: async (generation, deferred) => {
-        const snapshot = pageSnapshots.get(generation.requestId);
-        const history = chatHistories.get(generation.requestId);
-        if (!history || (deferred.kind === 'page_permission' && !snapshot)) {
-          throw new GenerationError('INVALID_RESPONSE', '恢复失败，请重试', false);
-        }
-        await savePendingPageTurn(
-          createPendingAgentTurn(generation, snapshot ?? null, history, deferred.kind),
-        );
-      },
-      resolveTarget: async () => {
-        await requireTrustedStorage();
-        const target = await resolveActiveGenerationTarget();
-        if (activeDiagnostic && !activeDiagnostic.targetResolved) {
-          activeDiagnostic.targetResolved = true;
-          recorder.beginRun('chat', latestUserText(activeDiagnostic.requestId), {
-            model: target.identity.modelId,
-            baseUrl: target.baseUrl,
-          });
-        }
-        return target;
-      },
-    });
-
-    generationManager.subscribe((event) => {
-      broadcast(chatPorts, generationEventToServerMessage(event));
-      finishDiagnostics(event);
-    });
+      createChromeRunRegistryStore(),
+      2,
+    );
+    void runRegistry.restore();
+    runRegistry.subscribe((runs) => broadcast(chatPorts, { type: 'run_state', runs }));
 
     chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
       if (!isProviderCommand(raw) || !isTrustedExtensionPage(sender)) return;
@@ -357,45 +438,64 @@ export default defineBackground({
         switch (message.type) {
           case 'subscribe': {
             send({ type: 'snapshot', snapshot: orchestrator.getSnapshot() });
-            const chatSnapshot = generationManager.getSnapshot();
-            if (chatSnapshot) send(generationEventToServerMessage(chatSnapshot));
-            const pending = await loadPendingPageTurn();
-            if (!generationManager.isRunning && pending?.status === 'resuming') {
-              generationManager.failDeferred(
-                pending.generation,
-                new GenerationError(
-                  'NETWORK_ERROR',
-                  '授权后的恢复过程被浏览器中断。为避免重复请求模型或读错页面，请重新发送问题。',
-                  true,
-                ),
-              );
-              await clearPendingPageTurn(pending.requestId);
-            } else if (
-              !generationManager.isRunning &&
-              (pending?.status === 'awaiting_permission' || pending?.status === 'awaiting_user')
-            ) {
+            send({ type: 'run_state', runs: runRegistry.snapshots() });
+            for (const replay of runRegistry.replayEvents()) {
+              send(generationEventToServerMessage(replay.event, replay.conversationId));
+            }
+            const pendingTurns = await listPendingPageTurns();
+            for (const pending of pendingTurns) {
+              if (pending.status === 'resuming') {
+                runRegistry
+                  .managerForConversation(pending.conversationId ?? '')
+                  .failDeferred(
+                    pending.generation,
+                    new GenerationError(
+                      'NETWORK_ERROR',
+                      '授权后的恢复过程被浏览器中断。为避免重复请求模型或读错页面，请重试本轮。',
+                      true,
+                    ),
+                  );
+                await clearPendingPageTurn(pending.requestId);
+                continue;
+              }
               send({
                 type: 'stream_update',
                 requestId: pending.requestId,
+                ...(pending.conversationId ? { conversationId: pending.conversationId } : {}),
                 message: pending.generation.message,
               });
             }
-            const awaitingRequestId =
-              !generationManager.isRunning &&
-              (pending?.status === 'awaiting_permission' || pending?.status === 'awaiting_user')
-                ? pending.requestId
-                : undefined;
+            const activeRun = runRegistry
+              .snapshots()
+              .find((run) => run.status === 'running' || run.status === 'waiting_user');
             send({
               type: 'chat_state',
-              running: generationManager.isRunning || Boolean(awaitingRequestId),
-              ...(generationManager.currentRequestId || awaitingRequestId
-                ? { requestId: generationManager.currentRequestId ?? awaitingRequestId }
-                : {}),
+              running: Boolean(activeRun),
+              ...(activeRun ? { requestId: activeRun.requestId } : {}),
             });
             break;
           }
           case 'chat':
-            await startChat(message.requestId, message.messages);
+            await startChat(message.conversationId, message.requestId, message.messages);
+            break;
+          case 'run:start':
+            await startChat(message.conversationId, message.runId, message.messages);
+            break;
+          case 'run:steer':
+            if (!runRegistry.steer(message.runId, message.content)) {
+              send({
+                type: 'error',
+                requestId: message.runId,
+                text: '该任务已经结束，无法追加指令。',
+              });
+            }
+            break;
+          case 'run:retry':
+          case 'run:resume':
+            await startChat(message.conversationId, message.runId, message.messages);
+            break;
+          case 'run:cancel':
+            runRegistry.stop(message.runId);
             break;
           case 'summarize_conversation':
             await summarizeConversation(
@@ -423,14 +523,16 @@ export default defineBackground({
           }
           case 'cancel': {
             if (message.scope !== 'task') {
-              const requestId = message.requestId ?? generationManager.currentRequestId;
-              if (requestId && !generationManager.stop(requestId)) {
+              const requestId = message.requestId;
+              if (requestId && !runRegistry.stop(requestId)) {
                 const pending = await claimPendingPageTurn(requestId);
                 if (pending) {
                   await clearPendingPageTurn(requestId);
-                  generationManager.cancelDeferred(pending.generation);
+                  runRegistry
+                    .managerForConversation(pending.conversationId ?? '')
+                    .cancelDeferred(pending.generation);
                 } else {
-                  const resuming = await loadPendingPageTurn();
+                  const resuming = await loadPendingPageTurn(requestId);
                   if (resuming?.requestId === requestId && resuming.status === 'resuming') {
                     cancelledPendingRequests.add(requestId);
                   }
@@ -441,9 +543,8 @@ export default defineBackground({
             break;
           }
           case 'clear_chat':
-            generationManager.clearReplay();
-            await clearPendingPageTurn();
-            if (!generationManager.isRunning) recorder.clear();
+            runRegistry.clearReplay();
+            if (!runRegistry.snapshots().some((run) => run.status === 'running')) recorder.clear();
             break;
           case 'resume_captcha':
             orchestrator.resumeCaptcha();
@@ -481,7 +582,10 @@ export default defineBackground({
 
       try {
         await requireTrustedStorage();
-        const target = await resolveActiveGenerationTarget();
+        const runtimeSettings = await loadConversationRuntimeSettings(conversationId).catch(
+          () => null,
+        );
+        const target = await resolveGenerationTarget(runtimeSettings?.modelIdentity);
         const title = await generateConversationTitle(
           generationAdapter,
           target,
@@ -502,12 +606,19 @@ export default defineBackground({
       }
     }
 
-    async function startChat(requestId: string, history: ChatMessage[]): Promise<void> {
-      if (generationManager.isRunning || (await loadPendingPageTurn())) {
+    async function startChat(
+      conversationId: string,
+      requestId: string,
+      history: ChatMessage[],
+    ): Promise<void> {
+      const pendingForConversation = (await listPendingPageTurns()).find(
+        (turn) => turn.conversationId === conversationId,
+      );
+      if (runRegistry.runningForConversation(conversationId) || pendingForConversation) {
         broadcast(chatPorts, {
           type: 'error',
           requestId,
-          text: '当前已有回复正在生成，请先停止后再重试。',
+          text: '该会话已有回复正在生成；你可以追加指令，或先停止后再重试。',
         });
         return;
       }
@@ -519,7 +630,8 @@ export default defineBackground({
       const lastUser = [...history].reverse().find((message) => message.role === 'user');
       diagnosticInputs.set(requestId, lastUser?.content ?? '');
       const chatSystemPrompt = await composeChatSystemPrompt(skillStore, memoryStore);
-      activeDiagnostic = {
+      activeDiagnostics.set(requestId, {
+        conversationId,
         requestId,
         messageCount: history.length + 1,
         promptChars:
@@ -531,12 +643,22 @@ export default defineBackground({
         ],
         startedAt: Date.now(),
         targetResolved: false,
-      };
+      });
+      await saveRunCheckpoint({
+        id: `checkpoint-${crypto.randomUUID()}`,
+        runId: requestId,
+        conversationId,
+        historyMessageIds: history.map(({ id }) => id),
+        phase: 'queued',
+        createdAt: Date.now(),
+      });
 
       try {
-        await generationManager.start(requestId, pageContextHistory(history, snapshot));
+        await runRegistry.enqueue(conversationId, requestId, async (generationManager) => {
+          await generationManager.start(requestId, pageContextHistory(history, snapshot));
+        });
       } catch (error) {
-        activeDiagnostic = null;
+        activeDiagnostics.delete(requestId);
         // 解析阶段还没有 stream_start；重连窗口可能已通过 chat_state 绑定本 requestId，
         // 因此必须广播失败，不能只通知最初发起请求的 Port。
         broadcast(chatPorts, {
@@ -545,7 +667,7 @@ export default defineBackground({
           text: sanitizeGenerationError(error).message,
         });
       } finally {
-        const pending = await loadPendingPageTurn().catch(() => null);
+        const pending = await loadPendingPageTurn(requestId).catch(() => null);
         if (pending?.requestId !== requestId)
           await pageInteraction.clear(requestId).catch(() => void 0);
         if (pending?.requestId !== requestId) skillLoader.clear(requestId);
@@ -562,11 +684,13 @@ export default defineBackground({
     ): Promise<void> {
       const pending = await claimPendingPageTurn(requestId);
       if (!pending) {
-        const current = await loadPendingPageTurn();
-        const replay = generationManager.getSnapshot();
+        const current = await loadPendingPageTurn(requestId);
+        const replay = runRegistry
+          .replayEvents()
+          .find((item) => item.event.requestId === requestId)?.event;
         if (
           (current?.requestId === requestId && current.status === 'resuming') ||
-          generationManager.currentRequestId === requestId ||
+          runRegistry.managerForRequest(requestId)?.currentRequestId === requestId ||
           (replay?.requestId === requestId && replay.message.status !== 'streaming')
         ) {
           return;
@@ -578,8 +702,10 @@ export default defineBackground({
         });
         return;
       }
+      const conversationId = pending.conversationId ?? '';
+      const deferredManager = runRegistry.managerForConversation(conversationId);
       if (pending.kind !== 'page_permission' || !pending.snapshot) {
-        generationManager.failDeferred(
+        deferredManager.failDeferred(
           pending.generation,
           new GenerationError(
             'INVALID_RESPONSE',
@@ -593,12 +719,12 @@ export default defineBackground({
 
       const history = messages.filter((message) => message.id !== pending.generation.message.id);
       if (cancelledPendingRequests.delete(requestId)) {
-        generationManager.cancelDeferred(pending.generation);
+        deferredManager.cancelDeferred(pending.generation);
         await clearPendingPageTurn(requestId);
         return;
       }
       if (!historyMatchesPending(pending, history)) {
-        generationManager.failDeferred(
+        deferredManager.failDeferred(
           pending.generation,
           new GenerationError(
             'INVALID_RESPONSE',
@@ -624,7 +750,7 @@ export default defineBackground({
         const permissionAvailable =
           granted && Boolean(pattern) && (await hasExactPageOriginAccess(pattern ?? ''));
         if (cancelledPendingRequests.delete(requestId)) {
-          generationManager.cancelDeferred(pending.generation);
+          deferredManager.cancelDeferred(pending.generation);
           return;
         }
         const permissionKind = pendingActivity?.permissionKind ?? 'read';
@@ -650,14 +776,16 @@ export default defineBackground({
         if (permissionAvailable && pending.generation.toolCall.name === 'observe_visual_page') {
           approvedToolCalls.add(pending.generation.toolCall.id);
         }
-        await generationManager.resumeDeferred(
-          pending.generation,
-          pageContextHistory(history, pending.snapshot),
-          override,
-        );
+        await runRegistry.enqueue(conversationId, requestId, async (generationManager) => {
+          await generationManager.resumeDeferred(
+            pending.generation,
+            pageContextHistory(history, pending.snapshot),
+            override,
+          );
+        });
       } finally {
         approvedToolCalls.delete(pending.generation.toolCall.id);
-        const nextPending = await loadPendingPageTurn().catch(() => null);
+        const nextPending = await loadPendingPageTurn(requestId).catch(() => null);
         if (nextPending?.requestId !== requestId) {
           await pageInteraction.clear(requestId).catch(() => void 0);
           skillLoader.clear(requestId);
@@ -676,11 +804,13 @@ export default defineBackground({
     ): Promise<void> {
       const pending = await claimPendingPageTurn(requestId);
       if (!pending) {
-        const current = await loadPendingPageTurn();
-        const replay = generationManager.getSnapshot();
+        const current = await loadPendingPageTurn(requestId);
+        const replay = runRegistry
+          .replayEvents()
+          .find((item) => item.event.requestId === requestId)?.event;
         if (
           (current?.requestId === requestId && current.status === 'resuming') ||
-          generationManager.currentRequestId === requestId ||
+          runRegistry.managerForRequest(requestId)?.currentRequestId === requestId ||
           (replay?.requestId === requestId && replay.message.status !== 'streaming')
         ) {
           return;
@@ -692,8 +822,10 @@ export default defineBackground({
         });
         return;
       }
+      const conversationId = pending.conversationId ?? '';
+      const deferredManager = runRegistry.managerForConversation(conversationId);
       if (pending.kind !== 'user_input') {
-        generationManager.failDeferred(
+        deferredManager.failDeferred(
           pending.generation,
           new GenerationError(
             'INVALID_RESPONSE',
@@ -707,12 +839,12 @@ export default defineBackground({
 
       const history = messages.filter((message) => message.id !== pending.generation.message.id);
       if (cancelledPendingRequests.delete(requestId)) {
-        generationManager.cancelDeferred(pending.generation);
+        deferredManager.cancelDeferred(pending.generation);
         await clearPendingPageTurn(requestId);
         return;
       }
       if (!historyMatchesPending(pending, history)) {
-        generationManager.failDeferred(
+        deferredManager.failDeferred(
           pending.generation,
           new GenerationError(
             'INVALID_RESPONSE',
@@ -738,16 +870,21 @@ export default defineBackground({
       diagnosticInputs.set(requestId, lastUser?.content ?? '');
       await clearPendingPageTurn(requestId);
       try {
+        const resumeDeferred = async (override?: GenerationToolExecutionResult) => {
+          await runRegistry.enqueue(conversationId, requestId, async (generationManager) => {
+            await generationManager.resumeDeferred(pending.generation, history, override);
+          });
+        };
         if (cancelledPendingRequests.delete(requestId)) {
-          generationManager.cancelDeferred(pending.generation);
+          deferredManager.cancelDeferred(pending.generation);
           return;
         }
         if (pending.generation.toolCall.name === 'interact_page') {
           if (normalizedAnswer === '确认执行') {
             approvedToolCalls.add(pending.generation.toolCall.id);
-            await generationManager.resumeDeferred(pending.generation, history);
+            await resumeDeferred();
           } else {
-            await generationManager.resumeDeferred(pending.generation, history, {
+            await resumeDeferred({
               isError: true,
               statusText: '用户未确认页面操作',
               detail: '用户选择不执行这次可能产生外部影响的页面操作。',
@@ -758,9 +895,9 @@ export default defineBackground({
         } else if (pending.generation.toolCall.name === 'observe_visual_page') {
           if (normalizedAnswer === '仅本次允许') {
             approvedToolCalls.add(pending.generation.toolCall.id);
-            await generationManager.resumeDeferred(pending.generation, history);
+            await resumeDeferred();
           } else {
-            await generationManager.resumeDeferred(pending.generation, history, {
+            await resumeDeferred({
               isError: true,
               statusText: '用户取消视觉观察',
               detail: '没有截取或发送当前页面截图。',
@@ -771,9 +908,9 @@ export default defineBackground({
         } else if (isMcpToolName(pending.generation.toolCall.name)) {
           if (normalizedAnswer === '确认执行') {
             approvedToolCalls.add(pending.generation.toolCall.id);
-            await generationManager.resumeDeferred(pending.generation, history);
+            await resumeDeferred();
           } else {
-            await generationManager.resumeDeferred(pending.generation, history, {
+            await resumeDeferred({
               isError: true,
               statusText: '用户取消 MCP 外部操作',
               detail: '用户没有确认这次 MCP 操作。',
@@ -781,7 +918,7 @@ export default defineBackground({
             });
           }
         } else {
-          await generationManager.resumeDeferred(pending.generation, history, {
+          await resumeDeferred({
             isError: false,
             statusText: '已收到用户回答',
             detail: normalizedAnswer.slice(0, 240),
@@ -795,7 +932,7 @@ export default defineBackground({
         }
       } finally {
         approvedToolCalls.delete(pending.generation.toolCall.id);
-        const nextPending = await loadPendingPageTurn().catch(() => null);
+        const nextPending = await loadPendingPageTurn(requestId).catch(() => null);
         if (nextPending?.requestId !== requestId) {
           await pageInteraction.clear(requestId).catch(() => void 0);
           skillLoader.clear(requestId);
@@ -809,7 +946,7 @@ export default defineBackground({
 
     function finishDiagnostics(event: ChatGenerationEvent): void {
       if (event.type !== 'end' && event.type !== 'error') return;
-      const diagnostic = activeDiagnostic;
+      const diagnostic = activeDiagnostics.get(event.requestId);
       if (!diagnostic || diagnostic.requestId !== event.requestId) return;
 
       const usage = event.message.usage;
@@ -835,7 +972,7 @@ export default defineBackground({
       } else {
         recorder.finishRun('chat', 'completed');
       }
-      activeDiagnostic = null;
+      activeDiagnostics.delete(event.requestId);
     }
 
     async function downloadDiagnostics(): Promise<void> {
@@ -851,16 +988,25 @@ export default defineBackground({
   },
 });
 
-function generationEventToServerMessage(event: ChatGenerationEvent): ServerMessage {
+function generationEventToServerMessage(
+  event: ChatGenerationEvent,
+  conversationId?: string,
+): ServerMessage {
+  const scope = conversationId ? { conversationId } : {};
   switch (event.type) {
     case 'start':
-      return { type: 'stream_start', requestId: event.requestId, message: event.message };
+      return { type: 'stream_start', requestId: event.requestId, ...scope, message: event.message };
     case 'update':
-      return { type: 'stream_update', requestId: event.requestId, message: event.message };
+      return {
+        type: 'stream_update',
+        requestId: event.requestId,
+        ...scope,
+        message: event.message,
+      };
     case 'end':
-      return { type: 'stream_end', requestId: event.requestId, message: event.message };
+      return { type: 'stream_end', requestId: event.requestId, ...scope, message: event.message };
     case 'error':
-      return { type: 'stream_error', requestId: event.requestId, message: event.message };
+      return { type: 'stream_error', requestId: event.requestId, ...scope, message: event.message };
   }
 }
 

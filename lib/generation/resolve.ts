@@ -1,6 +1,7 @@
 // ─── 活动生成目标解析 ───
 // 职责：仅在 Background 的可信上下文中，把已选模型和私密凭据解析为一次生成调用的目标。
 
+import type { ModelIdentity } from '@/lib/domain/types';
 import { GenerationError } from '@/lib/generation/errors';
 import { knownModelSupportsImageInput } from '@/lib/generation/pi-adapter';
 import type { ResolvedGenerationTarget } from '@/lib/generation/types';
@@ -23,11 +24,18 @@ export interface ResolveActiveGenerationTargetDependencies {
 export async function resolveActiveGenerationTarget(
   dependencies: Partial<ResolveActiveGenerationTargetDependencies> = {},
 ): Promise<ResolvedGenerationTarget> {
+  return resolveGenerationTarget(undefined, dependencies);
+}
+
+export async function resolveGenerationTarget(
+  requestedIdentity?: ModelIdentity,
+  dependencies: Partial<ResolveActiveGenerationTargetDependencies> = {},
+): Promise<ResolvedGenerationTarget> {
   const store = dependencies.store ?? createChromeProviderStateStore();
   const containsHostPermission =
     dependencies.containsHostPermission ?? containsProviderHostPermission;
   const state = await store.load();
-  const identity = state.activeModel;
+  const identity = requestedIdentity ?? state.activeModel;
 
   if (!identity) {
     throw new GenerationError('NO_ACTIVE_MODEL', '请先在模型设置中选择一个模型。');
@@ -39,7 +47,7 @@ export async function resolveActiveGenerationTarget(
     throw new GenerationError('PROVIDER_NOT_CONFIGURED', '当前模型的厂商配置不存在，请重新配置。');
   }
 
-  if (connection.selectedModelId !== identity.modelId) {
+  if (!requestedIdentity && connection.selectedModelId !== identity.modelId) {
     throw new GenerationError('MODEL_NOT_FOUND', '当前模型选择已失效，请重新选择模型。');
   }
 

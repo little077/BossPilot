@@ -5,12 +5,16 @@ import type { ChatMessage } from '@/lib/domain/chat';
 import {
   createConversation,
   db,
+  latestRunCheckpoint,
+  loadConversationRuntimeSettings,
   loadConversations,
   loadMessages,
   markConversationRead,
   renameConversation,
   saveAiConversationTitle,
+  saveConversationRuntimeSettings,
   saveMessage,
+  saveRunCheckpoint,
 } from '@/lib/storage/db';
 
 beforeEach(async () => {
@@ -125,5 +129,42 @@ describe('conversation database', () => {
       { conversation },
     );
     await expect(renameConversation(conversation.id, '   ')).rejects.toThrow('不能为空');
+  });
+
+  it('persists isolated runtime settings and the latest recovery checkpoint per conversation', async () => {
+    await saveConversationRuntimeSettings({
+      conversationId: 'conversation-a',
+      modelIdentity: { providerId: 'openai', modelId: 'gpt-test' },
+      thinkingLevel: 'medium',
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 8_192,
+      updatedAt: 10,
+    });
+    await saveRunCheckpoint({
+      id: 'checkpoint-1',
+      runId: 'run-1',
+      conversationId: 'conversation-a',
+      historyMessageIds: ['user-1'],
+      phase: 'running',
+      createdAt: 10,
+    });
+    await saveRunCheckpoint({
+      id: 'checkpoint-2',
+      runId: 'run-1',
+      conversationId: 'conversation-a',
+      historyMessageIds: ['user-1', 'assistant-1'],
+      phase: 'stable',
+      createdAt: 20,
+    });
+
+    expect(await loadConversationRuntimeSettings('conversation-a')).toMatchObject({
+      thinkingLevel: 'medium',
+      modelIdentity: { providerId: 'openai', modelId: 'gpt-test' },
+    });
+    expect(await latestRunCheckpoint('conversation-a')).toMatchObject({
+      id: 'checkpoint-2',
+      phase: 'stable',
+    });
+    expect(await loadConversationRuntimeSettings('conversation-b')).toBeNull();
   });
 });

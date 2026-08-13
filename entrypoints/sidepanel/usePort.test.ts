@@ -173,7 +173,7 @@ describe('useAgentPort', () => {
     expect(ports).toHaveLength(1);
   });
 
-  it('locks synchronously, sends one request, and applies full stream snapshots', async () => {
+  it('starts once, converts a second in-flight message to steering, and applies stream snapshots', async () => {
     const hook = await connectHook();
 
     let firstAccepted = false;
@@ -184,11 +184,17 @@ describe('useAgentPort', () => {
     });
 
     expect(firstAccepted).toBe(true);
-    expect(secondAccepted).toBe(false);
+    expect(secondAccepted).toBe(true);
     const request = ports[0]?.sent.find(
       (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
     );
     expect(request?.messages.at(-1)?.content).toBe('hello');
+    expect(ports[0]?.sent).toContainEqual({
+      type: 'run:steer',
+      runId: request?.requestId,
+      conversationId: 'conversation-1',
+      content: 'duplicate',
+    });
 
     const partial: ChatMessage = {
       id: 'assistant-1',
@@ -226,6 +232,46 @@ describe('useAgentPort', () => {
       expect.objectContaining({ id: 'assistant-1', content: 'part done' }),
       expect.objectContaining({ unread: true }),
     );
+  });
+
+  it('retries a retryable failed turn without duplicating the user message', async () => {
+    const hook = await connectHook();
+    act(() => hook.result.current.sendChat('读取页面'));
+    const request = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    const failure: ChatMessage = {
+      id: 'assistant-failed',
+      role: 'assistant',
+      content: '',
+      createdAt: 2,
+      status: 'error',
+      error: true,
+      errorMessage: '网络中断',
+      retryable: true,
+    };
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_error',
+        requestId: request?.requestId ?? '',
+        conversationId: 'conversation-1',
+        message: failure,
+      });
+    });
+
+    let accepted = false;
+    act(() => {
+      accepted = hook.result.current.retryChat();
+    });
+
+    expect(accepted).toBe(true);
+    const retry = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'run:retry' }> =>
+        message.type === 'run:retry',
+    );
+    expect(retry?.conversationId).toBe('conversation-1');
+    expect(retry?.messages.filter((message) => message.role === 'user')).toHaveLength(1);
+    expect(retry?.messages.some((message) => message.id === failure.id)).toBe(false);
   });
 
   it('preserves partial text and stores the error separately', async () => {
@@ -555,13 +601,24 @@ describe('useAgentPort', () => {
       ports[0]?.emit({ type: 'snapshot', snapshot });
       ports[0]?.emit({ type: 'parsed', params });
       ports[0]?.emit({ type: 'log', level: 'info', text: 'ignored UI log' });
-      ports[0]?.emit({ type: 'chat_state', running: true, requestId: 'request-replayed' });
+      ports[0]?.emit({
+        type: 'run_state',
+        runs: [
+          {
+            runId: 'request-replayed',
+            requestId: 'request-replayed',
+            conversationId: 'conversation-1',
+            status: 'running',
+            updatedAt: 1,
+          },
+        ],
+      });
     });
 
     expect(hook.result.current.snapshot).toEqual(snapshot);
     expect(hook.result.current.pendingParams).toEqual(params);
     expect(hook.result.current.chatRunning).toBe(true);
-    expect(hook.result.current.sendChat('must stay locked')).toBe(false);
+    expect(hook.result.current.sendChat('steer replayed task')).toBe(true);
 
     act(() => {
       hook.result.current.setPendingParams(null);
@@ -737,7 +794,7 @@ describe('useAgentPort', () => {
       requestId: chat?.requestId,
     });
     expect(ports[0]?.sent).toContainEqual({ type: 'download_diagnostics' });
-    expect(hook.result.current.messages).not.toEqual([]);
+    expect(hook.result.current.messages).toEqual([]);
 
     const terminal: ChatMessage = {
       id: 'assistant-terminal',
@@ -1083,7 +1140,7 @@ describe('useAgentPort', () => {
     expect(ports).toHaveLength(2);
     act(() => {
       ports[1]?.emit({ type: 'connected' });
-      ports[1]?.emit({ type: 'chat_state', running: false });
+      ports[1]?.emit({ type: 'run_state', runs: [] });
     });
 
     expect(hook.result.current.chatRunning).toBe(false);

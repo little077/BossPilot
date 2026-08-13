@@ -155,6 +155,26 @@ describe('pi-ai generation adapter', () => {
     });
   });
 
+  it('maps an explicit thinking level through the provider payload hook', async () => {
+    const calls: StreamCall[] = [];
+    const loadApi = makeLoader(
+      [{ type: 'done', reason: 'stop', message: makeAssistant('stop') }],
+      calls,
+    );
+    const adapter = createPiGenerationAdapter({ loadApi });
+    await collect(
+      adapter.stream(makeTarget(), {
+        ...makeRequest(),
+        thinkingLevel: 'high',
+      }),
+    );
+
+    expect(await calls[0]?.options.onPayload?.({ model: 'chat-model' }, calls[0].model)).toEqual({
+      model: 'chat-model',
+      reasoning_effort: 'high',
+    });
+  });
+
   it('maps bounded image tool results to pi-ai image content for visual models', async () => {
     const calls: StreamCall[] = [];
     const loadApi = makeLoader(

@@ -9,6 +9,7 @@ interface HistoryViewProps {
   conversations: ChatConversation[];
   activeConversationId: string | null;
   runningConversationId: string | null;
+  runningConversationIds?: string[];
   chatRunning: boolean;
   errorMessage: string;
   onRestore: (conversationId: string) => Promise<boolean>;
@@ -19,6 +20,7 @@ export function HistoryView({
   conversations,
   activeConversationId,
   runningConversationId,
+  runningConversationIds,
   chatRunning,
   errorMessage,
   onRestore,
@@ -104,7 +106,10 @@ export function HistoryView({
         <ul className="history-list">
           {conversations.map((conversation) => {
             const isCurrent = conversation.id === activeConversationId;
-            const isRunning = chatRunning && conversation.id === runningConversationId;
+            const isRunning =
+              chatRunning &&
+              (runningConversationIds?.includes(conversation.id) ??
+                conversation.id === runningConversationId);
             const isEditing = conversation.id === editingId;
             const isRestoring = conversation.id === restoringId;
 

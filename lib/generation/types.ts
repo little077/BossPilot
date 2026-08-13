@@ -1,4 +1,9 @@
-import type { ChatMessage, GenerationFinishReason, GenerationUsage } from '@/lib/domain/chat';
+import type {
+  ChatMessage,
+  GenerationFinishReason,
+  GenerationUsage,
+  ThinkingLevel,
+} from '@/lib/domain/chat';
 import type {
   AskUserOption,
   BrowserActionErrorCode,
@@ -88,6 +93,7 @@ export interface GenerationRequest {
   signal: AbortSignal;
   maxOutputTokens?: number;
   temperature?: number;
+  thinkingLevel?: ThinkingLevel;
 }
 
 export type GenerationEvent =

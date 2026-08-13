@@ -437,7 +437,53 @@ function createStreamOptions(
     maxTokens: Math.min(requestedMaxTokens, modelMaxTokens),
     ...(usesKeylessOpenAITransport ? { headers: { Authorization: null } } : {}),
     ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+    ...(request.thinkingLevel && request.thinkingLevel !== 'off'
+      ? {
+          onPayload: (payload: unknown) =>
+            applyThinkingLevel(payload, target.protocol, request.thinkingLevel ?? 'off'),
+        }
+      : {}),
   };
+}
+
+function applyThinkingLevel(
+  payload: unknown,
+  protocol: ResolvedGenerationTarget['protocol'],
+  level: Exclude<NonNullable<GenerationRequest['thinkingLevel']>, 'off'> | 'off',
+): unknown {
+  if (level === 'off' || !isRecord(payload)) return payload;
+  switch (protocol) {
+    case 'openai-completions':
+      return { ...payload, reasoning_effort: level };
+    case 'openai-responses':
+      return {
+        ...payload,
+        reasoning: { ...(isRecord(payload.reasoning) ? payload.reasoning : {}), effort: level },
+      };
+    case 'anthropic-messages':
+      return {
+        ...payload,
+        thinking: { type: 'adaptive' },
+        output_config: {
+          ...(isRecord(payload.output_config) ? payload.output_config : {}),
+          effort: level,
+        },
+      };
+    case 'google-generative-ai':
+      return {
+        ...payload,
+        generationConfig: {
+          ...(isRecord(payload.generationConfig) ? payload.generationConfig : {}),
+          thinkingConfig: { thinkingLevel: level.toUpperCase() },
+        },
+      };
+    case 'mistral-conversations':
+      return payload;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 async function loadPiApi(api: PiApi): Promise<PiStream> {

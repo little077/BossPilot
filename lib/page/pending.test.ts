@@ -9,6 +9,7 @@ import {
   createPendingAgentTurn,
   createPendingPageTurn,
   historyMatchesPending,
+  listPendingPageTurns,
   loadPendingPageTurn,
   savePendingPageTurn,
 } from './pending';
@@ -156,6 +157,16 @@ describe('pending page permission turns', () => {
       ...DEFERRED,
       message: {
         ...DEFERRED.message,
+        attachments: [
+          {
+            id: 'attachment-1',
+            kind: 'text',
+            name: 'note.txt',
+            mimeType: 'text/plain',
+            size: 4,
+            content: 'note',
+          },
+        ],
         modelIdentity: { providerId: 'openai', modelId: 'gpt-test' },
         usage: {
           inputTokens: 1,
@@ -174,6 +185,24 @@ describe('pending page permission turns', () => {
           statusText: '等待权限',
           startedAt: 1,
         },
+        toolActivities: [
+          {
+            callId: 'call-1',
+            name: 'read_current_page',
+            label: '读取当前页面',
+            status: 'waiting_permission',
+            statusText: '等待权限',
+            startedAt: 1,
+          },
+        ],
+        pendingUserQuestion: {
+          requestId: 'request-1',
+          callId: 'call-1',
+          question: '继续吗？',
+          options: [{ id: 'yes', label: '继续' }],
+          allowCustom: true,
+          customPlaceholder: '补充说明',
+        },
       },
       usage: {
         inputTokens: 1,
@@ -183,13 +212,44 @@ describe('pending page permission turns', () => {
         totalTokens: 2,
         cost: 0,
       },
+      loopMessages: [
+        { role: 'user', content: '问题', createdAt: 1 },
+        {
+          role: 'assistant',
+          content: '',
+          createdAt: 2,
+          toolCalls: [{ id: 'call-1', name: 'read_current_page', arguments: {} }],
+        },
+        {
+          role: 'toolResult',
+          toolCallId: 'call-1',
+          toolName: 'read_current_page',
+          content: '结果',
+          isError: false,
+          createdAt: 3,
+        },
+      ],
+      toolCallSignatures: ['read_current_page:{}'],
+      toolAttemptSignatures: ['attempt-1'],
     };
     const pending = createPendingPageTurn(enriched, SNAPSHOT, HISTORY);
     if (enriched.message.modelIdentity) enriched.message.modelIdentity.modelId = 'mutated';
     enriched.toolCall.arguments.changed = true;
+    enriched.message.attachments?.splice(0);
+    enriched.message.toolActivities?.splice(0);
+    enriched.message.pendingUserQuestion?.options.splice(0);
+    enriched.loopMessages?.splice(0);
+    enriched.toolCallSignatures?.push('mutated');
+    enriched.toolAttemptSignatures?.push('mutated');
     expect(pending.generation.message.modelIdentity?.modelId).toBe('gpt-test');
     expect(pending.generation.toolCall.arguments).toEqual({});
     expect(pending.generation.usage).toEqual(enriched.usage);
+    expect(pending.generation.message.attachments).toHaveLength(1);
+    expect(pending.generation.message.toolActivities).toHaveLength(1);
+    expect(pending.generation.message.pendingUserQuestion?.options).toHaveLength(1);
+    expect(pending.generation.loopMessages).toHaveLength(3);
+    expect(pending.generation.toolCallSignatures).toEqual(['read_current_page:{}']);
+    expect(pending.generation.toolAttemptSignatures).toEqual(['attempt-1']);
   });
 
   it('clears only the requested turn and matches exact history ids', async () => {
@@ -205,5 +265,40 @@ describe('pending page permission turns', () => {
     await expect(loadPendingPageTurn()).resolves.not.toBeNull();
     await clearPendingPageTurn('request-1');
     await expect(loadPendingPageTurn()).resolves.toBeNull();
+  });
+
+  it('stores independent pending turns for two conversations and prunes only expired entries', async () => {
+    const first = createPendingAgentTurn(
+      DEFERRED,
+      null,
+      HISTORY,
+      'user_input',
+      1_000,
+      'conversation-a',
+    );
+    const second = createPendingAgentTurn(
+      { ...DEFERRED, requestId: 'request-2', deferredAt: 3 },
+      SNAPSHOT,
+      HISTORY,
+      'page_permission',
+      2_000,
+      'conversation-b',
+    );
+    await savePendingPageTurn(first);
+    await savePendingPageTurn(second);
+
+    expect(await listPendingPageTurns(3_000)).toEqual([
+      expect.objectContaining({ requestId: 'request-1', conversationId: 'conversation-a' }),
+      expect.objectContaining({ requestId: 'request-2', conversationId: 'conversation-b' }),
+    ]);
+    expect(await loadPendingPageTurn('request-2', 3_000)).toMatchObject({
+      conversationId: 'conversation-b',
+    });
+    await clearPendingPageTurn('request-1');
+    expect(await listPendingPageTurns(3_000)).toEqual([
+      expect.objectContaining({ requestId: 'request-2' }),
+    ]);
+    expect(await listPendingPageTurns(700_000)).toEqual([]);
+    await clearPendingPageTurn();
   });
 });

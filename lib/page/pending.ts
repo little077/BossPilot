@@ -5,7 +5,8 @@ import type { ChatMessage } from '@/lib/domain/chat';
 import type { PageTurnSnapshot } from '@/lib/domain/types';
 import type { DeferredGenerationTurn } from '@/lib/generation/manager';
 
-const PENDING_KEY = 'bosspilot_pending_agent_turn_v2';
+const PENDING_KEY = 'bosspilot_pending_agent_turn_v3';
+const LEGACY_PENDING_KEY = 'bosspilot_pending_agent_turn_v2';
 const PAGE_PERMISSION_TTL_MS = 10 * 60 * 1_000;
 const USER_INPUT_TTL_MS = 24 * 60 * 60 * 1_000;
 
@@ -14,6 +15,7 @@ export type PendingAgentKind = 'page_permission' | 'user_input';
 export interface PendingPageTurn {
   version: 2;
   requestId: string;
+  conversationId?: string;
   kind: PendingAgentKind;
   status: 'awaiting_permission' | 'awaiting_user' | 'resuming';
   generation: DeferredGenerationTurn;
@@ -39,10 +41,12 @@ export function createPendingAgentTurn(
   history: ChatMessage[],
   kind: PendingAgentKind,
   now = Date.now(),
+  conversationId?: string,
 ): PendingPageTurn {
   return {
     version: 2,
     requestId: generation.requestId,
+    ...(conversationId ? { conversationId } : {}),
     kind,
     status: kind === 'user_input' ? 'awaiting_user' : 'awaiting_permission',
     generation: cloneDeferred(generation),
@@ -54,22 +58,31 @@ export function createPendingAgentTurn(
 
 export async function savePendingPageTurn(turn: PendingPageTurn): Promise<void> {
   await serialized(async () => {
-    await chrome.storage.session.set({ [PENDING_KEY]: turn });
+    const turns = await readPendingMap();
+    turns[turn.requestId] = turn;
+    await writePendingMap(turns);
   });
 }
 
-export async function loadPendingPageTurn(now = Date.now()): Promise<PendingPageTurn | null> {
-  const stored = await chrome.storage.session.get(PENDING_KEY);
-  const parsed = parsePendingPageTurn(stored[PENDING_KEY]);
-  if (!parsed) {
-    if (stored[PENDING_KEY] !== undefined) await chrome.storage.session.remove(PENDING_KEY);
-    return null;
-  }
-  if (parsed.expiresAt <= now) {
-    await chrome.storage.session.remove(PENDING_KEY);
-    return null;
-  }
-  return parsed;
+export async function loadPendingPageTurn(
+  requestIdOrNow?: string | number,
+  now = Date.now(),
+): Promise<PendingPageTurn | null> {
+  const requestId = typeof requestIdOrNow === 'string' ? requestIdOrNow : undefined;
+  const currentNow = typeof requestIdOrNow === 'number' ? requestIdOrNow : now;
+  const turns = await loadActivePendingMap(currentNow);
+  if (requestId) return turns[requestId] ?? null;
+  return (
+    Object.values(turns).sort(
+      (left, right) => right.generation.deferredAt - left.generation.deferredAt,
+    )[0] ?? null
+  );
+}
+
+export async function listPendingPageTurns(now = Date.now()): Promise<PendingPageTurn[]> {
+  return Object.values(await loadActivePendingMap(now)).sort(
+    (left, right) => left.generation.deferredAt - right.generation.deferredAt,
+  );
 }
 
 /** 单 Worker 内串行领取，配合持久化 resuming 状态抵御重复点击与重复 Port 消息。 */
@@ -79,7 +92,7 @@ export async function claimPendingPageTurn(
 ): Promise<PendingPageTurn | null> {
   let claimed: PendingPageTurn | null = null;
   await serialized(async () => {
-    const current = await loadPendingPageTurn(now);
+    const current = await loadPendingPageTurn(requestId, now);
     if (
       !current ||
       current.requestId !== requestId ||
@@ -88,19 +101,58 @@ export async function claimPendingPageTurn(
       return;
     }
     claimed = { ...current, status: 'resuming' };
-    await chrome.storage.session.set({ [PENDING_KEY]: claimed });
+    const turns = await readPendingMap();
+    turns[requestId] = claimed;
+    await writePendingMap(turns);
   });
   return claimed;
 }
 
 export async function clearPendingPageTurn(requestId?: string): Promise<void> {
   await serialized(async () => {
-    if (requestId) {
-      const current = await loadPendingPageTurn();
-      if (!current || current.requestId !== requestId) return;
+    if (!requestId) {
+      await chrome.storage.session.remove(PENDING_KEY);
+      await chrome.storage.session.remove(LEGACY_PENDING_KEY);
+      return;
     }
-    await chrome.storage.session.remove(PENDING_KEY);
+    const turns = await readPendingMap();
+    if (!(requestId in turns)) return;
+    delete turns[requestId];
+    await writePendingMap(turns);
   });
+}
+
+async function loadActivePendingMap(now: number): Promise<Record<string, PendingPageTurn>> {
+  const turns = await readPendingMap();
+  const active = Object.fromEntries(
+    Object.entries(turns).filter(([, turn]) => turn.expiresAt > now),
+  );
+  if (Object.keys(active).length !== Object.keys(turns).length) await writePendingMap(active);
+  return active;
+}
+
+async function readPendingMap(): Promise<Record<string, PendingPageTurn>> {
+  const [currentStored, legacyStored] = await Promise.all([
+    chrome.storage.session.get(PENDING_KEY),
+    chrome.storage.session.get(LEGACY_PENDING_KEY),
+  ]);
+  const current = currentStored[PENDING_KEY];
+  const turns: Record<string, PendingPageTurn> = {};
+  if (isRecord(current) && current.version === 3 && isRecord(current.turns)) {
+    for (const [requestId, value] of Object.entries(current.turns)) {
+      const parsed = parsePendingPageTurn(value);
+      if (parsed && parsed.requestId === requestId) turns[requestId] = parsed;
+    }
+    return turns;
+  }
+  const legacy = parsePendingPageTurn(legacyStored[LEGACY_PENDING_KEY]);
+  if (legacy) turns[legacy.requestId] = legacy;
+  return turns;
+}
+
+async function writePendingMap(turns: Record<string, PendingPageTurn>): Promise<void> {
+  await chrome.storage.session.set({ [PENDING_KEY]: { version: 3, turns } });
+  await chrome.storage.session.remove(LEGACY_PENDING_KEY);
 }
 
 export function historyMatchesPending(turn: PendingPageTurn, history: ChatMessage[]): boolean {

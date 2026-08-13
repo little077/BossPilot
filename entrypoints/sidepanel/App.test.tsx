@@ -309,7 +309,9 @@ describe('顶部导航', () => {
     expect(screen.getByText(/聊两句/)).toBeInTheDocument();
   });
 
-  it('模型正在回复时禁用新对话，避免误清空会话', async () => {
+  it('模型正在回复时仍可新建会话，让原任务转入后台', async () => {
+    const user = userEvent.setup();
+    const startNewConversation = vi.fn();
     useAgentPortMock.mockReturnValue({
       ...basePort,
       messages: [
@@ -321,10 +323,15 @@ describe('顶部导航', () => {
         },
       ],
       chatRunning: true,
+      runningConversationId: 'conversation-1',
+      startNewConversation,
     });
     render(<App />);
 
-    expect(await screen.findByRole('button', { name: '新对话' })).toBeDisabled();
+    const button = await screen.findByRole('button', { name: '新对话' });
+    expect(button).toBeEnabled();
+    await user.click(button);
+    expect(startNewConversation).toHaveBeenCalledOnce();
   });
 
   it('查看另一条会话时让后台回复继续，并可一键切回运行会话', async () => {
@@ -341,7 +348,7 @@ describe('顶部导航', () => {
     render(<App />);
 
     expect(screen.getByText('另一条会话正在后台回复，完成后可继续本对话')).toBeVisible();
-    expect(screen.getByTestId('composer')).toHaveAttribute('data-disabled', 'true');
+    expect(screen.getByTestId('composer')).toHaveAttribute('data-disabled', 'false');
     expect(screen.getByTestId('composer')).toHaveAttribute('data-running', 'false');
 
     await user.click(screen.getByRole('button', { name: '查看正在回复的会话' }));

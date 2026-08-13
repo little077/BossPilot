@@ -4,6 +4,7 @@ import { GenerationError } from '@/lib/generation/errors';
 import {
   type ChatGenerationEvent,
   ChatGenerationManager,
+  type ChatGenerationManagerOptions,
   DEFAULT_MAX_AGENT_TURNS,
   type DeferredGenerationTurn,
 } from '@/lib/generation/manager';
@@ -109,6 +110,10 @@ function createManager(
       result: GenerationToolDeferredResult,
     ) => void | Promise<void>;
     systemPrompt?: string | (() => string | Promise<string>);
+    contextWindowTokens?: number;
+    compactionThreshold?: number;
+    compactMessages?: ChatGenerationManagerOptions['compactMessages'];
+    generationSettings?: ChatGenerationManagerOptions['generationSettings'];
   } = {},
 ) {
   return new ChatGenerationManager({
@@ -183,6 +188,94 @@ describe('ChatGenerationManager', () => {
     expect(terminalEvent).toBeDefined();
     if (terminalEvent) terminalEvent.message.content = '被订阅方篡改';
     expect(manager.getSnapshot()?.message.content).toBe('你好');
+  });
+
+  it('injects user steering at the next safe model boundary without cancelling the run', async () => {
+    const release = deferred<void>();
+    const requests: GenerationRequest[] = [];
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        requests.push(request);
+        yield { type: 'start' };
+        if (requests.length === 1) {
+          yield { type: 'text-delta', delta: '正在整理' };
+          await release.promise;
+          yield { type: 'finish', reason: 'stop', usage: USAGE };
+          return;
+        }
+        yield { type: 'text-delta', delta: '，已按新条件完成' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter);
+    const resultPromise = manager.start('request-steer', HISTORY);
+    await waitFor(() => requests.length === 1);
+
+    expect(manager.steer('request-steer', '只保留最近一年')).toBe(true);
+    release.resolve();
+    const result = await resultPromise;
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'user',
+          content: expect.stringContaining('只保留最近一年'),
+        }),
+      ]),
+    );
+    expect(result.content).toBe('正在整理\n\n，已按新条件完成');
+    expect(manager.steer('request-steer', '太晚了')).toBe(false);
+  });
+
+  it('compacts oversized context before opening the next model stream', async () => {
+    const seen: GenerationRequest['messages'][] = [];
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        seen.push(request.messages);
+        yield { type: 'text-delta', delta: '完成' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const compactMessages = vi.fn(async () => [
+      {
+        role: 'user' as const,
+        content: '<compacted_context>摘要</compacted_context>',
+        createdAt: 1,
+      },
+    ]);
+    const manager = createManager(adapter, () => target(), {
+      contextWindowTokens: 100,
+      compactionThreshold: 0.5,
+      compactMessages,
+    });
+
+    await manager.start('request-compact', [
+      { id: 'long', role: 'user', content: 'x'.repeat(800), createdAt: 1 },
+    ]);
+
+    expect(compactMessages).toHaveBeenCalledOnce();
+    expect(seen[0]).toEqual([
+      expect.objectContaining({ content: '<compacted_context>摘要</compacted_context>' }),
+    ]);
+  });
+
+  it('resolves per-conversation output and thinking settings for the model request', async () => {
+    let requestSeen: GenerationRequest | undefined;
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        requestSeen = request;
+        yield { type: 'text-delta', delta: '完成' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      generationSettings: async () => ({ maxOutputTokens: 4_096, thinkingLevel: 'high' }),
+    });
+
+    await manager.start('request-settings', HISTORY);
+
+    expect(requestSeen).toMatchObject({ maxOutputTokens: 4_096, thinkingLevel: 'high' });
   });
 
   it('executes a tool and keeps tools available for the next model request', async () => {
