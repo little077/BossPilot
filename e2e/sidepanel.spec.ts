@@ -6,6 +6,7 @@ test('侧边栏可启动，并在新建对话后保留本地历史', async ({ co
 
   await expect(page.getByRole('button', { name: '对话' })).toBeVisible();
   await expect(page.getByRole('button', { name: '历史记录' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '产物' })).toBeVisible();
   await expect(page.getByRole('button', { name: '设置' })).toBeVisible();
   await expect(page.getByRole('button', { name: '报告' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '新对话' })).toHaveCount(0);

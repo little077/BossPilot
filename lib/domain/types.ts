@@ -371,6 +371,15 @@ export type DomainToolName =
   | 'load_skill'
   | 'search_memory'
   | 'save_memory'
+  | 'workspace_create'
+  | 'workspace_mkdir'
+  | 'workspace_read'
+  | 'workspace_edit'
+  | 'workspace_rename'
+  | 'workspace_delete'
+  | 'workspace_list'
+  | 'workspace_search'
+  | 'workspace_save_url'
   | 'read_current_job'
   | 'read_visible_jobs'
   | 'ask_user'
@@ -392,6 +401,10 @@ export interface ToolActivity {
   sourceUrl?: string;
   permissionPattern?: string;
   permissionKind?: 'read' | 'interact';
+  outputPath?: string;
+  riskLevel?: 'read' | 'write' | 'dangerous';
+  authorizationStatus?: 'not_required' | 'pending' | 'granted' | 'denied';
+  recoverability?: 'safe_retry' | 'user_retry' | 'not_retryable';
   extractionMode?: PageExtractionMode;
   returnedChars?: number;
   truncated?: boolean;

@@ -10,6 +10,7 @@ import type {
   RunCheckpoint,
   StoredChatMessage,
 } from '@/lib/domain/chat';
+import type { WorkspaceBody, WorkspaceEntry, WorkspaceVersion } from '@/lib/workspace/types';
 
 const PREVIEW_CHARS = 80;
 
@@ -19,6 +20,9 @@ class BossPilotDb extends Dexie {
   conversationRuntimeSettings!: Table<ConversationRuntimeSettings, string>;
   runCheckpoints!: Table<RunCheckpoint, string>;
   compactionSummaries!: Table<CompactionSummary, string>;
+  workspaceEntries!: Table<WorkspaceEntry, string>;
+  workspaceBodies!: Table<WorkspaceBody, string>;
+  workspaceVersions!: Table<WorkspaceVersion, string>;
 
   constructor() {
     super('bosspilot');
@@ -61,6 +65,17 @@ class BossPilotDb extends Dexie {
       conversationRuntimeSettings: 'conversationId, updatedAt',
       runCheckpoints: 'id, runId, conversationId, [conversationId+createdAt], createdAt',
       compactionSummaries: 'id, runId, conversationId, [conversationId+createdAt], createdAt',
+    });
+    this.version(4).stores({
+      conversations: 'id, ordinal, updatedAt, unread',
+      messages: 'id, conversationId, [conversationId+createdAt], createdAt',
+      conversationRuntimeSettings: 'conversationId, updatedAt',
+      runCheckpoints: 'id, runId, conversationId, [conversationId+createdAt], createdAt',
+      compactionSummaries: 'id, runId, conversationId, [conversationId+createdAt], createdAt',
+      workspaceEntries: 'id, conversationId, [conversationId+path], parentPath, updatedAt',
+      workspaceBodies: 'id, conversationId, [conversationId+path]',
+      workspaceVersions:
+        'id, entryId, conversationId, [conversationId+path], [entryId+version], createdAt',
     });
   }
 }

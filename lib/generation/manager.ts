@@ -792,6 +792,12 @@ export class ChatGenerationManager {
     if (execution.returnedChars !== undefined) activity.returnedChars = execution.returnedChars;
     if (execution.truncated !== undefined) activity.truncated = execution.truncated;
     if (execution.enrichmentStatus) activity.enrichmentStatus = execution.enrichmentStatus;
+    if (execution.outputPath) activity.outputPath = execution.outputPath;
+    if (execution.riskLevel) activity.riskLevel = execution.riskLevel;
+    if (execution.authorizationStatus) {
+      activity.authorizationStatus = execution.authorizationStatus;
+    }
+    if (execution.recoverability) activity.recoverability = execution.recoverability;
     syncLegacyToolActivity(message, activity);
     this.publish(turn, 'update');
   }

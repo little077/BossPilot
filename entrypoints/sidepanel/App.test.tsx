@@ -49,6 +49,10 @@ vi.mock('./HistoryView', () => ({
   ),
 }));
 
+vi.mock('./WorkspaceView', () => ({
+  WorkspaceView: () => <div>会话产物内容</div>,
+}));
+
 vi.mock('./SettingsView', () => ({
   SettingsView: () => <div>设置内容</div>,
 }));
@@ -239,6 +243,9 @@ describe('顶部导航', () => {
     await user.click(screen.getByRole('button', { name: '历史记录' }));
     expect(screen.getByText('历史记录列表').closest('main')).toHaveClass('redscope-view');
 
+    await user.click(screen.getByRole('button', { name: '产物' }));
+    expect(screen.getByText('会话产物内容').closest('main')).toHaveClass('redscope-view');
+
     await user.click(screen.getByRole('button', { name: '设置' }));
     const settingsMain = (await screen.findByText('设置内容')).closest('main');
     expect(settingsMain).toHaveClass('redscope-view');
@@ -247,12 +254,13 @@ describe('顶部导航', () => {
     expect(screen.getByRole('navigation', { name: '主导航' })).toBeInTheDocument();
   });
 
-  it('只展示对话、历史记录和设置，不再展示旧结果与报告入口', () => {
+  it('展示对话、历史记录、会话产物和设置，不再展示旧结果与报告入口', () => {
     render(<App />);
 
     expect(screen.getByRole('button', { name: '对话' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '对话' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: '历史记录' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '产物' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '结果' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '设置' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '报告' })).not.toBeInTheDocument();

@@ -26,8 +26,9 @@ import { Composer, type ComposerHandle } from './Composer';
 import { ConversationRuntimeControls } from './ConversationRuntimeControls';
 import { HistoryView } from './HistoryView';
 import { useAgentPort } from './usePort';
+import { WorkspaceView } from './WorkspaceView';
 
-type Tab = 'chat' | 'history' | 'settings';
+type Tab = 'chat' | 'history' | 'workspace' | 'settings';
 
 const SettingsView = lazy(() =>
   import('./SettingsView').then((module) => ({ default: module.SettingsView })),
@@ -66,6 +67,7 @@ const PROGRESS_PHASES: TaskPhase[] = [
 const NAV_ITEMS = [
   ['chat', MessageSquare, '对话'],
   ['history', History, '历史记录'],
+  ['workspace', FileText, '产物'],
   ['settings', Settings, '设置'],
 ] as const;
 
@@ -488,6 +490,8 @@ export default function App() {
               onRename={renameConversationTitle}
             />
           )}
+
+          {tab === 'workspace' && <WorkspaceView conversationId={activeConversationId} />}
 
           {tab === 'settings' && (
             <Suspense fallback={<div className="p-4 text-xs text-ink-faint">加载中…</div>}>

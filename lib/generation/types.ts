@@ -133,6 +133,10 @@ export interface GenerationToolExecutionResult {
   returnedChars?: number;
   truncated?: boolean;
   enrichmentStatus?: 'success' | 'failed' | 'not_applicable';
+  outputPath?: string;
+  riskLevel?: 'read' | 'write' | 'dangerous';
+  authorizationStatus?: 'not_required' | 'pending' | 'granted' | 'denied';
+  recoverability?: 'safe_retry' | 'user_retry' | 'not_retryable';
   /**
    * 浏览器工具实际操作完成后的本地页面身份。仅供 background 延续同一 Agent 任务，
    * Manager 不会把完整 URL 或标签页 ID 发给模型。

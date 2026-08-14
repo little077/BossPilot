@@ -302,6 +302,15 @@ test('通用当前页工具读取 Boss 岗位并附加领域增强', async ({ co
     'load_skill',
     'search_memory',
     'save_memory',
+    'workspace_create',
+    'workspace_mkdir',
+    'workspace_read',
+    'workspace_edit',
+    'workspace_rename',
+    'workspace_delete',
+    'workspace_list',
+    'workspace_search',
+    'workspace_save_url',
     'ask_user',
   ]);
   expect(chatRequests[0]?.body.messages).toContainEqual(

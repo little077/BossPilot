@@ -28,6 +28,9 @@ function generationChunk(id: string): string | undefined {
   ) {
     return 'browser-action';
   }
+  if (moduleId.includes('/lib/workspace/') || moduleId.endsWith('/lib/tools/workspace.ts')) {
+    return 'workspace';
+  }
   if (
     moduleId.endsWith('/lib/generation/manager.ts') ||
     moduleId.endsWith('/lib/generation/conversation-title.ts')

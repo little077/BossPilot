@@ -65,6 +65,7 @@ import {
   PageInteractionCoordinator,
 } from '@/lib/tools/page-interaction';
 import { READ_CURRENT_PAGE_TOOL, readCurrentPage } from '@/lib/tools/read-current-page';
+import { WORKSPACE_TOOLS, WorkspaceToolCoordinator } from '@/lib/tools/workspace';
 
 interface ActiveDiagnostic {
   conversationId: string;
@@ -88,6 +89,7 @@ export default defineBackground({
     const skillLoader = new SkillLoadCoordinator(skillStore);
     const memoryStore = new MemoryStore();
     const memoryTools = new MemoryToolCoordinator(memoryStore);
+    const workspaceTools = new WorkspaceToolCoordinator();
     const mcpService = new McpService();
     void chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
     const chatPorts = new Set<chrome.runtime.Port>();
@@ -133,6 +135,7 @@ export default defineBackground({
             LOAD_SKILL_TOOL,
             SEARCH_MEMORY_TOOL,
             SAVE_MEMORY_TOOL,
+            ...WORKSPACE_TOOLS,
             ...(await mcpService.generationTools()),
             ASK_USER_TOOL,
           ],
@@ -192,6 +195,22 @@ export default defineBackground({
               case 'search_memory':
               case 'save_memory':
                 result = await memoryTools.execute(call, latestUserText(requestId), signal);
+                break;
+              case 'workspace_create':
+              case 'workspace_mkdir':
+              case 'workspace_read':
+              case 'workspace_edit':
+              case 'workspace_rename':
+              case 'workspace_delete':
+              case 'workspace_list':
+              case 'workspace_search':
+              case 'workspace_save_url':
+                result = await workspaceTools.execute(
+                  call,
+                  conversationId,
+                  approvedToolCalls.delete(call.id),
+                  signal,
+                );
                 break;
               case 'ask_user':
                 result = askUser(call);
@@ -903,6 +922,22 @@ export default defineBackground({
               detail: '没有截取或发送当前页面截图。',
               content:
                 '视觉观察未执行：用户没有允许发送当前页面截图。请改用 DOM/文本工具；除非用户重新明确要求，否则不要再次请求截图。',
+            });
+          }
+        } else if (pending.generation.toolCall.name.startsWith('workspace_')) {
+          if (normalizedAnswer === '确认执行') {
+            approvedToolCalls.add(pending.generation.toolCall.id);
+            await resumeDeferred();
+          } else {
+            await resumeDeferred({
+              isError: true,
+              statusText: '用户取消工作区写入',
+              detail: '本地文件没有发生变化。',
+              content:
+                '工作区写入未执行：用户选择取消。除非用户重新明确要求，否则不要重试相同写入。',
+              riskLevel: 'write',
+              authorizationStatus: 'denied',
+              recoverability: 'user_retry',
             });
           }
         } else if (isMcpToolName(pending.generation.toolCall.name)) {
