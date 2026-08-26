@@ -108,11 +108,17 @@ class DiagnosticsRecorder {
         ? `，token in/out=${call.promptTokens ?? '?'}/${call.completionTokens ?? '?'}`
         : '';
     const purpose = call.purpose ? `［${call.purpose}］` : '';
+    const outcome = [
+      call.finishReason ? `结束=${call.finishReason}` : '',
+      call.toolName ? `工具=${call.toolName}` : '',
+    ]
+      .filter(Boolean)
+      .join('，');
     this.step(
       source,
       'llm',
       `${purpose}调用模型 ${call.model}（${call.latencyMs}ms${call.fellBackToNonStream ? '，非流式降级' : ''}）`,
-      `输入 ${call.messageCount} 条/${call.promptChars} 字，输出 ${call.outputChars} 字${usage}（原文见 LLM 调用明细 #${run.llmCalls.length}）`,
+      `输入 ${call.messageCount} 条/${call.promptChars} 字，输出 ${call.outputChars} 字${usage}${outcome ? `，${outcome}` : ''}（原文见 LLM 调用明细 #${run.llmCalls.length}）`,
     );
   }
 

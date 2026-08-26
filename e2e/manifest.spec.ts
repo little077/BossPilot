@@ -16,7 +16,7 @@ test('正式构建只常驻 Boss 直聘权限，模型端点保持按需授权',
   const manifestPath = path.resolve('.output/chrome-mv3/manifest.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as BuiltManifest;
 
-  expect(manifest.version).toBe('1.3.0');
+  expect(manifest.version).toBe('1.3.1');
   expect(manifest.permissions).toContain('activeTab');
   expect(manifest.permissions).toContain('offscreen');
   expect(manifest.host_permissions).toEqual(['https://www.zhipin.com/*']);

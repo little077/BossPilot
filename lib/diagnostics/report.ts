@@ -80,6 +80,8 @@ function renderLlmCallDetail(call: DiagnosticLlmCall, index: number): string {
   lines.push(
     `- 模型 \`${call.model}\`，输入 ${call.messageCount} 条/${call.promptChars} 字，` +
       `输出 ${call.outputChars} 字${tok}，耗时 ${call.latencyMs}ms` +
+      `${call.finishReason ? `，结束原因 \`${call.finishReason}\`` : ''}` +
+      `${call.toolName ? `，请求工具 \`${call.toolName}\`` : ''}` +
       `${call.fellBackToNonStream ? '（非流式降级）' : ''}`,
   );
   lines.push('');

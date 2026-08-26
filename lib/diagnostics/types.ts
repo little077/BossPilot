@@ -58,6 +58,10 @@ export interface DiagnosticLlmCall {
   completionTokens?: number;
   /** 调用耗时（毫秒）。 */
   latencyMs: number;
+  /** 真实模型回合的结束原因，避免把 Token 截断误判为完成。 */
+  finishReason?: 'stop' | 'length' | 'tool' | 'cancelled';
+  /** 本回合请求执行的工具；没有工具时省略。 */
+  toolName?: string;
   /** 是否走了非流式降级路径。 */
   fellBackToNonStream?: boolean;
 }

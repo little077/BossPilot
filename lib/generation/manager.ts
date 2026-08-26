@@ -35,6 +35,10 @@ export interface DeferredGenerationTurn {
   requestId: string;
   message: ChatMessage;
   rawContent: string;
+  /** v1.3.1：因模型长度上限而已输出、等待下一轮续写的正文。 */
+  committedContent?: string;
+  /** v1.3.1：本次任务已经自动续写的次数。 */
+  lengthContinuations?: number;
   toolCall: GenerationToolCall;
   targetIdentity: ModelIdentity;
   usage?: GenerationUsage;
@@ -56,12 +60,24 @@ export type GenerationTargetResolver = () =>
   | ResolvedGenerationTarget
   | Promise<ResolvedGenerationTarget>;
 
+export interface GenerationModelRound {
+  requestId: string;
+  modelId: string;
+  systemPrompt: string;
+  messages: GenerationInputMessage[];
+  outputText: string;
+  finishReason: NonNullable<ChatMessage['finishReason']>;
+  usage: GenerationUsage;
+  latencyMs: number;
+  toolName?: string;
+}
+
 export interface ChatGenerationManagerOptions {
   resolveTarget: GenerationTargetResolver;
   adapter: GenerationAdapter;
   createMessageId?: () => string;
   now?: () => number;
-  systemPrompt?: string | (() => string | Promise<string>);
+  systemPrompt?: string | ((requestId: string) => string | Promise<string>);
   maxOutputTokens?: number;
   generationSettings?: () =>
     | { maxOutputTokens?: number; thinkingLevel?: ThinkingLevel }
@@ -92,13 +108,18 @@ export interface ChatGenerationManagerOptions {
     turn: DeferredGenerationTurn,
     result: GenerationToolDeferredResult,
   ) => void | Promise<void>;
+  /** 每次真实模型请求结束后记录一次，不把整个 Agent 任务伪装成单次调用。 */
+  onModelRound?: (round: GenerationModelRound) => void;
 }
 
 interface ActiveTurn {
   requestId: string;
   controller: AbortController;
   message?: ChatMessage;
+  /** 当前真实模型回合产生的文本；进入下一轮前必须清空，防止上下文滚雪球。 */
   rawContent: string;
+  /** 因长度截断而保留、等待自动续写的正文。普通工具前置话术不会写入这里。 */
+  committedContent: string;
   secret: string;
   terminalEmitted: boolean;
   updatePending: boolean;
@@ -106,6 +127,7 @@ interface ActiveTurn {
   pendingToolCall?: GenerationToolCall;
   usage?: GenerationUsage;
   modelTurns: number;
+  lengthContinuations: number;
   toolAttemptSignatures: string[];
   systemPrompt: string;
   tools: GenerationToolDefinition[];
@@ -116,12 +138,14 @@ interface ActiveTurn {
 const ABORTED = Symbol('generation-aborted');
 const DEFAULT_MAX_OUTPUT_CHARS = 100_000;
 const DEFAULT_STREAM_UPDATE_INTERVAL_MS = 50;
+const MAX_LENGTH_CONTINUATIONS = 1;
 export const DEFAULT_MAX_AGENT_TURNS = 200;
 export const DEFAULT_MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS = 3;
 
 type StreamOutcome =
   | { kind: 'tool'; toolCall: GenerationToolCall }
   | { kind: 'steer' }
+  | { kind: 'length' }
   | { kind: 'terminal'; message: ChatMessage };
 
 export class ChatGenerationManager {
@@ -174,10 +198,12 @@ export class ChatGenerationManager {
       requestId,
       controller: new AbortController(),
       rawContent: '',
+      committedContent: '',
       secret: '',
       terminalEmitted: false,
       updatePending: false,
       modelTurns: 0,
+      lengthContinuations: 0,
       toolAttemptSignatures: [],
       systemPrompt: '',
       tools: [],
@@ -190,7 +216,7 @@ export class ChatGenerationManager {
       const resolution = this.options.resolveTarget();
       target = cloneTarget(isPromiseLike(resolution) ? await resolution : resolution);
       turn.secret = target.apiKey;
-      turn.systemPrompt = await resolveSystemPrompt(this.options.systemPrompt);
+      turn.systemPrompt = await resolveSystemPrompt(this.options.systemPrompt, requestId);
       turn.tools = await resolveTools(this.options.tools);
     } catch (error) {
       this.releaseWithoutEvent(turn);
@@ -255,7 +281,8 @@ export class ChatGenerationManager {
       }
       turn.secret = target.apiKey;
       turn.systemPrompt =
-        state.systemPrompt ?? (await resolveSystemPrompt(this.options.systemPrompt));
+        state.systemPrompt ??
+        (await resolveSystemPrompt(this.options.systemPrompt, state.requestId));
       turn.tools =
         state.tools?.map(cloneToolDefinition) ?? (await resolveTools(this.options.tools));
       const message = requireMessage(turn);
@@ -359,6 +386,49 @@ export class ChatGenerationManager {
     const outcome = await this.runGeneration(turn, target, preparedMessages, turn.tools);
     if (outcome.kind === 'terminal') return outcome.message;
 
+    if (outcome.kind === 'length') {
+      if (turn.lengthContinuations >= MAX_LENGTH_CONTINUATIONS) {
+        return this.finishError(
+          turn,
+          new GenerationError(
+            'OUTPUT_LIMIT_EXCEEDED',
+            '模型连续两次达到输出 Token 上限，任务尚未完整结束。已保留当前内容，你可以点击“从失败处重试”继续。',
+            true,
+          ),
+        );
+      }
+      const partial = turn.rawContent;
+      turn.committedContent = joinVisibleContent(turn.committedContent, partial);
+      turn.lengthContinuations += 1;
+      const continuedMessages: GenerationInputMessage[] = [
+        ...preparedMessages,
+        {
+          role: 'assistant',
+          content: partial,
+          createdAt: requireMessage(turn).createdAt,
+          finishReason: 'length',
+        },
+        {
+          role: 'user',
+          content: [
+            '<system_continuation>',
+            '上一轮因为输出 Token 上限而中断。不要重复已经完成的分析、页面操作或正文；从断点继续。若任务已经完成，直接给出简洁的最终结论。',
+            '</system_continuation>',
+          ].join('\n'),
+          createdAt: this.now(),
+        },
+      ];
+      const message = requireMessage(turn);
+      message.content = publicTurnContent(turn, false);
+      message.reasoningActivity = {
+        status: 'running',
+        summary: '输出达到模型上限，正在从断点继续',
+        startedAt: this.now(),
+      };
+      this.publish(turn, 'update');
+      return await this.runAgentLoop(turn, target, continuedMessages);
+    }
+
     if (outcome.kind === 'steer') {
       const steering = turn.pendingSteering.splice(0);
       const continuedMessages: GenerationInputMessage[] = [
@@ -384,7 +454,6 @@ export class ChatGenerationManager {
           createdAt: item.createdAt,
         })),
       ];
-      if (turn.rawContent.trim()) turn.rawContent += '\n\n';
       const message = requireMessage(turn);
       message.reasoningActivity = {
         status: 'running',
@@ -546,6 +615,8 @@ export class ChatGenerationManager {
       requestId: turn.requestId,
       message: cloneMessage(message),
       rawContent: turn.rawContent,
+      ...(turn.committedContent ? { committedContent: turn.committedContent } : {}),
+      ...(turn.lengthContinuations ? { lengthContinuations: turn.lengthContinuations } : {}),
       toolCall: cloneToolCall(toolCall),
       targetIdentity: { ...target.identity },
       ...(turn.usage ? { usage: { ...turn.usage } } : {}),
@@ -570,6 +641,11 @@ export class ChatGenerationManager {
     tools?: GenerationToolDefinition[],
   ): Promise<StreamOutcome> {
     turn.pendingToolCall = undefined;
+    // 上一模型回合的文字已经作为独立 assistant 消息进入 inputMessages。
+    // 当前回合必须从空文本开始，否则每次工具调用都会把全部历史再次嵌套回上下文。
+    turn.rawContent = '';
+    requireMessage(turn).content = publicTurnContent(turn, false);
+    const roundStartedAt = this.now();
     const dynamicSettings = this.options.generationSettings
       ? await this.options.generationSettings()
       : {};
@@ -607,6 +683,24 @@ export class ChatGenerationManager {
       }
 
       const outcome = this.consume(turn, result.value);
+      if (result.value.type === 'finish') {
+        try {
+          const toolName = pendingToolName(turn);
+          this.options.onModelRound?.({
+            requestId: turn.requestId,
+            modelId: target.identity.modelId,
+            systemPrompt: turn.systemPrompt,
+            messages: cloneGenerationInputMessages(messages, false),
+            outputText: turn.rawContent,
+            finishReason: result.value.reason,
+            usage: { ...result.value.usage },
+            latencyMs: Math.max(0, this.now() - roundStartedAt),
+            ...(toolName ? { toolName } : {}),
+          });
+        } catch {
+          // 诊断记录属于非关键能力，失败不能中断用户的 Agent 任务。
+        }
+      }
       if (outcome) {
         closeIterator(iterator);
         return outcome;
@@ -668,10 +762,11 @@ export class ChatGenerationManager {
       case 'text-delta':
         if (event.delta) {
           this.completeReasoning(turn, '已完成问题分析');
-          const remaining = this.maxOutputChars - turn.rawContent.length;
+          const remaining =
+            this.maxOutputChars - turn.committedContent.length - turn.rawContent.length;
           if (event.delta.length > remaining) {
             if (remaining > 0) turn.rawContent += event.delta.slice(0, remaining);
-            requireMessage(turn).content = publicContent(turn.rawContent, turn.secret, true);
+            requireMessage(turn).content = publicTurnContent(turn, true);
             turn.controller.abort();
             return {
               kind: 'terminal',
@@ -686,7 +781,7 @@ export class ChatGenerationManager {
           }
 
           turn.rawContent += event.delta;
-          requireMessage(turn).content = publicContent(turn.rawContent, turn.secret, false);
+          requireMessage(turn).content = publicTurnContent(turn, false);
           this.queueUpdate(turn);
         }
         return undefined;
@@ -739,6 +834,9 @@ export class ChatGenerationManager {
         }
         if (turn.pendingSteering.length > 0) {
           return { kind: 'steer' };
+        }
+        if (event.reason === 'length') {
+          return { kind: 'length' };
         }
         this.completeReasoning(turn, '已完成问题分析');
         return {
@@ -818,7 +916,7 @@ export class ChatGenerationManager {
     usage: GenerationUsage,
   ): ChatMessage {
     const message = requireMessage(turn);
-    message.content = publicContent(turn.rawContent, turn.secret, true);
+    message.content = publicTurnContent(turn, true);
     message.status = 'completed';
     message.finishReason = reason;
     message.usage = { ...usage };
@@ -846,7 +944,7 @@ export class ChatGenerationManager {
       syncLegacyToolActivity(message, toolActivity);
     }
     message.pendingUserQuestion = undefined;
-    message.content = publicContent(turn.rawContent, turn.secret, true);
+    message.content = publicTurnContent(turn, true);
     message.status = 'cancelled';
     message.finishReason = 'cancelled';
     if (usage) message.usage = { ...usage };
@@ -873,7 +971,7 @@ export class ChatGenerationManager {
       syncLegacyToolActivity(message, toolActivity);
     }
     message.pendingUserQuestion = undefined;
-    message.content = publicContent(turn.rawContent, turn.secret, true);
+    message.content = publicTurnContent(turn, true);
     message.status = 'error';
     message.error = true;
     message.errorMessage = safeError.message;
@@ -1013,11 +1111,13 @@ function activeTurnFromDeferred(state: DeferredGenerationTurn): ActiveTurn {
     controller: new AbortController(),
     message: cloneMessage(state.message),
     rawContent: state.rawContent,
+    committedContent: state.committedContent ?? '',
     secret: '',
     terminalEmitted: false,
     updatePending: false,
     pendingToolCall: cloneToolCall(state.toolCall),
     modelTurns: state.modelTurns ?? 1,
+    lengthContinuations: state.lengthContinuations ?? 0,
     toolAttemptSignatures: [...(state.toolAttemptSignatures ?? [])],
     systemPrompt: state.systemPrompt ?? '',
     tools: state.tools?.map(cloneToolDefinition) ?? [],
@@ -1028,9 +1128,10 @@ function activeTurnFromDeferred(state: DeferredGenerationTurn): ActiveTurn {
 
 async function resolveSystemPrompt(
   value: ChatGenerationManagerOptions['systemPrompt'],
+  requestId: string,
 ): Promise<string> {
   if (typeof value !== 'function') return value ?? '';
-  const result = value();
+  const result = value(requestId);
   return isPromiseLike(result) ? await result : result;
 }
 
@@ -1148,6 +1249,10 @@ function trailingIdenticalCount(signatures: string[], target: string): number {
   return count;
 }
 
+function pendingToolName(turn: ActiveTurn): string | undefined {
+  return (turn.pendingToolCall as GenerationToolCall | undefined)?.name;
+}
+
 function cloneGenerationInputMessages(
   messages: GenerationInputMessage[],
   includeImages = true,
@@ -1186,6 +1291,20 @@ function cloneEvent(event: ChatGenerationEvent): ChatGenerationEvent {
     ...event,
     message: cloneMessage(event.message),
   };
+}
+
+function joinVisibleContent(previous: string, next: string): string {
+  if (!previous.trim()) return next;
+  if (!next.trim()) return previous;
+  return `${previous}\n\n${next}`;
+}
+
+function publicTurnContent(turn: ActiveTurn, terminal: boolean): string {
+  return publicContent(
+    joinVisibleContent(turn.committedContent, turn.rawContent),
+    turn.secret,
+    terminal,
+  );
 }
 
 /**

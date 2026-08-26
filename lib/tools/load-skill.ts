@@ -3,6 +3,7 @@ import type {
   GenerationToolDefinition,
   GenerationToolExecutionResult,
 } from '@/lib/generation/types';
+import { skillAppliesToUrl } from '@/lib/skills/origin';
 import { SkillStore } from '@/lib/skills/store';
 
 const MAX_LOADED_SKILLS_PER_REQUEST = 3;
@@ -31,7 +32,10 @@ export interface SkillReader {
   load(
     name: string,
     reference?: string,
-  ): Promise<{ skill: { name: string; version: string }; content: string }>;
+  ): Promise<{
+    skill: { name: string; version: string; matchedOrigins?: string[] };
+    content: string;
+  }>;
 }
 
 export class SkillLoadCoordinator {
@@ -43,6 +47,7 @@ export class SkillLoadCoordinator {
     call: GenerationToolCall,
     requestId: string,
     signal: AbortSignal,
+    sourceUrl?: string,
   ): Promise<GenerationToolExecutionResult> {
     signal.throwIfAborted();
     const skillName = boundedString(call.arguments.skill, 64);
@@ -77,6 +82,11 @@ export class SkillLoadCoordinator {
     try {
       const loaded = await this.store.load(skillName, reference);
       signal.throwIfAborted();
+      if (!skillAppliesToUrl(loaded.skill, sourceUrl)) {
+        return failure(
+          `${skillName} 仅适用于 ${loaded.skill.matchedOrigins?.join('、') ?? '声明的网站'}，当前页面不匹配。`,
+        );
+      }
       const key = reference ? `${skillName}:${reference}` : skillName;
       const seen = reference ? state.references : state.skills;
       if (seen.has(key)) {

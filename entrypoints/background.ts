@@ -46,6 +46,7 @@ import {
 import { capturePageTurnSnapshot, pageContextHistory } from '@/lib/page/snapshot';
 import { orchestrator } from '@/lib/pipeline/orchestrator';
 import { ProviderService } from '@/lib/providers/service';
+import { skillAppliesToUrl } from '@/lib/skills/origin';
 import {
   exportAllSkillArchives,
   exportSkillArchive,
@@ -89,12 +90,8 @@ function bytesToBase64(bytes: Uint8Array): string {
 interface ActiveDiagnostic {
   conversationId: string;
   requestId: string;
-  messageCount: number;
-  promptChars: number;
-  /** 本轮发送的完整消息（含 system prompt），供诊断日志记录原文。 */
-  messages: Array<{ role: string; content: string }>;
-  startedAt: number;
   targetResolved: boolean;
+  modelRounds: number;
 }
 
 export default defineBackground({
@@ -131,7 +128,8 @@ export default defineBackground({
       (conversationId, publish) => {
         const generationManager = new ChatGenerationManager({
           adapter: generationAdapter,
-          systemPrompt: async () => composeChatSystemPrompt(skillStore, memoryStore),
+          systemPrompt: async (requestId) =>
+            composeChatSystemPrompt(skillStore, memoryStore, pageSnapshots.get(requestId)?.url),
           maxOutputTokens: 8_192,
           generationSettings: async () => {
             const settings = await loadConversationRuntimeSettings(conversationId);
@@ -213,7 +211,12 @@ export default defineBackground({
                 );
                 break;
               case 'load_skill':
-                result = await skillLoader.execute(call, requestId, signal);
+                result = await skillLoader.execute(
+                  call,
+                  requestId,
+                  signal,
+                  pageSnapshots.get(requestId)?.url,
+                );
                 break;
               case 'run_skill':
                 result = await skillRunner.execute(
@@ -284,6 +287,32 @@ export default defineBackground({
                 conversationId,
               ),
             );
+          },
+          onModelRound: (round) => {
+            const diagnostic = activeDiagnostics.get(round.requestId);
+            if (!diagnostic) return;
+            diagnostic.modelRounds += 1;
+            const messages = [
+              { role: 'system', content: round.systemPrompt },
+              ...round.messages.map((message) => ({
+                role: message.role,
+                content: message.content,
+              })),
+            ];
+            recorder.logLlm('chat', {
+              model: round.modelId,
+              purpose: `对话 · 回合 ${diagnostic.modelRounds}`,
+              messageCount: messages.length,
+              promptChars: messages.reduce((total, message) => total + message.content.length, 0),
+              outputChars: round.outputText.length,
+              messages,
+              outputText: round.outputText,
+              promptTokens: round.usage.inputTokens,
+              completionTokens: round.usage.outputTokens,
+              latencyMs: round.latencyMs,
+              finishReason: round.finishReason,
+              ...(round.toolName ? { toolName: round.toolName } : {}),
+            });
           },
           resolveTarget: async () => {
             await requireTrustedStorage();
@@ -732,20 +761,11 @@ export default defineBackground({
 
       const lastUser = [...history].reverse().find((message) => message.role === 'user');
       diagnosticInputs.set(requestId, lastUser?.content ?? '');
-      const chatSystemPrompt = await composeChatSystemPrompt(skillStore, memoryStore);
       activeDiagnostics.set(requestId, {
         conversationId,
         requestId,
-        messageCount: history.length + 1,
-        promptChars:
-          chatSystemPrompt.length +
-          history.reduce((total, message) => total + message.content.length, 0),
-        messages: [
-          { role: 'system', content: chatSystemPrompt },
-          ...history.map((message) => ({ role: message.role, content: message.content })),
-        ],
-        startedAt: Date.now(),
         targetResolved: false,
+        modelRounds: 0,
       });
       await saveRunCheckpoint({
         id: `checkpoint-${crypto.randomUUID()}`,
@@ -1105,20 +1125,6 @@ export default defineBackground({
       const diagnostic = activeDiagnostics.get(event.requestId);
       if (!diagnostic || diagnostic.requestId !== event.requestId) return;
 
-      const usage = event.message.usage;
-      recorder.logLlm('chat', {
-        model: event.message.modelIdentity?.modelId ?? 'unknown',
-        purpose: '对话',
-        messageCount: diagnostic.messageCount,
-        promptChars: diagnostic.promptChars,
-        outputChars: event.message.content.length,
-        messages: diagnostic.messages,
-        outputText: event.message.content,
-        promptTokens: usage?.inputTokens,
-        completionTokens: usage?.outputTokens,
-        latencyMs: Date.now() - diagnostic.startedAt,
-      });
-
       if (event.type === 'error') {
         recorder.logError('chat', event.message.errorMessage ?? '模型请求失败。');
         recorder.finishRun('chat', 'error');
@@ -1207,14 +1213,18 @@ function publicOperationError(error: unknown, secret = ''): string {
   );
 }
 
-async function composeChatSystemPrompt(skillStore: SkillStore, memoryStore?: MemoryStore) {
+async function composeChatSystemPrompt(
+  skillStore: SkillStore,
+  memoryStore?: MemoryStore,
+  sourceUrl?: string,
+) {
   const [skills, context] = await Promise.all([
     skillStore.listEnabled(),
     memoryStore?.settings() ?? Promise.resolve(undefined),
   ]);
   return [
     CHAT_SYSTEM,
-    buildSkillCatalogPrompt(skills),
+    buildSkillCatalogPrompt(skills.filter((skill) => skillAppliesToUrl(skill, sourceUrl))),
     context ? buildAgentContextPrompt(context) : '',
   ]
     .filter(Boolean)
