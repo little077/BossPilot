@@ -1,11 +1,17 @@
 import type { SkillCommand, SkillCommandResponse } from '@/lib/ipc/protocol';
 import type { SkillSettingsView } from '@/lib/skills/types';
 
-export async function sendSkillCommand(command: SkillCommand): Promise<SkillSettingsView> {
+export async function sendSkillRequest(
+  command: SkillCommand,
+): Promise<Extract<SkillCommandResponse, { ok: true }>> {
   const response: unknown = await chrome.runtime.sendMessage(command);
   if (!isSkillCommandResponse(response)) throw new Error('技能服务返回了无效响应。');
   if (!response.ok) throw new Error(response.error);
-  return response.state;
+  return response;
+}
+
+export async function sendSkillCommand(command: SkillCommand): Promise<SkillSettingsView> {
+  return (await sendSkillRequest(command)).state;
 }
 
 function isSkillCommandResponse(value: unknown): value is SkillCommandResponse {

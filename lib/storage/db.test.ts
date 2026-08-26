@@ -167,4 +167,46 @@ describe('conversation database', () => {
     });
     expect(await loadConversationRuntimeSettings('conversation-b')).toBeNull();
   });
+
+  it('adds v5 Skill package and capability tables without disturbing existing data', async () => {
+    const conversation = createConversation(1, 100);
+    await saveMessage(
+      conversation.id,
+      { id: 'user-v5', role: 'user', content: '保留我', createdAt: 101 },
+      { conversation },
+    );
+    await db.skillPackages.put({
+      name: 'local-skill',
+      definition: {
+        name: 'local-skill',
+        description: 'Local',
+        instructions: '# Workflow',
+        version: '1.0.0',
+        builtIn: false,
+        enabled: true,
+        allowedTools: [],
+        capabilities: ['workspace.read'],
+        references: [],
+      },
+      files: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    await db.capabilityGrants.put({
+      id: 'local-skill:workspace.read',
+      skillName: 'local-skill',
+      capability: 'workspace.read',
+      decision: 'allow',
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    await db.close();
+    await db.open();
+
+    expect(await loadMessages(conversation.id)).toHaveLength(1);
+    expect(await db.skillPackages.get('local-skill')).toMatchObject({ name: 'local-skill' });
+    expect(await db.capabilityGrants.get('local-skill:workspace.read')).toMatchObject({
+      decision: 'allow',
+    });
+  });
 });

@@ -46,8 +46,15 @@ import {
 import { capturePageTurnSnapshot, pageContextHistory } from '@/lib/page/snapshot';
 import { orchestrator } from '@/lib/pipeline/orchestrator';
 import { ProviderService } from '@/lib/providers/service';
+import {
+  exportAllSkillArchives,
+  exportSkillArchive,
+  importSkillArchive,
+} from '@/lib/skills/package';
 import { buildSkillCatalogPrompt } from '@/lib/skills/prompt';
+import { SkillSandboxRunner } from '@/lib/skills/sandbox';
 import { SkillStore } from '@/lib/skills/store';
+import type { SkillPackage } from '@/lib/skills/types';
 import { createTrustedStorageGate } from '@/lib/storage/access';
 import {
   loadConversationRuntimeSettings,
@@ -65,7 +72,19 @@ import {
   PageInteractionCoordinator,
 } from '@/lib/tools/page-interaction';
 import { READ_CURRENT_PAGE_TOOL, readCurrentPage } from '@/lib/tools/read-current-page';
+import { RUN_SKILL_TOOL, type SkillRunApproval, SkillRunCoordinator } from '@/lib/tools/run-skill';
 import { WORKSPACE_TOOLS, WorkspaceToolCoordinator } from '@/lib/tools/workspace';
+
+function base64ToBuffer(value: string): ArrayBuffer {
+  const binary = atob(value);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0)).buffer;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
 
 interface ActiveDiagnostic {
   conversationId: string;
@@ -87,6 +106,8 @@ export default defineBackground({
     const providerService = new ProviderService();
     const skillStore = new SkillStore();
     const skillLoader = new SkillLoadCoordinator(skillStore);
+    const skillSandbox = new SkillSandboxRunner();
+    const skillRunner = new SkillRunCoordinator(skillStore, skillSandbox);
     const memoryStore = new MemoryStore();
     const memoryTools = new MemoryToolCoordinator(memoryStore);
     const workspaceTools = new WorkspaceToolCoordinator();
@@ -98,6 +119,7 @@ export default defineBackground({
     const chatHistories = new Map<string, ChatMessage[]>();
     const cancelledPendingRequests = new Set<string>();
     const approvedToolCalls = new Set<string>();
+    const skillApprovals = new Map<string, Exclude<SkillRunApproval, null>>();
     const latestUserText = (requestId: string) => diagnosticInputs.get(requestId) ?? '';
     const activeDiagnostics = new Map<string, ActiveDiagnostic>();
 
@@ -133,6 +155,7 @@ export default defineBackground({
             OBSERVE_VISUAL_PAGE_TOOL,
             INTERACT_PAGE_TOOL,
             LOAD_SKILL_TOOL,
+            RUN_SKILL_TOOL,
             SEARCH_MEMORY_TOOL,
             SAVE_MEMORY_TOOL,
             ...WORKSPACE_TOOLS,
@@ -191,6 +214,15 @@ export default defineBackground({
                 break;
               case 'load_skill':
                 result = await skillLoader.execute(call, requestId, signal);
+                break;
+              case 'run_skill':
+                result = await skillRunner.execute(
+                  call,
+                  conversationId,
+                  skillApprovals.get(call.id) ?? null,
+                  signal,
+                );
+                skillApprovals.delete(call.id);
                 break;
               case 'search_memory':
               case 'save_memory':
@@ -340,19 +372,71 @@ export default defineBackground({
     chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
       if (!isSkillCommand(raw) || !isTrustedExtensionPage(sender)) return;
       void requireTrustedStorage()
-        .then(() =>
-          raw.type === 'skills:get'
-            ? skillStore.list()
-            : skillStore.setEnabled(raw.name, raw.enabled),
-        )
+        .then(async () => {
+          let skill: SkillPackage | undefined;
+          let archiveBase64: string | undefined;
+          switch (raw.type) {
+            case 'skills:get':
+              break;
+            case 'skills:set-enabled':
+              await skillStore.setEnabled(raw.name, raw.enabled);
+              break;
+            case 'skills:create':
+              skill = await skillStore.create(raw.name);
+              break;
+            case 'skills:get-package':
+              skill = await skillStore.getPackage(raw.name);
+              break;
+            case 'skills:save-package':
+              skill = await skillStore.savePackage(raw.name, raw.files);
+              break;
+            case 'skills:import':
+              skill = await skillStore.importPackage(
+                await importSkillArchive(base64ToBuffer(raw.archiveBase64)),
+              );
+              break;
+            case 'skills:export':
+              archiveBase64 = bytesToBase64(
+                await exportSkillArchive(await skillStore.getPackage(raw.name)),
+              );
+              break;
+            case 'skills:export-all':
+              archiveBase64 = bytesToBase64(
+                await exportAllSkillArchives(await skillStore.listAllPackages()),
+              );
+              break;
+            case 'skills:duplicate':
+              skill = await skillStore.duplicate(raw.name, raw.nextName);
+              break;
+            case 'skills:delete':
+              await skillStore.delete(raw.name);
+              break;
+            case 'skills:revoke-grant':
+              await skillStore.revokeGrant(raw.id);
+              break;
+          }
+          return { state: await skillStore.list(), skill, archiveBase64 };
+        })
         .then(
-          (state) => sendResponse({ ok: true, state } satisfies SkillCommandResponse),
+          ({ state, skill, archiveBase64 }) =>
+            sendResponse({ ok: true, state, skill, archiveBase64 } satisfies SkillCommandResponse),
           (error: unknown) =>
             sendResponse({
               ok: false,
               error: publicOperationError(error, ''),
             } satisfies SkillCommandResponse),
         );
+      return true;
+    });
+
+    chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
+      if (
+        !isTrustedExtensionPage(sender) ||
+        !isRecord(raw) ||
+        raw.type !== 'skill-capability:request'
+      )
+        return;
+      void skillSandbox.handleCapabilityRequest(raw).then(sendResponse);
       return true;
     });
 
@@ -924,6 +1008,42 @@ export default defineBackground({
                 '视觉观察未执行：用户没有允许发送当前页面截图。请改用 DOM/文本工具；除非用户重新明确要求，否则不要再次请求截图。',
             });
           }
+        } else if (pending.generation.toolCall.name === 'run_skill') {
+          const toolCall = pending.generation.toolCall;
+          if (normalizedAnswer === '仅本次允许' || normalizedAnswer === '持续允许') {
+            skillApprovals.set(toolCall.id, normalizedAnswer === '持续允许' ? 'always' : 'once');
+            await resumeDeferred();
+          } else {
+            const skillName =
+              typeof toolCall.arguments.skill === 'string' ? toolCall.arguments.skill : '';
+            if (skillName) {
+              const skill = await skillStore.getPackage(skillName).catch(() => null);
+              if (skill) {
+                const decisions = await Promise.all(
+                  skill.definition.capabilities.map(async (capability) => ({
+                    capability,
+                    decision: await skillStore.persistentGrant(skillName, capability),
+                  })),
+                );
+                await Promise.all(
+                  decisions.flatMap(({ capability, decision }) =>
+                    decision === 'allow'
+                      ? []
+                      : [skillStore.resolveGrant(skillName, capability, 'deny')],
+                  ),
+                );
+              }
+            }
+            await resumeDeferred({
+              isError: true,
+              statusText: '用户拒绝 Skill 能力',
+              detail: 'Skill 脚本没有执行，可在设置中撤销拒绝记录。',
+              content: 'Skill 脚本未执行：用户拒绝了所需能力。不要静默绕过或改用未授权能力。',
+              riskLevel: 'write',
+              authorizationStatus: 'denied',
+              recoverability: 'user_retry',
+            });
+          }
         } else if (pending.generation.toolCall.name.startsWith('workspace_')) {
           if (normalizedAnswer === '确认执行') {
             approvedToolCalls.add(pending.generation.toolCall.id);
@@ -967,6 +1087,7 @@ export default defineBackground({
         }
       } finally {
         approvedToolCalls.delete(pending.generation.toolCall.id);
+        skillApprovals.delete(pending.generation.toolCall.id);
         const nextPending = await loadPendingPageTurn(requestId).catch(() => null);
         if (nextPending?.requestId !== requestId) {
           await pageInteraction.clear(requestId).catch(() => void 0);

@@ -4,11 +4,11 @@ import { gzipSync } from 'node:zlib';
 
 const outputDirectory = path.resolve('.output/chrome-mv3');
 const maximumJavaScriptBytes = 850 * 1024;
-const maximumBackgroundEntryBytes = 100 * 1024;
-// 官方 MCP 2.x 客户端增加协议校验与 2025/2026 自动协商代码；未压缩预算相应留出 256 KiB，
-// 压缩后 950 KiB 的商店下载预算保持不变。
-const maximumExtensionBytes = 3.25 * 1024 * 1024;
-const maximumCompressedExtensionBytes = 950 * 1024;
+const maximumBackgroundEntryBytes = 110 * 1024;
+// v1.3 引入 CodeMirror 6 多文件编辑器与 JSZip 安全导入器；两者均按页面/静态 chunk 隔离，
+// 仍保留单文件 850 KiB 门禁，并将商店压缩包增量限制在约 176 KiB 内。
+const maximumExtensionBytes = 4.25 * 1024 * 1024;
+const maximumCompressedExtensionBytes = 1.1 * 1024 * 1024;
 
 async function listFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true });

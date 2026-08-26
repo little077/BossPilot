@@ -5,8 +5,8 @@ const VALID = `---
 name: test-skill
 description: A focused browser workflow
 metadata:
-  matched-origins:
-    - https://example.com/*
+  bosspilot-origins: https://example.com/*
+  bosspilot-permissions: workspace.read workspace.write network:https://example.com
 allowed-tools: browser_action read_current_page browser_action INVALID
 ---
 # Test
@@ -25,6 +25,7 @@ describe('parseSkillMarkdown', () => {
         enabled: true,
         matchedOrigins: ['https://example.com/*'],
         allowedTools: ['browser_action', 'read_current_page'],
+        capabilities: ['workspace.read', 'workspace.write', 'network:https://example.com'],
         references: [{ path: 'references/guide.md', label: 'guide' }],
       }),
     );

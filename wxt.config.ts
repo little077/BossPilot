@@ -64,10 +64,25 @@ export default defineConfig({
     name: 'BossPilot — 浏览器 AI 助手',
     description:
       '在浏览器侧边栏与 AI 对话，按需观察并操作当前网页、管理标签页；在 Boss 直聘提供岗位分析增强。',
-    permissions: ['sidePanel', 'tabs', 'activeTab', 'scripting', 'storage', 'downloads'],
+    permissions: [
+      'sidePanel',
+      'tabs',
+      'activeTab',
+      'scripting',
+      'storage',
+      'downloads',
+      'offscreen',
+    ],
     host_permissions: ['https://www.zhipin.com/*'],
     // 模型端点在用户点「开通」时按具体 origin 申请；不把模型全网权限设为常驻权限。
     optional_host_permissions: ['https://*/*', 'http://*/*'],
+    sandbox: {
+      pages: ['skill-sandbox.html'],
+    },
+    content_security_policy: {
+      sandbox:
+        "sandbox allow-scripts; script-src 'self' 'unsafe-eval'; connect-src 'none'; img-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'; child-src 'self'",
+    },
     action: {
       default_title: '打开 BossPilot 侧边栏',
     },

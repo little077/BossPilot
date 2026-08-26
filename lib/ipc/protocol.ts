@@ -7,7 +7,7 @@ import type { ProviderStateView, SearchTaskParams, TaskSnapshot } from '@/lib/do
 import type { AgentRunSnapshot } from '@/lib/generation/registry';
 import type { McpSettingsView } from '@/lib/mcp/types';
 import type { AgentContextView } from '@/lib/memory/types';
-import type { SkillSettingsView } from '@/lib/skills/types';
+import type { SkillPackage, SkillPackageFile, SkillSettingsView } from '@/lib/skills/types';
 
 export const AGENT_PORT_NAME = 'bosspilot-agent';
 
@@ -210,10 +210,19 @@ export type ProviderCommandResponse =
 
 export type SkillCommand =
   | { type: 'skills:get' }
-  | { type: 'skills:set-enabled'; name: string; enabled: boolean };
+  | { type: 'skills:set-enabled'; name: string; enabled: boolean }
+  | { type: 'skills:create'; name: string }
+  | { type: 'skills:get-package'; name: string }
+  | { type: 'skills:save-package'; name: string; files: SkillPackageFile[] }
+  | { type: 'skills:import'; archiveBase64: string }
+  | { type: 'skills:export'; name: string }
+  | { type: 'skills:export-all' }
+  | { type: 'skills:duplicate'; name: string; nextName: string }
+  | { type: 'skills:delete'; name: string }
+  | { type: 'skills:revoke-grant'; id: string };
 
 export type SkillCommandResponse =
-  | { ok: true; state: SkillSettingsView }
+  | { ok: true; state: SkillSettingsView; skill?: SkillPackage; archiveBase64?: string }
   | { ok: false; error: string };
 
 export type AgentContextCommand =
@@ -285,11 +294,54 @@ export function isAgentContextCommand(value: unknown): value is AgentContextComm
 
 export function isSkillCommand(value: unknown): value is SkillCommand {
   if (!isRecord(value) || typeof value.type !== 'string') return false;
-  if (value.type === 'skills:get') return true;
+  switch (value.type) {
+    case 'skills:get':
+    case 'skills:export-all':
+      return true;
+    case 'skills:set-enabled':
+      return isSkillName(value.name) && typeof value.enabled === 'boolean';
+    case 'skills:create':
+    case 'skills:get-package':
+    case 'skills:export':
+    case 'skills:delete':
+      return isSkillName(value.name);
+    case 'skills:duplicate':
+      return isSkillName(value.name) && isSkillName(value.nextName);
+    case 'skills:save-package':
+      return isSkillName(value.name) && isSkillFiles(value.files);
+    case 'skills:import':
+      return typeof value.archiveBase64 === 'string' && value.archiveBase64.length <= 7_000_000;
+    case 'skills:revoke-grant':
+      return isBoundedString(value.id, 384);
+    default:
+      return false;
+  }
+}
+
+function isSkillName(value: unknown): value is string {
   return (
-    value.type === 'skills:set-enabled' &&
-    isBoundedString(value.name, 64) &&
-    typeof value.enabled === 'boolean'
+    typeof value === 'string' && value.length <= 64 && /^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(value)
+  );
+}
+
+function isSkillFiles(value: unknown): value is SkillPackageFile[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= 100 &&
+    value.every(
+      (file) =>
+        isRecord(file) &&
+        isBoundedString(file.path, 512) &&
+        (file.kind === 'text' || file.kind === 'binary') &&
+        typeof file.content === 'string' &&
+        file.content.length <= 3_000_000 &&
+        isBoundedString(file.mimeType, 128) &&
+        typeof file.size === 'number' &&
+        Number.isSafeInteger(file.size) &&
+        file.size >= 0 &&
+        file.size <= 2 * 1024 * 1024,
+    )
   );
 }
 

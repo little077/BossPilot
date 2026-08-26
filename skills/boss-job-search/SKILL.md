@@ -2,8 +2,8 @@
 name: boss-job-search
 description: 在 Boss 直聘执行可验证的岗位搜索、岗位列表整理、职位详情分析和多岗位对比。用户提到 Boss 直聘、找工作、搜索职位、筛选岗位、比较 JD、评估岗位匹配度或求职条件时使用。
 metadata:
-  matched-origins:
-    - https://www.zhipin.com/*
+  bosspilot-origins: https://www.zhipin.com/*
+  bosspilot-permissions: page.read
 allowed-tools: browser_action read_current_page observe_page observe_visual_page interact_page ask_user load_skill
 ---
 

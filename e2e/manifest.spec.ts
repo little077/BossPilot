@@ -8,18 +8,24 @@ interface BuiltManifest {
   host_permissions?: string[];
   optional_host_permissions?: string[];
   web_accessible_resources?: unknown[];
+  sandbox?: { pages?: string[] };
+  content_security_policy?: { sandbox?: string };
 }
 
 test('正式构建只常驻 Boss 直聘权限，模型端点保持按需授权', async () => {
   const manifestPath = path.resolve('.output/chrome-mv3/manifest.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as BuiltManifest;
 
-  expect(manifest.version).toBe('1.2.0');
+  expect(manifest.version).toBe('1.3.0');
   expect(manifest.permissions).toContain('activeTab');
+  expect(manifest.permissions).toContain('offscreen');
   expect(manifest.host_permissions).toEqual(['https://www.zhipin.com/*']);
   expect(manifest.optional_host_permissions).toEqual(['https://*/*', 'http://*/*']);
   expect([...(manifest.permissions ?? []), ...(manifest.host_permissions ?? [])]).not.toContain(
     '<all_urls>',
   );
   expect(manifest.web_accessible_resources).toBeUndefined();
+  expect(manifest.sandbox?.pages).toEqual(['skill-sandbox.html']);
+  expect(manifest.content_security_policy?.sandbox).toContain("connect-src 'none'");
+  expect(manifest.content_security_policy?.sandbox).not.toContain('allow-same-origin');
 });

@@ -96,3 +96,34 @@ test('设置页可以运行本地 Agent 自检并提供安全备份入口', asyn
   await expect(page.getByText('默认模型')).toBeVisible();
   await expect(page.getByText(/未发现常驻的全站网页权限/)).toBeVisible();
 });
+
+test('设置页可以创建本地 Skill 并进入多文件编辑器', async ({ context, extensionId }) => {
+  const page = await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  await page.getByRole('button', { name: '设置' }).click();
+  await expect(page.getByRole('heading', { name: 'Agent Skills' })).toBeVisible();
+
+  page.once('dialog', (dialog) => dialog.accept('e2e-local-skill'));
+  await page.getByRole('button', { name: '新建' }).click();
+  await expect(page.getByRole('dialog', { name: 'e2e-local-skill' })).toBeVisible();
+  await expect(page.getByRole('complementary', { name: 'Skill 文件' })).toBeVisible();
+  await expect(page.locator('.skill-codemirror .cm-editor')).toBeVisible();
+  await page.getByRole('button', { name: '关闭', exact: true }).click();
+  await expect(page.getByRole('article', { name: 'e2e-local-skill 技能' })).toBeVisible();
+});
+
+test('Skill sandbox 不暴露扩展 API 或网络能力', async ({ context, extensionId }) => {
+  const page = await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/skill-sandbox.html`);
+  expect(await page.evaluate(() => typeof chrome.runtime)).toBe('undefined');
+
+  const blocked = await page.evaluate(async () => {
+    try {
+      await fetch('https://example.com/');
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  expect(blocked).toBe(true);
+});

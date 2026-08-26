@@ -10,6 +10,7 @@ import type {
   RunCheckpoint,
   StoredChatMessage,
 } from '@/lib/domain/chat';
+import type { CapabilityGrant, SkillPackage } from '@/lib/skills/types';
 import type { WorkspaceBody, WorkspaceEntry, WorkspaceVersion } from '@/lib/workspace/types';
 
 const PREVIEW_CHARS = 80;
@@ -23,6 +24,8 @@ class BossPilotDb extends Dexie {
   workspaceEntries!: Table<WorkspaceEntry, string>;
   workspaceBodies!: Table<WorkspaceBody, string>;
   workspaceVersions!: Table<WorkspaceVersion, string>;
+  skillPackages!: Table<SkillPackage, string>;
+  capabilityGrants!: Table<CapabilityGrant, string>;
 
   constructor() {
     super('bosspilot');
@@ -76,6 +79,20 @@ class BossPilotDb extends Dexie {
       workspaceBodies: 'id, conversationId, [conversationId+path]',
       workspaceVersions:
         'id, entryId, conversationId, [conversationId+path], [entryId+version], createdAt',
+    });
+    // v5 只追加 Skills 表；若升级中断，Dexie 会回滚事务并保留 v4 数据。
+    this.version(5).stores({
+      conversations: 'id, ordinal, updatedAt, unread',
+      messages: 'id, conversationId, [conversationId+createdAt], createdAt',
+      conversationRuntimeSettings: 'conversationId, updatedAt',
+      runCheckpoints: 'id, runId, conversationId, [conversationId+createdAt], createdAt',
+      compactionSummaries: 'id, runId, conversationId, [conversationId+createdAt], createdAt',
+      workspaceEntries: 'id, conversationId, [conversationId+path], parentPath, updatedAt',
+      workspaceBodies: 'id, conversationId, [conversationId+path]',
+      workspaceVersions:
+        'id, entryId, conversationId, [conversationId+path], [entryId+version], createdAt',
+      skillPackages: 'name, updatedAt',
+      capabilityGrants: 'id, skillName, capability, [skillName+capability], updatedAt',
     });
   }
 }

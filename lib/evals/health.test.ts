@@ -18,7 +18,7 @@ function snapshot(): AgentHealthSnapshot {
       ],
     },
     skills: {
-      version: 1,
+      version: 2,
       skills: [
         {
           name: 'boss-job-search',
@@ -26,8 +26,11 @@ function snapshot(): AgentHealthSnapshot {
           version: '1',
           builtIn: true,
           enabled: true,
+          capabilities: [],
+          fileCount: 1,
         },
       ],
+      grants: [],
     },
     context: {
       settings: { version: 1, instructions: '', memoryEnabled: true },

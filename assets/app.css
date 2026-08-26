@@ -1031,6 +1031,176 @@ body {
   opacity: 0;
 }
 
+.skill-toolbar,
+.skill-card-actions,
+.skill-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.skill-toolbar button,
+.skill-card-actions button,
+.skill-grants button,
+.skill-editor button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  border: 1px solid var(--color-line);
+  border-radius: 7px;
+  background: var(--color-surface);
+  color: var(--color-ink-muted);
+  padding: 4px 7px;
+  font-size: 8px;
+}
+
+.skill-toolbar button:hover,
+.skill-card-actions button:hover,
+.skill-grants button:hover,
+.skill-editor button:hover {
+  border-color: var(--color-line-strong);
+  color: var(--color-brand);
+}
+
+.skill-card-actions {
+  margin-top: 4px;
+}
+
+.skill-grants {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  padding: 8px;
+  color: var(--color-ink-muted);
+  font-size: 8px;
+}
+
+.skill-grants > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.skill-editor {
+  display: flex;
+  min-height: 460px;
+  flex-direction: column;
+  gap: 7px;
+  border-top: 1px solid var(--color-line);
+  padding-top: 13px;
+}
+
+.skill-editor-header,
+.skill-editor-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.skill-editor-header > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.skill-editor-header strong {
+  color: var(--color-ink);
+  font-size: 11px;
+}
+
+.skill-editor-header small {
+  color: var(--color-ink-faint);
+  font-size: 8px;
+}
+
+.skill-editor-body {
+  display: grid;
+  min-height: 350px;
+  grid-template-columns: 94px minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  border-radius: 11px;
+  background: var(--color-surface);
+}
+
+.skill-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow: auto;
+  border-right: 1px solid var(--color-line);
+  background: var(--color-surface-soft);
+  padding: 6px;
+}
+
+.skill-file-list button {
+  justify-content: flex-start;
+  overflow: hidden;
+  border-color: transparent;
+  background: transparent;
+  padding: 5px;
+}
+
+.skill-file-list button[aria-current="page"] {
+  border-color: var(--color-line);
+  background: var(--color-surface);
+  color: var(--color-brand);
+}
+
+.skill-file-list button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-code-pane,
+.skill-codemirror {
+  min-width: 0;
+  min-height: 350px;
+}
+
+.skill-codemirror .cm-editor {
+  height: 350px;
+  color: var(--color-ink);
+  font-size: 9px;
+}
+
+.skill-codemirror .cm-scroller {
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.skill-codemirror .cm-gutters {
+  border-color: var(--color-line);
+  background: var(--color-surface-soft);
+  color: var(--color-ink-faint);
+}
+
+.skill-editor-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  border: 1px solid color-mix(in srgb, var(--color-danger) 32%, var(--color-line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-danger) 7%, var(--color-surface));
+  color: var(--color-danger);
+  padding: 6px;
+  font-size: 8px;
+}
+
+.skill-editor-actions > span {
+  flex: 1;
+}
+
+.skill-editor-actions .danger {
+  color: var(--color-danger);
+}
+
 .chat-history-toggle {
   position: relative;
   display: flex;

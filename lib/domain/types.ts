@@ -369,6 +369,7 @@ export type DomainToolName =
   | 'observe_visual_page'
   | 'interact_page'
   | 'load_skill'
+  | 'run_skill'
   | 'search_memory'
   | 'save_memory'
   | 'workspace_create'

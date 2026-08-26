@@ -1,10 +1,11 @@
 import { parseDocument } from 'yaml';
-import type { SkillDefinition, SkillReference } from '@/lib/skills/types';
+import type { SkillCapability, SkillDefinition, SkillReference } from '@/lib/skills/types';
 
 const MAX_SKILL_CHARS = 20_000;
 const MAX_DESCRIPTION_CHARS = 1_024;
 const MAX_REFERENCE_COUNT = 16;
 const MAX_ALLOWED_TOOL_COUNT = 32;
+const MAX_CAPABILITY_COUNT = 32;
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const REFERENCE_LINK = /`(references\/[a-zA-Z0-9][a-zA-Z0-9._/-]*\.md)`/gu;
 
@@ -16,7 +17,11 @@ export interface ParseSkillOptions {
 }
 
 export class SkillParseError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly line = 1,
+    readonly column = 1,
+  ) {
     super(message);
     this.name = 'SkillParseError';
   }
@@ -31,7 +36,15 @@ export function parseSkillMarkdown(markdown: string, options: ParseSkillOptions)
     throw new SkillParseError('SKILL.md 必须包含 YAML frontmatter 和指令正文。');
   }
   const document = parseDocument(frontmatter[1], { uniqueKeys: true });
-  if (document.errors.length > 0) throw new SkillParseError('Skill frontmatter 不是有效 YAML。');
+  const yamlError = document.errors[0];
+  if (yamlError) {
+    const position = yamlError.linePos?.[0];
+    throw new SkillParseError(
+      'Skill frontmatter 不是有效 YAML。',
+      (position?.line ?? 1) + 1,
+      position?.col ?? 1,
+    );
+  }
   const data = document.toJS({ maxAliasCount: 0 }) as unknown;
   if (!isRecord(data)) throw new SkillParseError('Skill frontmatter 必须是对象。');
 
@@ -43,8 +56,13 @@ export function parseSkillMarkdown(markdown: string, options: ParseSkillOptions)
   if (!description) throw new SkillParseError('Skill description 不能为空。');
 
   const metadata = isRecord(data.metadata) ? data.metadata : {};
-  const matchedOrigins = stringArray(metadata['matched-origins'], 16, 256).filter(isOriginPattern);
+  const matchedOrigins = readWords(
+    metadata['bosspilot-origins'] ?? metadata['matched-origins'],
+    16,
+    256,
+  ).filter(isOriginPattern);
   const allowedTools = readAllowedTools(data['allowed-tools']);
+  const capabilities = readCapabilities(metadata['bosspilot-permissions']);
   const instructions = frontmatter[2].trim();
 
   return {
@@ -56,8 +74,28 @@ export function parseSkillMarkdown(markdown: string, options: ParseSkillOptions)
     enabled: options.enabled ?? true,
     ...(matchedOrigins.length ? { matchedOrigins } : {}),
     allowedTools,
+    capabilities,
     references: collectReferences(instructions),
   };
+}
+
+function readCapabilities(value: unknown): SkillCapability[] {
+  return readWords(value, MAX_CAPABILITY_COUNT, 256).filter(isSkillCapability);
+}
+
+function isSkillCapability(value: string): value is SkillCapability {
+  if (
+    value === 'workspace.read' ||
+    value === 'workspace.write' ||
+    value === 'page.read' ||
+    value === 'page.script' ||
+    value === 'chrome.tabs' ||
+    value === 'chrome.bookmarks'
+  ) {
+    return true;
+  }
+  if (!value.startsWith('network:')) return false;
+  return isOriginPattern(`${value.slice('network:'.length).replace(/\/$/u, '')}/*`);
 }
 
 function readAllowedTools(value: unknown): string[] {
@@ -95,13 +133,15 @@ function isOriginPattern(value: string): boolean {
   }
 }
 
-function stringArray(value: unknown, maxItems: number, maxChars: number): string[] {
-  return Array.isArray(value)
-    ? [...new Set(value.flatMap((item) => (boundedString(item, maxChars) ? [item] : [])))].slice(
-        0,
-        maxItems,
-      )
-    : [];
+function readWords(value: unknown, maxItems: number, maxChars: number): string[] {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(/\s+/u)
+      : [];
+  return [
+    ...new Set(values.flatMap((item) => (boundedString(item, maxChars) ? [item] : []))),
+  ].slice(0, maxItems);
 }
 
 function boundedString(value: unknown, maxChars: number): string | undefined {

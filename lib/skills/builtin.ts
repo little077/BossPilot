@@ -24,6 +24,7 @@ const BOSS_SKILL_DEFINITION: SkillDefinition = {
     'ask_user',
     'load_skill',
   ],
+  capabilities: ['page.read'],
   references: [
     { path: 'references/search-workflow.md', label: 'search-workflow' },
     { path: 'references/job-evaluation.md', label: 'job-evaluation' },

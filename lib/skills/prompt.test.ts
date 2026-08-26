@@ -9,6 +9,8 @@ const skill = (name: string, enabled = true): SkillCatalogEntry => ({
   builtIn: true,
   enabled,
   matchedOrigins: ['https://example.com/*'],
+  capabilities: [],
+  fileCount: 1,
 });
 
 describe('buildSkillCatalogPrompt', () => {

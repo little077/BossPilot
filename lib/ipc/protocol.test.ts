@@ -355,6 +355,41 @@ describe('IPC runtime validation', () => {
       false,
     );
     expect(isSkillCommand({ type: 'skills:unknown' })).toBe(false);
+    expect(isSkillCommand({ type: 'skills:export-all' })).toBe(true);
+    for (const type of ['skills:create', 'skills:get-package', 'skills:export', 'skills:delete']) {
+      expect(isSkillCommand({ type, name: 'local-skill' })).toBe(true);
+      expect(isSkillCommand({ type, name: 'Invalid Name' })).toBe(false);
+    }
+    expect(
+      isSkillCommand({ type: 'skills:duplicate', name: 'local-skill', nextName: 'copy-skill' }),
+    ).toBe(true);
+    expect(isSkillCommand({ type: 'skills:duplicate', name: 'local-skill', nextName: '' })).toBe(
+      false,
+    );
+    expect(
+      isSkillCommand({
+        type: 'skills:save-package',
+        name: 'local-skill',
+        files: [
+          {
+            path: 'SKILL.md',
+            kind: 'text',
+            content: '# test',
+            mimeType: 'text/markdown',
+            size: 6,
+          },
+        ],
+      }),
+    ).toBe(true);
+    expect(isSkillCommand({ type: 'skills:save-package', name: 'local-skill', files: [] })).toBe(
+      false,
+    );
+    expect(isSkillCommand({ type: 'skills:import', archiveBase64: 'UEs=' })).toBe(true);
+    expect(isSkillCommand({ type: 'skills:import', archiveBase64: 'x'.repeat(7_000_001) })).toBe(
+      false,
+    );
+    expect(isSkillCommand({ type: 'skills:revoke-grant', id: 'skill:workspace.read' })).toBe(true);
+    expect(isSkillCommand({ type: 'skills:revoke-grant', id: '' })).toBe(false);
   });
 
   it('validates bounded local context commands', () => {
