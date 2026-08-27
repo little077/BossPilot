@@ -17,6 +17,7 @@ function bundle(name = 'test-skill'): BuiltinSkillBundle {
     },
     instructions: { kind: 'inline', value: '# Workflow' },
     references: { 'references/guide.md': { kind: 'inline', value: '# Guide' } },
+    scripts: { 'scripts/collect.js': { kind: 'inline', value: 'return input;' } },
   };
 }
 

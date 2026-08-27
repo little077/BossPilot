@@ -12,6 +12,10 @@ Object.defineProperty(HTMLElement.prototype, 'innerText', {
   },
 });
 
+// jsdom 未实现的滚动 API；适配层注入函数在真实浏览器中由 Chrome 提供。
+HTMLElement.prototype.scrollIntoView = vi.fn();
+HTMLElement.prototype.scrollBy = vi.fn();
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();

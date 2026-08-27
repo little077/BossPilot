@@ -136,8 +136,12 @@ export class SkillStore {
     return {
       version: 2,
       skills: [
-        ...this.bundles.map(({ definition }) =>
-          toCatalogEntry(definition, disabled, 1 + definition.references.length),
+        ...this.bundles.map(({ definition, scripts }) =>
+          toCatalogEntry(
+            definition,
+            disabled,
+            1 + definition.references.length + Object.keys(scripts).length,
+          ),
         ),
         ...packages.map((skill) => toCatalogEntry(skill.definition, disabled, skill.files.length)),
       ].sort((left, right) => left.name.localeCompare(right.name)),
@@ -255,6 +259,9 @@ export class SkillStore {
       textSkillFile('SKILL.md', await this.readResource(bundle.instructions)),
     ];
     for (const [path, resource] of Object.entries(bundle.references)) {
+      files.push(textSkillFile(path, await this.readResource(resource)));
+    }
+    for (const [path, resource] of Object.entries(bundle.scripts)) {
       files.push(textSkillFile(path, await this.readResource(resource)));
     }
     return {
@@ -436,6 +443,9 @@ function cloneBundle(bundle: BuiltinSkillBundle): BuiltinSkillBundle {
     instructions: { ...bundle.instructions },
     references: Object.fromEntries(
       Object.entries(bundle.references).map(([path, resource]) => [path, { ...resource }]),
+    ),
+    scripts: Object.fromEntries(
+      Object.entries(bundle.scripts).map(([path, resource]) => [path, { ...resource }]),
     ),
   };
 }

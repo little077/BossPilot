@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WorkspaceStore } from '@/lib/workspace/storage';
-import { ChromeSkillHostClient, type SkillHostClient, SkillSandboxRunner } from './sandbox';
+import {
+  ChromeSkillHostClient,
+  type PageExecutor,
+  type SkillHostClient,
+  SkillSandboxRunner,
+} from './sandbox';
 
 describe('ChromeSkillHostClient', () => {
   const hasDocument = vi.fn();
@@ -82,13 +87,28 @@ describe('SkillSandboxRunner guards', () => {
           headers: { 'content-type': 'text/plain' },
         }),
     );
-    vi.stubGlobal('chrome', { permissions: { contains: vi.fn(async () => true) } });
-    const runner = new SkillSandboxRunner(host, workspace, fetcher as typeof fetch);
+    const pageExecutor: PageExecutor = {
+      execute: vi.fn(async () => ({ source: 'page' })),
+    };
+    vi.stubGlobal('chrome', {
+      permissions: { contains: vi.fn(async () => true) },
+      tabs: {
+        query: vi.fn(async () => [{ id: 7, url: 'https://www.xiaohongshu.com/user/profile/a' }]),
+        get: vi.fn(async () => ({ id: 7, url: 'https://www.xiaohongshu.com/user/profile/a' })),
+      },
+    });
+    const runner = new SkillSandboxRunner(host, workspace, fetcher as typeof fetch, pageExecutor);
     const running = runner.run(
       'conversation',
       'return input;',
       {},
-      ['workspace.read', 'workspace.write', 'network:https://example.com', 'page.read'],
+      [
+        'workspace.read',
+        'workspace.write',
+        'network:https://example.com',
+        'page.read',
+        'page.script',
+      ],
       new AbortController().signal,
     );
     await vi.waitFor(() => expect(activeRunId).not.toBe(''));
@@ -114,8 +134,23 @@ describe('SkillSandboxRunner guards', () => {
     ).resolves.toMatchObject({ ok: false, error: expect.stringContaining('超出') });
     await expect(request('page.read', {})).resolves.toMatchObject({
       ok: false,
-      error: expect.stringContaining('v1.4'),
+      error: expect.stringContaining('页面函数名'),
     });
+    await expect(request('page.read', { fn: 'xhs.unknown' })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('未注册'),
+    });
+    await expect(request('page.read', { fn: 'xhs.scrollFeeds' })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('不匹配'),
+    });
+    await expect(
+      request('page.read', { fn: 'xhs.extractProfile', tabId: 7 }),
+    ).resolves.toMatchObject({ ok: true, result: { source: 'page' } });
+    await expect(
+      request('page.script', { fn: 'xhs.scrollFeeds', args: [600], tabId: 7 }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(pageExecutor.execute).toHaveBeenCalledWith(7, expect.any(Function), [600]);
     await expect(
       request('workspace.write', { operation: 'delete', path: '/a.md' }),
     ).resolves.toMatchObject({ ok: false, error: expect.stringContaining('不受支持') });

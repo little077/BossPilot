@@ -1,4 +1,15 @@
 // Skill 脚本宿主：脚本只在 Chrome sandbox 页运行，本模块是唯一受控能力代理。
+import {
+  closeXhsNote,
+  extractXhsComments,
+  extractXhsNoteDetail,
+  extractXhsNoteList,
+  extractXhsProfile,
+  isXhsNoteOpen,
+  openXhsNote,
+  scrollXhsComments,
+  scrollXhsFeeds,
+} from '@/lib/adapter/xhs';
 import type { SkillCapability } from '@/lib/skills/types';
 import { WorkspaceStore } from '@/lib/workspace/storage';
 
@@ -10,6 +21,56 @@ let offscreenCreation: Promise<void> | null = null;
 interface ActiveSkillRun {
   conversationId: string;
   capabilities: Set<SkillCapability>;
+}
+
+// ─── 页面能力白名单 ───
+//
+// 架构红线：选择器只能存在于适配层（lib/adapter/）。因此 page.read / page.script
+// 不接受任意代码字符串，只允许按名调用注册表中的适配层函数。站点改版时，
+// 只需更新适配层函数，Skill 脚本与 LLM 工作流无需改动。
+
+type PageFunctionKind = 'read' | 'script';
+
+interface PageFunctionEntry {
+  fn: (...args: unknown[]) => unknown;
+  kind: PageFunctionKind;
+}
+
+// 登记注入函数：适配层函数签名更严格（安全方向），此处做一次统一的注入边界转换。
+// 这些函数只被序列化注入到页面后由 chrome.scripting 调用，本模块从不直接展开调用。
+function pageFunction<T extends (...args: never[]) => unknown>(
+  fn: T,
+  kind: PageFunctionKind,
+): PageFunctionEntry {
+  return { fn: fn as unknown as (...args: unknown[]) => unknown, kind };
+}
+
+const PAGE_FUNCTIONS: Readonly<Record<string, PageFunctionEntry>> = {
+  'xhs.extractProfile': pageFunction(extractXhsProfile, 'read'),
+  'xhs.extractNoteList': pageFunction(extractXhsNoteList, 'read'),
+  'xhs.isNoteOpen': pageFunction(isXhsNoteOpen, 'read'),
+  'xhs.extractNoteDetail': pageFunction(extractXhsNoteDetail, 'read'),
+  'xhs.extractComments': pageFunction(extractXhsComments, 'read'),
+  'xhs.scrollFeeds': pageFunction(scrollXhsFeeds, 'script'),
+  'xhs.scrollComments': pageFunction(scrollXhsComments, 'script'),
+  'xhs.openNote': pageFunction(openXhsNote, 'script'),
+  'xhs.closeNote': pageFunction(closeXhsNote, 'script'),
+};
+
+/** 页面函数执行器：生产环境走 chrome.scripting，测试可注入替身。 */
+export interface PageExecutor {
+  execute(tabId: number, fn: (...args: unknown[]) => unknown, args: unknown[]): Promise<unknown>;
+}
+
+export class ChromePageExecutor implements PageExecutor {
+  async execute(
+    tabId: number,
+    fn: (...args: unknown[]) => unknown,
+    args: unknown[],
+  ): Promise<unknown> {
+    const injected = await chrome.scripting.executeScript({ target: { tabId }, func: fn, args });
+    return injected[0]?.result;
+  }
 }
 
 export interface SkillHostClient {
@@ -38,6 +99,7 @@ export class SkillSandboxRunner {
     private readonly host: SkillHostClient = new ChromeSkillHostClient(),
     private readonly workspace: WorkspaceStore = new WorkspaceStore(),
     private readonly fetcher: typeof fetch = fetch,
+    private readonly pageExecutor: PageExecutor = new ChromePageExecutor(),
   ) {}
 
   async run(
@@ -137,7 +199,35 @@ export class SkillSandboxRunner {
         body,
       };
     }
-    throw new Error('该能力将在 v1.4 浏览器工具箱中开放。');
+    if (capability === 'page.read' || capability === 'page.script') {
+      return this.executePageFunction(capability, payload);
+    }
+    throw new Error('Skill 声明的能力不受支持。');
+  }
+
+  private async executePageFunction(
+    capability: 'page.read' | 'page.script',
+    payload: Record<string, unknown>,
+  ): Promise<unknown> {
+    const name = boundedString(payload.fn, 128);
+    if (!name) throw new Error('页面函数名无效。');
+    const entry = PAGE_FUNCTIONS[name];
+    if (!entry) throw new Error('页面函数未注册，请使用适配层提供的函数。');
+    const expectedKind: PageFunctionKind = capability === 'page.read' ? 'read' : 'script';
+    if (entry.kind !== expectedKind) throw new Error('页面函数与能力类型不匹配。');
+    const args = Array.isArray(payload.args) ? payload.args.slice(0, 8) : [];
+    const tabId = await this.resolveTargetTab(payload.tabId);
+    return this.pageExecutor.execute(tabId, entry.fn, args);
+  }
+
+  private async resolveTargetTab(tabId: unknown): Promise<number> {
+    const tab =
+      typeof tabId === 'number' && Number.isInteger(tabId)
+        ? await chrome.tabs.get(tabId).catch(() => undefined)
+        : (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
+    if (!tab?.id) throw new Error('找不到可操作的目标标签页。');
+    if (!tab.url?.startsWith('http')) throw new Error('目标标签页不是可注入的 HTTP(S) 页面。');
+    return tab.id;
   }
 }
 
