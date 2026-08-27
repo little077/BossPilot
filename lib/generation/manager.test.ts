@@ -368,6 +368,54 @@ describe('ChatGenerationManager', () => {
     expect(manager.getSnapshot()?.message.toolActivity?.statusText).toBe('已读取当前岗位');
   });
 
+  it('keeps model narration visible across tool rounds', async () => {
+    const requests: GenerationRequest[] = [];
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        requests.push(request);
+        if (requests.length === 1) {
+          yield { type: 'text-delta', delta: '我先读取当前岗位，再核对你的要求。' };
+          yield {
+            type: 'tool-call',
+            toolCall: { id: 'call-process', name: 'read_current_job', arguments: {} },
+          };
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'text-delta', delta: '这个岗位与你的经验匹配。' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool: vi.fn<GenerationToolExecutor>().mockResolvedValue({
+        isError: false,
+        statusText: '已读取当前岗位',
+        content: '岗位内容',
+      }),
+    });
+    const events = collect(manager);
+
+    await expect(manager.start('request-process-text', HISTORY)).resolves.toMatchObject({
+      status: 'completed',
+      content: '我先读取当前岗位，再核对你的要求。\n\n这个岗位与你的经验匹配。',
+    });
+    expect(
+      events.some(
+        ({ message }) =>
+          message.toolActivity?.status === 'running' &&
+          message.content === '我先读取当前岗位，再核对你的要求。',
+      ),
+    ).toBe(true);
+    expect(requests[1]?.messages).toContainEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: '我先读取当前岗位，再核对你的要求。',
+        finishReason: 'tool',
+      }),
+    );
+  });
+
   it('keeps image tool results only in the live loop and passes a credential-free model context', async () => {
     const requests: GenerationRequest[] = [];
     const executeTool = vi.fn<GenerationToolExecutor>().mockResolvedValue({

@@ -397,8 +397,7 @@ export class ChatGenerationManager {
           ),
         );
       }
-      const partial = turn.rawContent;
-      turn.committedContent = joinVisibleContent(turn.committedContent, partial);
+      const partial = commitRoundContent(turn);
       turn.lengthContinuations += 1;
       const continuedMessages: GenerationInputMessage[] = [
         ...preparedMessages,
@@ -419,7 +418,6 @@ export class ChatGenerationManager {
         },
       ];
       const message = requireMessage(turn);
-      message.content = publicTurnContent(turn, false);
       message.reasoningActivity = {
         status: 'running',
         summary: '输出达到模型上限，正在从断点继续',
@@ -431,13 +429,14 @@ export class ChatGenerationManager {
 
     if (outcome.kind === 'steer') {
       const steering = turn.pendingSteering.splice(0);
+      const interruptedContent = commitRoundContent(turn);
       const continuedMessages: GenerationInputMessage[] = [
         ...preparedMessages,
-        ...(turn.rawContent.trim()
+        ...(interruptedContent.trim()
           ? [
               {
                 role: 'assistant' as const,
-                content: turn.rawContent,
+                content: interruptedContent,
                 createdAt: requireMessage(turn).createdAt,
                 finishReason: 'stop' as const,
               },
@@ -567,6 +566,8 @@ export class ChatGenerationManager {
       },
     ];
 
+    // 工具前的过程说明既属于模型上下文，也应持续展示给用户；移入已提交正文后再开下一回合。
+    commitRoundContent(turn);
     return await this.runAgentLoop(turn, target, toolMessages);
   }
 
@@ -641,7 +642,7 @@ export class ChatGenerationManager {
     tools?: GenerationToolDefinition[],
   ): Promise<StreamOutcome> {
     turn.pendingToolCall = undefined;
-    // 上一模型回合的文字已经作为独立 assistant 消息进入 inputMessages。
+    // 上一模型回合的文字已经进入 inputMessages，并保存在 committedContent 供 UI 持续展示。
     // 当前回合必须从空文本开始，否则每次工具调用都会把全部历史再次嵌套回上下文。
     turn.rawContent = '';
     requireMessage(turn).content = publicTurnContent(turn, false);
@@ -1297,6 +1298,14 @@ function joinVisibleContent(previous: string, next: string): string {
   if (!previous.trim()) return next;
   if (!next.trim()) return previous;
   return `${previous}\n\n${next}`;
+}
+
+function commitRoundContent(turn: ActiveTurn): string {
+  const content = turn.rawContent;
+  turn.committedContent = joinVisibleContent(turn.committedContent, content);
+  turn.rawContent = '';
+  requireMessage(turn).content = publicTurnContent(turn, false);
+  return content;
 }
 
 function publicTurnContent(turn: ActiveTurn, terminal: boolean): string {

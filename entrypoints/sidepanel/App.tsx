@@ -15,14 +15,16 @@ import {
   Settings,
   Sparkles,
 } from 'lucide-react';
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ChatAttachment } from '@/lib/domain/chat';
-import type { TaskPhase } from '@/lib/domain/types';
+import type { ProviderStateView, TaskPhase } from '@/lib/domain/types';
+import { sendProviderCommand } from '@/lib/providers/client';
+import { loadConversationRuntimeSettings } from '@/lib/storage/db';
 import { AskUserPanel } from './AskUserPanel';
 import { ChatFlowStatus } from './ChatFlowStatus';
-import { Composer, type ComposerHandle } from './Composer';
+import { Composer, type ComposerDraft, type ComposerHandle } from './Composer';
 import { ConversationRuntimeControls } from './ConversationRuntimeControls';
 import { HistoryView } from './HistoryView';
 import { useAgentPort } from './usePort';
@@ -81,6 +83,7 @@ const EXAMPLES = [
 
 /** 与 CSS 中沉底过渡时长保持一致（app.css .is-launching） */
 const LAUNCH_MS = 520;
+const NEW_CONVERSATION_DRAFT_KEY = 'new-conversation';
 
 export default function App() {
   const {
@@ -110,6 +113,10 @@ export default function App() {
     runningConversationIds ?? (runningConversationId ? [runningConversationId] : []);
   const safeRuns = runs ?? [];
   const [tab, setTab] = useState<Tab>('chat');
+  const [composerDrafts, setComposerDrafts] = useState<Record<string, ComposerDraft>>({});
+  const [modelSetupMessage, setModelSetupMessage] = useState('');
+  const [homeComposerDraftKey, setHomeComposerDraftKey] = useState(NEW_CONVERSATION_DRAFT_KEY);
+  const providerStateRef = useRef<ProviderStateView | null>(null);
   // started=false 时展示首页英雄屏；launching 期间执行沉底动画
   const [started, setStarted] = useState(false);
   const [launching, setLaunching] = useState(false);
@@ -121,6 +128,7 @@ export default function App() {
   const pipelineRunning = RUNNING_PHASES.has(snapshot.phase);
   const currentConversationRunning =
     activeConversationId !== null && safeRunningConversationIds.includes(activeConversationId);
+  const composerDraftKey = activeConversationId ?? NEW_CONVERSATION_DRAFT_KEY;
   const currentRun = safeRuns.find((run) => run.conversationId === activeConversationId);
   const anotherConversationRunning = safeRunningConversationIds.some(
     (conversationId) => conversationId !== activeConversationId,
@@ -147,11 +155,49 @@ export default function App() {
             ? '回复生成中…'
             : '思考中…';
 
+  const updateComposerDraft = useCallback((key: string, draft: ComposerDraft) => {
+    setComposerDrafts((current) => ({ ...current, [key]: draft }));
+  }, []);
+
+  const clearComposerDraft = useCallback((key: string) => {
+    setComposerDrafts((current) => {
+      if (!(key in current)) return current;
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }, []);
+
+  const applyProviderState = useCallback((state: ProviderStateView) => {
+    providerStateRef.current = state;
+    if (state.activeModel) setModelSetupMessage('');
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void sendProviderCommand({ type: 'providers:get' })
+      .then((state) => {
+        if (active) applyProviderState(state);
+      })
+      .catch(() => {
+        // 发送时会再检查一次；初始化失败不能吞掉用户已经输入的草稿。
+      });
+    return () => {
+      active = false;
+    };
+  }, [applyProviderState]);
+
   // 回放后已有对话时跳过首页；首页发送动画期间先保持当前 DOM，
   // 避免乐观消息写入后提前切屏，让输入框能够完整落到会话区。
   useEffect(() => {
     if (ready && messages.length > 0 && !launching) setStarted(true);
   }, [launching, ready, messages.length]);
+
+  // 首页发送后 activeConversationId 会先变更；动画结束前仍固定使用原草稿键，
+  // 避免输入内容在下沉途中因编辑器重建而闪空。
+  useEffect(() => {
+    if (!started && !launching) setHomeComposerDraftKey(composerDraftKey);
+  }, [composerDraftKey, launching, started]);
 
   // 消息/流式更新时对话区滚到底
   useEffect(() => {
@@ -167,8 +213,53 @@ export default function App() {
     setViewedConversationId(tab === 'chat' ? activeConversationId : null);
   }, [activeConversationId, setViewedConversationId, tab]);
 
-  const submit = (text: string, attachments: ChatAttachment[] = []) =>
-    Boolean(text || attachments.length) && sendChat(text, attachments);
+  const ensureModelConfigured = async (): Promise<boolean> => {
+    let state = providerStateRef.current;
+    if (!state) {
+      try {
+        state = await sendProviderCommand({ type: 'providers:get' });
+        applyProviderState(state);
+      } catch {
+        setModelSetupMessage('暂时无法读取模型配置。请检查模型卡包后再返回对话发送。');
+        setTab('settings');
+        return false;
+      }
+    }
+    if (state.activeModel) return true;
+    if (activeConversationId) {
+      const runtimeSettings = await loadConversationRuntimeSettings(activeConversationId).catch(
+        () => null,
+      );
+      const identity = runtimeSettings?.modelIdentity;
+      if (
+        identity &&
+        state.connections.some(
+          (connection) =>
+            connection.providerId === identity.providerId &&
+            connection.models.some((model) => model.id === identity.modelId),
+        )
+      ) {
+        return true;
+      }
+    }
+    setModelSetupMessage(
+      '发送消息前，请先领取模型卡、填写密钥并选择一个默认模型。你的输入草稿已保留。',
+    );
+    setTab('settings');
+    return false;
+  };
+
+  const submit = async (
+    text: string,
+    attachments: ChatAttachment[] = [],
+    draftKey = composerDraftKey,
+  ): Promise<boolean> => {
+    if (!text && attachments.length === 0) return false;
+    if (!currentConversationRunning && !(await ensureModelConfigured())) return false;
+    const accepted = sendChat(text, attachments);
+    if (accepted) clearComposerDraft(draftKey);
+    return accepted;
+  };
 
   const startNewChat = () => {
     if (messages.length === 0) return;
@@ -193,9 +284,9 @@ export default function App() {
 
   // 首页发送：先同步占用本轮请求，再播放沉底动画。
   // 发送被拒绝时不启动动画，避免输入框下沉后又回弹到首页。
-  const homeSend = (text: string, attachments: ChatAttachment[]) => {
-    if ((!text && !attachments.length) || launching || !connected) return;
-    if (!submit(text, attachments)) return;
+  const homeSend = async (text: string, attachments: ChatAttachment[]): Promise<boolean> => {
+    if ((!text && !attachments.length) || launching || !connected) return false;
+    if (!(await submit(text, attachments, homeComposerDraftKey))) return false;
 
     const wrap = homeWrapRef.current;
     if (wrap) {
@@ -208,6 +299,7 @@ export default function App() {
       setLaunching(false);
       setStarted(true);
     }, LAUNCH_MS);
+    return true;
   };
 
   const progressIndex = PROGRESS_PHASES.indexOf(snapshot.phase);
@@ -324,11 +416,14 @@ export default function App() {
 
             <div ref={homeWrapRef}>
               <Composer
+                key={homeComposerDraftKey}
                 ref={homeComposerRef}
                 autoFocus
                 clearOnSend={false}
                 disabled={!connected}
                 onSend={homeSend}
+                draft={composerDrafts[homeComposerDraftKey]}
+                onDraftChange={(draft) => updateComposerDraft(homeComposerDraftKey, draft)}
                 className={`home-composer redscope-home-composer ${
                   launching ? 'home-composer-launching' : ''
                 }`}
@@ -495,7 +590,10 @@ export default function App() {
 
           {tab === 'settings' && (
             <Suspense fallback={<div className="p-4 text-xs text-ink-faint">加载中…</div>}>
-              <SettingsView />
+              <SettingsView
+                modelSetupMessage={modelSetupMessage}
+                onProviderStateChange={applyProviderState}
+              />
             </Suspense>
           )}
         </main>
@@ -514,12 +612,15 @@ export default function App() {
               />
             ) : null}
             <Composer
+              key={composerDraftKey}
               autoFocus={!pendingUserQuestion}
               running={currentConversationRunning && !pendingUserQuestion}
               allowSteering={currentRun?.status === 'running' && !pendingUserQuestion}
               waitingForAnswer={Boolean(pendingUserQuestion)}
               disabled={!connected || Boolean(pendingUserQuestion)}
               onSend={submit}
+              draft={composerDrafts[composerDraftKey]}
+              onDraftChange={(draft) => updateComposerDraft(composerDraftKey, draft)}
               onCancel={cancelChat}
               className={pendingUserQuestion ? 'ask-user-composer' : ''}
             />

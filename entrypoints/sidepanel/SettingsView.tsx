@@ -2,6 +2,7 @@
 
 import { Globe2, Loader2, Sparkles, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import type { ProviderStateView } from '@/lib/domain/types';
 import {
   type GrantedPageOrigin,
   listGrantedPageOrigins,
@@ -15,10 +16,21 @@ import { McpSettings } from './McpSettings';
 import { ProviderSettings } from './ProviderSettings';
 import { SkillSettings } from './SkillSettings';
 
-export function SettingsView() {
+interface SettingsViewProps {
+  modelSetupMessage?: string;
+  onProviderStateChange?: (state: ProviderStateView) => void;
+}
+
+export function SettingsView({ modelSetupMessage, onProviderStateChange }: SettingsViewProps) {
   return (
     <div className="redscope-settings flex flex-col">
-      <ProviderSettings />
+      {modelSetupMessage ? (
+        <div className="model-setup-guide" role="alert">
+          <strong>先配置一个模型</strong>
+          <span>{modelSetupMessage}</span>
+        </div>
+      ) : null}
+      <ProviderSettings onStateChange={onProviderStateChange} />
       <SkillSettings />
       <AgentContextSettings />
       <McpSettings />

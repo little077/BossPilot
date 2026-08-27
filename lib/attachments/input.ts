@@ -4,7 +4,6 @@ export const MAX_ATTACHMENTS = 3;
 export const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 export const MAX_TEXT_BYTES = 200 * 1024;
 export const MAX_TOTAL_BYTES = 4 * 1024 * 1024;
-const MAX_SELECTION_CHARS = 8_000;
 
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const TEXT_TYPES = new Map<
@@ -46,23 +45,6 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
     mimeType,
     size: file.size,
     content,
-  };
-}
-
-export function selectionAttachment(input: {
-  text: string;
-  origin: string;
-  title: string;
-}): ChatAttachment {
-  const content = input.text.replaceAll('\u0000', '').trim().slice(0, MAX_SELECTION_CHARS);
-  if (!content) throw new Error('当前页面没有选中文本。');
-  return {
-    id: crypto.randomUUID(),
-    kind: 'selection',
-    name: '当前页选中文本',
-    content,
-    sourceOrigin: safeOrigin(input.origin),
-    sourceTitle: input.title.replaceAll('\u0000', '').trim().slice(0, 200),
   };
 }
 
@@ -113,13 +95,4 @@ function safeName(value: string): string {
       .trim()
       .slice(0, 120) || '附件'
   );
-}
-
-function safeOrigin(value: string): string {
-  try {
-    const url = new URL(value);
-    return url.protocol === 'https:' || url.protocol === 'http:' ? url.origin : '';
-  } catch {
-    return '';
-  }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { attachmentFromFile, selectionAttachment, validateAttachmentSet } from './input';
+import { attachmentFromFile, validateAttachmentSet } from './input';
 
 describe('attachment input', () => {
   it('reads a supported image as bounded base64', async () => {
@@ -39,31 +39,20 @@ describe('attachment input', () => {
     ).rejects.toThrow('只支持');
   });
 
-  it('creates a safe current-page selection and validates set limits', () => {
-    const selection = selectionAttachment({
-      text: ' selected text ',
-      origin: 'https://example.com/private/path',
-      title: 'Example',
-    });
-    expect(selection).toMatchObject({
-      kind: 'selection',
+  it('validates attachment count and total size limits', () => {
+    const selection = {
+      id: 'legacy-selection',
+      kind: 'selection' as const,
+      name: '旧版选中文本',
       content: 'selected text',
       sourceOrigin: 'https://example.com',
-    });
-    expect(() =>
-      selectionAttachment({ text: '', origin: 'https://example.com', title: '' }),
-    ).toThrow('没有选中');
+      sourceTitle: 'Example',
+    };
     expect(() => validateAttachmentSet([selection, selection, selection, selection])).toThrow(
       '最多',
     );
     const huge = { ...selection, content: 'x'.repeat(1_500_000) };
     expect(() => validateAttachmentSet([huge, huge, huge])).toThrow('4 MB');
-    expect(
-      selectionAttachment({ text: 'x', origin: 'chrome://settings', title: 'x\u0000y' }),
-    ).toMatchObject({ sourceOrigin: '', sourceTitle: 'xy' });
-    expect(selectionAttachment({ text: 'x', origin: 'not a url', title: 'x' })).toMatchObject({
-      sourceOrigin: '',
-    });
   });
 
   it('fails closed when the browser file reader returns a non-binary result', async () => {

@@ -13,12 +13,19 @@ export const RUN_SKILL_TOOL: GenerationToolDefinition = {
   name: 'run_skill',
   label: '运行 Skill 脚本',
   description:
-    '运行已启用 Skill 的 scripts/*.js 或 scripts/*.mjs。必须先 load_skill 阅读工作流，并且只运行工作流明确指定的脚本。Python、Shell、PowerShell 等脚本在浏览器扩展中不支持。脚本声明的工作区、网页、Chrome API 或网络能力会先询问用户。',
+    '运行已启用 Skill 的脚本。必须先 load_skill 阅读工作流，并且只运行工作流明确指定的脚本。script 参数必须传完整相对路径（以 scripts/ 开头，例如 scripts/read-profile.js）。Python、Shell、PowerShell 等脚本在浏览器扩展中不支持。脚本声明的工作区、网页、Chrome API 或网络能力会先询问用户。',
   parameters: {
     type: 'object',
     properties: {
-      skill: { type: 'string', description: '已加载 Skill 的精确名称。' },
-      script: { type: 'string', description: 'scripts/ 下的相对 JavaScript 文件路径。' },
+      skill: {
+        type: 'string',
+        description:
+          '已加载 Skill 的精确名称（available_skills 里的 name 属性，例如 xhs-note-scout）。',
+      },
+      script: {
+        type: 'string',
+        description: '脚本的完整相对路径，必须以 scripts/ 开头（例如 scripts/read-profile.js）。',
+      },
       input: { type: 'object', description: '传给脚本的可序列化输入。' },
     },
     required: ['skill', 'script', 'input'],
@@ -44,7 +51,9 @@ export class SkillRunCoordinator {
     const skillName = boundedString(call.arguments.skill, 64);
     const scriptPath = boundedString(call.arguments.script, 512);
     if (!skillName || !scriptPath || !safeScriptPath(scriptPath))
-      return failure('Skill 或脚本路径无效。');
+      return failure(
+        `Skill 或脚本路径无效（skill="${call.arguments.skill}" script="${call.arguments.script}"）。script 必须是以 scripts/ 开头的相对路径，例如 scripts/read-profile.js。`,
+      );
     if (!isRecord(call.arguments.input)) return failure('Skill input 必须是对象。');
 
     try {

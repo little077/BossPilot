@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatConversation, ChatMessage } from '@/lib/domain/chat';
 import App from './App';
 
-const { useAgentPortMock } = vi.hoisted(() => ({
+const { sendProviderCommandMock, useAgentPortMock } = vi.hoisted(() => ({
+  sendProviderCommandMock: vi.fn(),
   useAgentPortMock: vi.fn(),
 }));
 
@@ -12,15 +13,49 @@ vi.mock('./usePort', () => ({
   useAgentPort: useAgentPortMock,
 }));
 
+vi.mock('@/lib/providers/client', () => ({
+  sendProviderCommand: sendProviderCommandMock,
+}));
+
 vi.mock('./Composer', async () => {
   const React = await import('react');
   return {
     Composer: React.forwardRef<
-      { setText: (value: string) => void },
-      { className?: string; disabled?: boolean; running?: boolean; onSend: (value: string) => void }
-    >(function MockComposer({ className, disabled, running, onSend }, ref) {
-      const [text, setText] = React.useState('');
-      React.useImperativeHandle(ref, () => ({ setText }));
+      { setText: (value: string) => void; focus: () => void },
+      {
+        className?: string;
+        disabled?: boolean;
+        running?: boolean;
+        draft?: { content: { content?: Array<{ content?: Array<{ text?: string }> }> } };
+        onDraftChange?: (draft: {
+          content: {
+            type: string;
+            content: Array<{ type: string; content?: Array<{ type: string; text: string }> }>;
+          };
+          attachments: [];
+        }) => void;
+        onSend: (value: string, attachments: []) => boolean | Promise<boolean>;
+      }
+    >(function MockComposer({ className, disabled, running, draft, onDraftChange, onSend }, ref) {
+      const [text, setTextState] = React.useState(
+        () => draft?.content.content?.[0]?.content?.map((node) => node.text ?? '').join('') ?? '',
+      );
+      const setText = (value: string) => {
+        setTextState(value);
+        onDraftChange?.({
+          content: {
+            type: 'doc',
+            content: [
+              {
+                type: 'paragraph',
+                ...(value ? { content: [{ type: 'text', text: value }] } : {}),
+              },
+            ],
+          },
+          attachments: [],
+        });
+      };
+      React.useImperativeHandle(ref, () => ({ setText, focus: () => undefined }));
       return (
         <div
           className={className}
@@ -29,7 +64,15 @@ vi.mock('./Composer', async () => {
           data-testid="composer"
         >
           <output data-testid="composer-text">{text}</output>
-          <button type="button" onClick={() => onSend(text)}>
+          <label>
+            草稿输入
+            <input
+              aria-label="草稿输入"
+              value={text}
+              onChange={(event) => setText(event.target.value)}
+            />
+          </label>
+          <button type="button" onClick={() => void onSend(text, [])}>
             触发发送
           </button>
         </div>
@@ -54,8 +97,19 @@ vi.mock('./WorkspaceView', () => ({
 }));
 
 vi.mock('./SettingsView', () => ({
-  SettingsView: () => <div>设置内容</div>,
+  SettingsView: ({ modelSetupMessage }: { modelSetupMessage?: string }) => (
+    <div>
+      设置内容
+      {modelSetupMessage ? <span>{modelSetupMessage}</span> : null}
+    </div>
+  ),
 }));
+
+const CONFIGURED_PROVIDER_STATE = {
+  version: 1 as const,
+  activeModel: { providerId: 'openai', modelId: 'gpt-test' },
+  connections: [],
+};
 
 const basePort = {
   snapshot: {
@@ -87,11 +141,16 @@ const basePort = {
 };
 
 beforeEach(() => {
+  Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+    configurable: true,
+    value: vi.fn(),
+  });
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     callback(0);
     return 1;
   });
   vi.stubGlobal('cancelAnimationFrame', vi.fn());
+  sendProviderCommandMock.mockResolvedValue(CONFIGURED_PROVIDER_STATE);
   useAgentPortMock.mockReturnValue({ ...basePort });
 });
 
@@ -100,7 +159,7 @@ afterEach(() => {
 });
 
 describe('首页发送过渡', () => {
-  it('发送被拒绝时不启动沉底动画，输入框保持在首页', () => {
+  it('发送被拒绝时不启动沉底动画，输入框保持在首页', async () => {
     vi.useFakeTimers();
     const sendChat = vi.fn(() => false);
     useAgentPortMock.mockReturnValue({ ...basePort, sendChat });
@@ -111,7 +170,10 @@ describe('首页发送过渡', () => {
         name: '总结一下我当前打开的网页，并列出三个重点',
       }),
     );
-    fireEvent.click(screen.getByRole('button', { name: '触发发送' }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '触发发送' }));
+      await Promise.resolve();
+    });
 
     expect(sendChat).toHaveBeenCalledOnce();
     expect(screen.getByTestId('composer')).not.toHaveClass('home-composer-launching');
@@ -119,10 +181,10 @@ describe('首页发送过渡', () => {
     expect(screen.getByRole('heading', { name: /聊两句/ })).toBeInTheDocument();
   });
 
-  it('发送成功后保留完整沉底动画，再切换到会话输入区', () => {
+  it('发送成功后保留完整沉底动画，再切换到会话输入区', async () => {
     vi.useFakeTimers();
     const sendChat = vi.fn(() => true);
-    let portState = { ...basePort, sendChat };
+    let portState = { ...basePort, activeConversationId: null as string | null, sendChat };
     useAgentPortMock.mockImplementation(() => portState);
     const view = render(<App />);
 
@@ -131,11 +193,15 @@ describe('首页发送过渡', () => {
         name: '总结一下我当前打开的网页，并列出三个重点',
       }),
     );
-    fireEvent.click(screen.getByRole('button', { name: '触发发送' }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '触发发送' }));
+      await Promise.resolve();
+    });
     expect(screen.getByTestId('composer')).toHaveClass('home-composer-launching');
 
     portState = {
       ...portState,
+      activeConversationId: 'conversation-new',
       messages: [
         {
           id: 'optimistic-user',
@@ -147,6 +213,9 @@ describe('首页发送过渡', () => {
     };
     view.rerender(<App />);
     expect(screen.getByTestId('composer')).toHaveClass('home-composer-launching');
+    expect(screen.getByTestId('composer-text')).toHaveTextContent(
+      '总结一下我当前打开的网页，并列出三个重点',
+    );
 
     act(() => vi.advanceTimersByTime(520));
     expect(screen.queryByRole('heading', { name: /聊两句/ })).not.toBeInTheDocument();
@@ -385,5 +454,63 @@ describe('顶部导航', () => {
     await user.click(button);
 
     expect(downloadDiagnostics).toHaveBeenCalledOnce();
+  });
+});
+
+describe('Composer 草稿与模型引导', () => {
+  it('未配置模型时直接进入设置，并在返回对话后恢复原草稿', async () => {
+    const user = userEvent.setup();
+    const sendChat = vi.fn(() => true);
+    sendProviderCommandMock.mockResolvedValue({ version: 1, connections: [] });
+    useAgentPortMock.mockReturnValue({ ...basePort, sendChat });
+    render(<App />);
+
+    await user.click(
+      screen.getByRole('button', {
+        name: '总结一下我当前打开的网页，并列出三个重点',
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: '触发发送' }));
+
+    expect(await screen.findByText('设置内容')).toBeVisible();
+    expect(screen.getByText(/你的输入草稿已保留/)).toBeVisible();
+    expect(sendChat).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: '对话' }));
+    expect(screen.getByTestId('composer-text')).toHaveTextContent(
+      '总结一下我当前打开的网页，并列出三个重点',
+    );
+  });
+
+  it('按会话隔离完整草稿，切换回来时只恢复对应会话内容', async () => {
+    const user = userEvent.setup();
+    let portState = {
+      ...basePort,
+      activeConversationId: 'conversation-a' as string | null,
+      messages: [{ id: 'a-user', role: 'user' as const, content: '会话 A', createdAt: 1 }],
+    };
+    useAgentPortMock.mockImplementation(() => portState);
+    const view = render(<App />);
+
+    const inputA = await screen.findByRole('textbox', { name: '草稿输入' });
+    await user.type(inputA, 'A 的未发送草稿');
+
+    portState = {
+      ...portState,
+      activeConversationId: 'conversation-b',
+      messages: [{ id: 'b-user', role: 'user', content: '会话 B', createdAt: 2 }],
+    };
+    view.rerender(<App />);
+    const inputB = await screen.findByRole('textbox', { name: '草稿输入' });
+    expect(inputB).toHaveValue('');
+    await user.type(inputB, 'B 的未发送草稿');
+
+    portState = {
+      ...portState,
+      activeConversationId: 'conversation-a',
+      messages: [{ id: 'a-user', role: 'user', content: '会话 A', createdAt: 1 }],
+    };
+    view.rerender(<App />);
+    expect(await screen.findByRole('textbox', { name: '草稿输入' })).toHaveValue('A 的未发送草稿');
   });
 });

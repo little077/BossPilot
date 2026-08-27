@@ -3,7 +3,7 @@
 // API Key 仅单向发送给 Background；组件只持有用户本次输入和脱敏快照。
 
 import { Check, ExternalLink, KeyRound, Loader2, Plus, ShieldCheck, Trash2 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ProviderConnectionView, ProviderStateView } from '@/lib/domain/types';
 import { sendProviderCommand } from '@/lib/providers/client';
 import {
@@ -24,7 +24,11 @@ interface ProviderDraft {
 
 const EMPTY_DRAFT: ProviderDraft = { apiKey: '', baseUrl: '', manualModel: '' };
 
-export function ProviderSettings() {
+interface ProviderSettingsProps {
+  onStateChange?: (state: ProviderStateView) => void;
+}
+
+export function ProviderSettings({ onStateChange }: ProviderSettingsProps) {
   const [state, setState] = useState<ProviderStateView | null>(null);
   const [drafts, setDrafts] = useState<Record<string, ProviderDraft>>({});
   const [busyProviderIds, setBusyProviderIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -32,12 +36,19 @@ export function ProviderSettings() {
   const [notice, setNotice] = useState<string>();
   const [showAllProviders, setShowAllProviders] = useState(false);
   const keyInputs = useRef<Record<string, HTMLInputElement | null>>({});
+  const onStateChangeRef = useRef(onStateChange);
+  onStateChangeRef.current = onStateChange;
+
+  const applyState = useCallback((next: ProviderStateView) => {
+    setState(next);
+    onStateChangeRef.current?.(next);
+  }, []);
 
   useEffect(() => {
     let active = true;
     void sendProviderCommand({ type: 'providers:get' }).then(
       (next) => {
-        if (active) setState(next);
+        if (active) applyState(next);
       },
       (error: unknown) => {
         if (active) setNotice(error instanceof Error ? error.message : String(error));
@@ -46,7 +57,7 @@ export function ProviderSettings() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [applyState]);
 
   const connectionById = useMemo(
     () => new Map(state?.connections.map((connection) => [connection.providerId, connection])),
@@ -89,7 +100,7 @@ export function ProviderSettings() {
         type: 'providers:issue',
         providerId: provider.id,
       });
-      setState(next);
+      applyState(next);
       setNotice(`已领取 ${provider.label} 卡，请填写密钥后开通。`);
       requestAnimationFrame(() => keyInputs.current[provider.id]?.focus());
     } catch (error) {
@@ -122,7 +133,7 @@ export function ProviderSettings() {
         apiKey: draft.apiKey,
         ...(provider.custom ? { baseUrl } : {}),
       });
-      setState(next);
+      applyState(next);
       updateDraft(provider.id, { apiKey: '', baseUrl });
       const modelCount =
         next.connections.find((item) => item.providerId === provider.id)?.models.length ?? 0;
@@ -144,7 +155,7 @@ export function ProviderSettings() {
         providerId: provider.id,
         modelId,
       });
-      setState(next);
+      applyState(next);
       setNotice(`${provider.label} 已配置为 ${modelId}。`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
@@ -181,7 +192,7 @@ export function ProviderSettings() {
         apiKey: draft.apiKey,
         ...(provider.custom ? { baseUrl } : {}),
       });
-      setState(next);
+      applyState(next);
       updateDraft(provider.id, { apiKey: '', baseUrl, manualModel: '' });
       setErrors((current) => ({ ...current, [provider.id]: '' }));
       setNotice(`${provider.label} 已手动配置模型 ${modelId}。`);
@@ -207,7 +218,7 @@ export function ProviderSettings() {
         modelId: connection.selectedModelId,
         enabled,
       });
-      setState(next);
+      applyState(next);
       setNotice(
         enabled
           ? `${connection.selectedModelId} 已声明支持图片输入。`
@@ -227,7 +238,7 @@ export function ProviderSettings() {
         type: 'providers:remove',
         providerId: provider.id,
       });
-      setState(next);
+      applyState(next);
       setDrafts((current) => {
         const nextDrafts = { ...current };
         delete nextDrafts[provider.id];
