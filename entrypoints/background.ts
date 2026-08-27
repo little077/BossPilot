@@ -1,3 +1,4 @@
+import { AgentManager } from '@/lib/agent/agent-manager';
 import { ConversationAgent } from '@/lib/agent/conversation-agent';
 import { toolContextManager } from '@/lib/agent/tool-context';
 import { captureCurrentPageStructure } from '@/lib/diagnostics/page-structure';
@@ -109,7 +110,6 @@ export default defineBackground({
     const generationAdapter = createPiGenerationAdapter();
     const pageInteraction = new PageInteractionCoordinator();
     const titleControllers = new Map<string, { controller: AbortController; requestId: string }>();
-    const conversationAgents = new Map<string, ConversationAgent>();
 
     const runRegistry = new AgentRunRegistry(
       (conversationId, publish) => {
@@ -400,13 +400,66 @@ export default defineBackground({
               .catch(() => void 0);
           },
         });
-        conversationAgents.set(conversationId, agent);
-
         return generationManager;
       },
       createChromeRunRegistryStore(),
       2,
     );
+
+    // 多会话 Agent 管理器：统一管理 ConversationAgent 实例生命周期
+    const agentManager = new AgentManager({
+      registry: runRegistry,
+      toolContextManager,
+      createAgent: (conversationId) => {
+        const toolContext = toolContextManager.getOrCreate(conversationId);
+        return new ConversationAgent({
+          conversationId,
+          toolContext,
+          createManager: (convId, publish) => {
+            // 从 runRegistry 获取已创建的 manager
+            const manager = runRegistry.managerForConversation(convId);
+            // 重新订阅事件（ConversationAgent 需要自己的事件处理）
+            manager.subscribe((event) => publish(event));
+            return manager;
+          },
+          broadcast: (event, convId) =>
+            broadcast(chatPorts, generationEventToServerMessage(event, convId)),
+          finishDiagnostics: (event, convId) => finishDiagnostics(event, convId),
+          saveCheckpoint: (event, convId, historyIds) => {
+            void saveRunCheckpoint({
+              id: `checkpoint-${crypto.randomUUID()}`,
+              runId: event.requestId,
+              conversationId: convId,
+              historyMessageIds: historyIds,
+              phase:
+                event.message.status === 'cancelled'
+                  ? 'interrupted'
+                  : event.type === 'error'
+                    ? 'interrupted'
+                    : 'stable',
+              createdAt: Date.now(),
+            }).catch(() => void 0);
+          },
+          saveRuntimeSettings: (convId, modelIdentity) => {
+            void loadConversationRuntimeSettings(convId)
+              .then(async (settings) => {
+                if (!settings) {
+                  await saveConversationRuntimeSettings({
+                    conversationId: convId,
+                    modelIdentity: modelIdentity as never,
+                    thinkingLevel: 'off',
+                    contextWindowTokens: 128_000,
+                    maxOutputTokens: 8_192,
+                    updatedAt: Date.now(),
+                  });
+                }
+              })
+              .catch(() => void 0);
+          },
+        });
+      },
+    });
+
     void runRegistry.restore();
     runRegistry.subscribe((runs) => broadcast(chatPorts, { type: 'run_state', runs }));
 
@@ -794,7 +847,7 @@ export default defineBackground({
       }
 
       const snapshot = await capturePageTurnSnapshot().catch(() => null);
-      const agent = conversationAgents.get(conversationId);
+      const agent = agentManager.getAgent(conversationId);
       const toolContext = toolContextManager.getOrCreate(conversationId);
 
       if (agent) {
@@ -892,7 +945,7 @@ export default defineBackground({
       }
 
       const history = messages.filter((message) => message.id !== pending.generation.message.id);
-      const agent = conversationAgents.get(conversationId);
+      const agent = agentManager.getAgent(conversationId);
       const toolContext = toolContextManager.getOrCreate(conversationId);
       if (toolContext.deleteCancelledPendingRequest(requestId)) {
         deferredManager.cancelDeferred(pending.generation);
@@ -1022,7 +1075,7 @@ export default defineBackground({
       }
 
       const history = messages.filter((message) => message.id !== pending.generation.message.id);
-      const agent = conversationAgents.get(conversationId);
+      const agent = agentManager.getAgent(conversationId);
       const toolContext = toolContextManager.getOrCreate(conversationId);
       if (toolContext.deleteCancelledPendingRequest(requestId)) {
         deferredManager.cancelDeferred(pending.generation);
