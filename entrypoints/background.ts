@@ -1,9 +1,9 @@
+import { toolContextManager } from '@/lib/agent/tool-context';
 import { captureCurrentPageStructure } from '@/lib/diagnostics/page-structure';
 import { recorder } from '@/lib/diagnostics/recorder';
 import { redact } from '@/lib/diagnostics/redaction';
 import { buildDiagnosticsReport, diagnosticsFileName } from '@/lib/diagnostics/report';
 import type { ChatMessage } from '@/lib/domain/chat';
-import type { PageTurnSnapshot } from '@/lib/domain/types';
 import { compactGenerationContext } from '@/lib/generation/compaction';
 import { generateConversationTitle } from '@/lib/generation/conversation-title';
 import { GenerationError, sanitizeGenerationError } from '@/lib/generation/errors';
@@ -73,7 +73,7 @@ import {
   PageInteractionCoordinator,
 } from '@/lib/tools/page-interaction';
 import { READ_CURRENT_PAGE_TOOL, readCurrentPage } from '@/lib/tools/read-current-page';
-import { RUN_SKILL_TOOL, type SkillRunApproval, SkillRunCoordinator } from '@/lib/tools/run-skill';
+import { RUN_SKILL_TOOL, SkillRunCoordinator } from '@/lib/tools/run-skill';
 import { WORKSPACE_TOOLS, WorkspaceToolCoordinator } from '@/lib/tools/workspace';
 
 function base64ToBuffer(value: string): ArrayBuffer {
@@ -85,13 +85,6 @@ function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary);
-}
-
-interface ActiveDiagnostic {
-  conversationId: string;
-  requestId: string;
-  targetResolved: boolean;
-  modelRounds: number;
 }
 
 export default defineBackground({
@@ -111,14 +104,6 @@ export default defineBackground({
     const mcpService = new McpService();
     void chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
     const chatPorts = new Set<chrome.runtime.Port>();
-    const diagnosticInputs = new Map<string, string>();
-    const pageSnapshots = new Map<string, PageTurnSnapshot | null>();
-    const chatHistories = new Map<string, ChatMessage[]>();
-    const cancelledPendingRequests = new Set<string>();
-    const approvedToolCalls = new Set<string>();
-    const skillApprovals = new Map<string, Exclude<SkillRunApproval, null>>();
-    const latestUserText = (requestId: string) => diagnosticInputs.get(requestId) ?? '';
-    const activeDiagnostics = new Map<string, ActiveDiagnostic>();
 
     const generationAdapter = createPiGenerationAdapter();
     const pageInteraction = new PageInteractionCoordinator();
@@ -126,10 +111,13 @@ export default defineBackground({
 
     const runRegistry = new AgentRunRegistry(
       (conversationId, publish) => {
+        // 每个会话独立的工具上下文
+        const toolContext = toolContextManager.getOrCreate(conversationId);
+
         const generationManager = new ChatGenerationManager({
           adapter: generationAdapter,
-          systemPrompt: async (requestId) =>
-            composeChatSystemPrompt(skillStore, memoryStore, pageSnapshots.get(requestId)?.url),
+          systemPrompt: async () =>
+            composeChatSystemPrompt(skillStore, memoryStore, toolContext.getPageSnapshot()?.url),
           maxOutputTokens: 8_192,
           generationSettings: async () => {
             const settings = await loadConversationRuntimeSettings(conversationId);
@@ -167,24 +155,24 @@ export default defineBackground({
               case 'browser_action':
                 result = await executeBrowserAction(
                   call,
-                  pageSnapshots.get(requestId) ?? null,
-                  latestUserText(requestId),
+                  toolContext.getPageSnapshot(),
+                  toolContext.getLatestUserText(),
                   signal,
                   reportProgress,
                 );
                 if (!('deferred' in result) && !result.isError) {
                   const nextSnapshot =
                     result.nextPageSnapshot ?? (await capturePageTurnSnapshot().catch(() => null));
-                  pageSnapshots.set(requestId, nextSnapshot);
+                  toolContext.setPageSnapshot(nextSnapshot);
                 }
                 break;
               case 'read_current_page':
-                result = await readCurrentPage(pageSnapshots.get(requestId) ?? null, signal);
+                result = await readCurrentPage(toolContext.getPageSnapshot(), signal);
                 break;
               case 'observe_page':
                 result = await pageInteraction.observe(
                   call,
-                  pageSnapshots.get(requestId) ?? null,
+                  toolContext.getPageSnapshot(),
                   signal,
                   requestId,
                 );
@@ -192,10 +180,10 @@ export default defineBackground({
               case 'observe_visual_page':
                 result = await pageInteraction.observeVisual(
                   call,
-                  pageSnapshots.get(requestId) ?? null,
+                  toolContext.getPageSnapshot(),
                   signal,
                   requestId,
-                  approvedToolCalls.delete(call.id),
+                  toolContext.revokeToolCallApproval(call.id),
                   reportProgress,
                   context,
                 );
@@ -203,10 +191,10 @@ export default defineBackground({
               case 'interact_page':
                 result = await pageInteraction.interact(
                   call,
-                  pageSnapshots.get(requestId) ?? null,
+                  toolContext.getPageSnapshot(),
                   signal,
                   requestId,
-                  approvedToolCalls.delete(call.id),
+                  toolContext.revokeToolCallApproval(call.id),
                   reportProgress,
                 );
                 break;
@@ -215,21 +203,21 @@ export default defineBackground({
                   call,
                   requestId,
                   signal,
-                  pageSnapshots.get(requestId)?.url,
+                  toolContext.getPageSnapshot()?.url,
                 );
                 break;
               case 'run_skill':
                 result = await skillRunner.execute(
                   call,
                   conversationId,
-                  skillApprovals.get(call.id) ?? null,
+                  toolContext.getSkillApproval(call.id) ?? null,
                   signal,
                 );
-                skillApprovals.delete(call.id);
+                toolContext.deleteSkillApproval(call.id);
                 break;
               case 'search_memory':
               case 'save_memory':
-                result = await memoryTools.execute(call, latestUserText(requestId), signal);
+                result = await memoryTools.execute(call, toolContext.getLatestUserText(), signal);
                 break;
               case 'workspace_create':
               case 'workspace_mkdir':
@@ -243,7 +231,7 @@ export default defineBackground({
                 result = await workspaceTools.execute(
                   call,
                   conversationId,
-                  approvedToolCalls.delete(call.id),
+                  toolContext.revokeToolCallApproval(call.id),
                   signal,
                 );
                 break;
@@ -252,7 +240,11 @@ export default defineBackground({
                 break;
               default:
                 result = isMcpToolName(call.name)
-                  ? await mcpService.execute(call, approvedToolCalls.delete(call.id), signal)
+                  ? await mcpService.execute(
+                      call,
+                      toolContext.revokeToolCallApproval(call.id),
+                      signal,
+                    )
                   : {
                       isError: true,
                       statusText: '工具禁用',
@@ -261,7 +253,7 @@ export default defineBackground({
             }
             if ('deferred' in result) return result;
             if (result.nextPageSnapshot) {
-              pageSnapshots.set(requestId, result.nextPageSnapshot);
+              toolContext.setPageSnapshot(result.nextPageSnapshot);
             }
             recorder.step(
               'chat',
@@ -272,9 +264,9 @@ export default defineBackground({
             return result;
           },
           onToolDeferred: async (generation, deferred) => {
-            const snapshot = pageSnapshots.get(generation.requestId);
-            const history = chatHistories.get(generation.requestId);
-            if (!history || (deferred.kind === 'page_permission' && !snapshot)) {
+            const snapshot = toolContext.getPageSnapshot();
+            const history = toolContext.getChatHistory();
+            if (!history.length || (deferred.kind === 'page_permission' && !snapshot)) {
               throw new GenerationError('INVALID_RESPONSE', '恢复失败，请重试', false);
             }
             await savePendingPageTurn(
@@ -289,7 +281,7 @@ export default defineBackground({
             );
           },
           onModelRound: (round) => {
-            const diagnostic = activeDiagnostics.get(round.requestId);
+            const diagnostic = toolContext.getDiagnostic(round.requestId);
             if (!diagnostic) return;
             diagnostic.modelRounds += 1;
             const messages = [
@@ -317,12 +309,10 @@ export default defineBackground({
           resolveTarget: async () => {
             await requireTrustedStorage();
             const target = await resolveActiveGenerationTarget();
-            const activeDiagnostic = [...activeDiagnostics.values()].find(
-              (item) => item.conversationId === conversationId && !item.targetResolved,
-            );
+            const activeDiagnostic = toolContext.findDiagnosticByConversation(conversationId);
             if (activeDiagnostic) {
               activeDiagnostic.targetResolved = true;
-              recorder.beginRun('chat', latestUserText(activeDiagnostic.requestId), {
+              recorder.beginRun('chat', toolContext.getLatestUserText(), {
                 model: target.identity.modelId,
                 baseUrl: target.baseUrl,
               });
@@ -333,9 +323,9 @@ export default defineBackground({
         generationManager.subscribe((event) => {
           publish(event);
           broadcast(chatPorts, generationEventToServerMessage(event, conversationId));
-          finishDiagnostics(event);
+          finishDiagnostics(event, conversationId);
           if (event.type === 'end' || event.type === 'error') {
-            const historyMessageIds = chatHistories.get(event.requestId)?.map(({ id }) => id) ?? [];
+            const historyMessageIds = toolContext.getChatHistory().map(({ id }) => id);
             void saveRunCheckpoint({
               id: `checkpoint-${crypto.randomUUID()}`,
               runId: event.requestId,
@@ -666,7 +656,10 @@ export default defineBackground({
                 } else {
                   const resuming = await loadPendingPageTurn(requestId);
                   if (resuming?.requestId === requestId && resuming.status === 'resuming') {
-                    cancelledPendingRequests.add(requestId);
+                    const resumingContext = toolContextManager.getOrCreate(
+                      resuming.conversationId ?? '',
+                    );
+                    resumingContext.cancelPendingRequest(requestId);
                   }
                 }
               }
@@ -756,12 +749,13 @@ export default defineBackground({
       }
 
       const snapshot = await capturePageTurnSnapshot().catch(() => null);
-      pageSnapshots.set(requestId, snapshot);
-      chatHistories.set(requestId, history);
+      const toolContext = toolContextManager.getOrCreate(conversationId);
+      toolContext.setPageSnapshot(snapshot);
+      toolContext.setChatHistory(history);
 
       const lastUser = [...history].reverse().find((message) => message.role === 'user');
-      diagnosticInputs.set(requestId, lastUser?.content ?? '');
-      activeDiagnostics.set(requestId, {
+      toolContext.setLatestUserText(lastUser?.content ?? '');
+      toolContext.setDiagnostic(requestId, {
         conversationId,
         requestId,
         targetResolved: false,
@@ -781,7 +775,7 @@ export default defineBackground({
           await generationManager.start(requestId, pageContextHistory(history, snapshot));
         });
       } catch (error) {
-        activeDiagnostics.delete(requestId);
+        toolContext.deleteDiagnostic(requestId);
         // 解析阶段还没有 stream_start；重连窗口可能已通过 chat_state 绑定本 requestId，
         // 因此必须广播失败，不能只通知最初发起请求的 Port。
         broadcast(chatPorts, {
@@ -794,9 +788,10 @@ export default defineBackground({
         if (pending?.requestId !== requestId)
           await pageInteraction.clear(requestId).catch(() => void 0);
         if (pending?.requestId !== requestId) skillLoader.clear(requestId);
-        diagnosticInputs.delete(requestId);
-        pageSnapshots.delete(requestId);
-        chatHistories.delete(requestId);
+        toolContext.deleteDiagnostic(requestId);
+        toolContext.setLatestUserText('');
+        toolContext.setPageSnapshot(null);
+        toolContext.setChatHistory([]);
       }
     }
 
@@ -841,7 +836,8 @@ export default defineBackground({
       }
 
       const history = messages.filter((message) => message.id !== pending.generation.message.id);
-      if (cancelledPendingRequests.delete(requestId)) {
+      const toolContext = toolContextManager.getOrCreate(conversationId);
+      if (toolContext.deleteCancelledPendingRequest(requestId)) {
         deferredManager.cancelDeferred(pending.generation);
         await clearPendingPageTurn(requestId);
         return;
@@ -859,10 +855,10 @@ export default defineBackground({
         return;
       }
 
-      pageSnapshots.set(requestId, pending.snapshot);
-      chatHistories.set(requestId, history);
+      toolContext.setPageSnapshot(pending.snapshot);
+      toolContext.setChatHistory(history);
       const lastUser = [...history].reverse().find((message) => message.role === 'user');
-      diagnosticInputs.set(requestId, lastUser?.content ?? '');
+      toolContext.setLatestUserText(lastUser?.content ?? '');
       // 先移除已经领取的旧暂停点；恢复过程中若再次暂停，会写入一个新的有效暂停点。
       await clearPendingPageTurn(requestId);
       try {
@@ -872,7 +868,7 @@ export default defineBackground({
         const pattern = pendingActivity?.permissionPattern;
         const permissionAvailable =
           granted && Boolean(pattern) && (await hasExactPageOriginAccess(pattern ?? ''));
-        if (cancelledPendingRequests.delete(requestId)) {
+        if (toolContext.deleteCancelledPendingRequest(requestId)) {
           deferredManager.cancelDeferred(pending.generation);
           return;
         }
@@ -897,7 +893,7 @@ export default defineBackground({
               sourceUrl: pendingActivity?.sourceUrl ?? pending.snapshot.safeUrl,
             };
         if (permissionAvailable && pending.generation.toolCall.name === 'observe_visual_page') {
-          approvedToolCalls.add(pending.generation.toolCall.id);
+          toolContext.approveToolCall(pending.generation.toolCall.id);
         }
         await runRegistry.enqueue(conversationId, requestId, async (generationManager) => {
           await generationManager.resumeDeferred(
@@ -907,16 +903,16 @@ export default defineBackground({
           );
         });
       } finally {
-        approvedToolCalls.delete(pending.generation.toolCall.id);
+        toolContext.revokeToolCallApproval(pending.generation.toolCall.id);
         const nextPending = await loadPendingPageTurn(requestId).catch(() => null);
         if (nextPending?.requestId !== requestId) {
           await pageInteraction.clear(requestId).catch(() => void 0);
           skillLoader.clear(requestId);
         }
-        diagnosticInputs.delete(requestId);
-        pageSnapshots.delete(requestId);
-        chatHistories.delete(requestId);
-        cancelledPendingRequests.delete(requestId);
+        toolContext.setLatestUserText('');
+        toolContext.setPageSnapshot(null);
+        toolContext.setChatHistory([]);
+        toolContext.deleteCancelledPendingRequest(requestId);
       }
     }
 
@@ -961,7 +957,8 @@ export default defineBackground({
       }
 
       const history = messages.filter((message) => message.id !== pending.generation.message.id);
-      if (cancelledPendingRequests.delete(requestId)) {
+      const toolContext = toolContextManager.getOrCreate(conversationId);
+      if (toolContext.deleteCancelledPendingRequest(requestId)) {
         deferredManager.cancelDeferred(pending.generation);
         await clearPendingPageTurn(requestId);
         return;
@@ -987,10 +984,10 @@ export default defineBackground({
         return;
       }
 
-      pageSnapshots.set(requestId, pending.snapshot);
-      chatHistories.set(requestId, history);
+      toolContext.setPageSnapshot(pending.snapshot);
+      toolContext.setChatHistory(history);
       const lastUser = [...history].reverse().find((message) => message.role === 'user');
-      diagnosticInputs.set(requestId, lastUser?.content ?? '');
+      toolContext.setLatestUserText(lastUser?.content ?? '');
       await clearPendingPageTurn(requestId);
       try {
         const resumeDeferred = async (override?: GenerationToolExecutionResult) => {
@@ -998,13 +995,13 @@ export default defineBackground({
             await generationManager.resumeDeferred(pending.generation, history, override);
           });
         };
-        if (cancelledPendingRequests.delete(requestId)) {
+        if (toolContext.deleteCancelledPendingRequest(requestId)) {
           deferredManager.cancelDeferred(pending.generation);
           return;
         }
         if (pending.generation.toolCall.name === 'interact_page') {
           if (normalizedAnswer === '确认执行') {
-            approvedToolCalls.add(pending.generation.toolCall.id);
+            toolContext.approveToolCall(pending.generation.toolCall.id);
             await resumeDeferred();
           } else {
             await resumeDeferred({
@@ -1017,7 +1014,7 @@ export default defineBackground({
           }
         } else if (pending.generation.toolCall.name === 'observe_visual_page') {
           if (normalizedAnswer === '仅本次允许') {
-            approvedToolCalls.add(pending.generation.toolCall.id);
+            toolContext.approveToolCall(pending.generation.toolCall.id);
             await resumeDeferred();
           } else {
             await resumeDeferred({
@@ -1031,7 +1028,10 @@ export default defineBackground({
         } else if (pending.generation.toolCall.name === 'run_skill') {
           const toolCall = pending.generation.toolCall;
           if (normalizedAnswer === '仅本次允许' || normalizedAnswer === '持续允许') {
-            skillApprovals.set(toolCall.id, normalizedAnswer === '持续允许' ? 'always' : 'once');
+            toolContext.setSkillApproval(
+              toolCall.id,
+              normalizedAnswer === '持续允许' ? 'always' : 'once',
+            );
             await resumeDeferred();
           } else {
             const skillName =
@@ -1066,7 +1066,7 @@ export default defineBackground({
           }
         } else if (pending.generation.toolCall.name.startsWith('workspace_')) {
           if (normalizedAnswer === '确认执行') {
-            approvedToolCalls.add(pending.generation.toolCall.id);
+            toolContext.approveToolCall(pending.generation.toolCall.id);
             await resumeDeferred();
           } else {
             await resumeDeferred({
@@ -1082,7 +1082,7 @@ export default defineBackground({
           }
         } else if (isMcpToolName(pending.generation.toolCall.name)) {
           if (normalizedAnswer === '确认执行') {
-            approvedToolCalls.add(pending.generation.toolCall.id);
+            toolContext.approveToolCall(pending.generation.toolCall.id);
             await resumeDeferred();
           } else {
             await resumeDeferred({
@@ -1106,23 +1106,24 @@ export default defineBackground({
           });
         }
       } finally {
-        approvedToolCalls.delete(pending.generation.toolCall.id);
-        skillApprovals.delete(pending.generation.toolCall.id);
+        toolContext.revokeToolCallApproval(pending.generation.toolCall.id);
+        toolContext.deleteSkillApproval(pending.generation.toolCall.id);
         const nextPending = await loadPendingPageTurn(requestId).catch(() => null);
         if (nextPending?.requestId !== requestId) {
           await pageInteraction.clear(requestId).catch(() => void 0);
           skillLoader.clear(requestId);
         }
-        diagnosticInputs.delete(requestId);
-        pageSnapshots.delete(requestId);
-        chatHistories.delete(requestId);
-        cancelledPendingRequests.delete(requestId);
+        toolContext.setLatestUserText('');
+        toolContext.setPageSnapshot(null);
+        toolContext.setChatHistory([]);
+        toolContext.deleteCancelledPendingRequest(requestId);
       }
     }
 
-    function finishDiagnostics(event: ChatGenerationEvent): void {
+    function finishDiagnostics(event: ChatGenerationEvent, conversationId: string): void {
       if (event.type !== 'end' && event.type !== 'error') return;
-      const diagnostic = activeDiagnostics.get(event.requestId);
+      const toolContext = toolContextManager.get(conversationId);
+      const diagnostic = toolContext?.getDiagnostic(event.requestId);
       if (!diagnostic || diagnostic.requestId !== event.requestId) return;
 
       if (event.type === 'error') {
@@ -1134,7 +1135,7 @@ export default defineBackground({
       } else {
         recorder.finishRun('chat', 'completed');
       }
-      activeDiagnostics.delete(event.requestId);
+      toolContext?.deleteDiagnostic(event.requestId);
     }
 
     async function downloadDiagnostics(): Promise<void> {
