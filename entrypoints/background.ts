@@ -151,7 +151,14 @@ export default defineBackground({
             ASK_USER_TOOL,
           ],
           executeTool: async (call, signal, requestId, reportProgress, context) => {
-            recorder.step('chat', 'tool', call.name);
+            const toolStartedAt = Date.now();
+            recorder.step(
+              'chat',
+              'tool',
+              `调用 ${call.name}`,
+              JSON.stringify(call.arguments ?? {}),
+              conversationId,
+            );
             let result: GenerationToolExecutionOutcome;
             switch (call.name) {
               case 'browser_action':
@@ -257,11 +264,13 @@ export default defineBackground({
             if (result.nextPageSnapshot) {
               toolContext.setPageSnapshot(result.nextPageSnapshot);
             }
+            const toolCostMs = Date.now() - toolStartedAt;
             recorder.step(
               'chat',
               result.isError ? 'error' : 'tool',
-              result.statusText,
+              `${result.statusText}（${toolCostMs}ms）`,
               result.detail,
+              conversationId,
             );
             return result;
           },
@@ -293,20 +302,24 @@ export default defineBackground({
                 content: message.content,
               })),
             ];
-            recorder.logLlm('chat', {
-              model: round.modelId,
-              purpose: `对话 · 回合 ${diagnostic.modelRounds}`,
-              messageCount: messages.length,
-              promptChars: messages.reduce((total, message) => total + message.content.length, 0),
-              outputChars: round.outputText.length,
-              messages,
-              outputText: round.outputText,
-              promptTokens: round.usage.inputTokens,
-              completionTokens: round.usage.outputTokens,
-              latencyMs: round.latencyMs,
-              finishReason: round.finishReason,
-              ...(round.toolName ? { toolName: round.toolName } : {}),
-            });
+            recorder.logLlm(
+              'chat',
+              {
+                model: round.modelId,
+                purpose: `对话 · 回合 ${diagnostic.modelRounds}`,
+                messageCount: messages.length,
+                promptChars: messages.reduce((total, message) => total + message.content.length, 0),
+                outputChars: round.outputText.length,
+                messages,
+                outputText: round.outputText,
+                promptTokens: round.usage.inputTokens,
+                completionTokens: round.usage.outputTokens,
+                latencyMs: round.latencyMs,
+                finishReason: round.finishReason,
+                ...(round.toolName ? { toolName: round.toolName } : {}),
+              },
+              conversationId,
+            );
           },
           resolveTarget: async () => {
             await requireTrustedStorage();
@@ -314,10 +327,21 @@ export default defineBackground({
             const activeDiagnostic = toolContext.findDiagnosticByConversation(conversationId);
             if (activeDiagnostic) {
               activeDiagnostic.targetResolved = true;
-              recorder.beginRun('chat', toolContext.getLatestUserText(), {
-                model: target.identity.modelId,
-                baseUrl: target.baseUrl,
-              });
+              recorder.beginRun(
+                'chat',
+                toolContext.getLatestUserText(),
+                {
+                  model: target.identity.modelId,
+                  baseUrl: target.baseUrl,
+                },
+                conversationId,
+              );
+              recorder.logContext(
+                conversationId,
+                '任务启动',
+                `会话 ${conversationId} · 模型 ${target.identity.modelId}`,
+                `页面：${toolContext.getPageSnapshot()?.url ?? '无'}`,
+              );
             }
             return target;
           },
@@ -325,6 +349,18 @@ export default defineBackground({
         generationManager.subscribe((event) => {
           publish(event);
           broadcast(chatPorts, generationEventToServerMessage(event, conversationId));
+          recorder.logEvent(conversationId, {
+            type: event.type,
+            requestId: event.requestId,
+            summary:
+              event.type === 'error'
+                ? `出错：${event.message.errorMessage ?? '未知错误'}`
+                : event.type === 'start'
+                  ? `开始生成（消息 ${event.message.id}）`
+                  : event.type === 'end'
+                    ? `完成（状态 ${event.message.status ?? 'completed'}）`
+                    : `更新消息 ${event.message.id}（${event.message.content.length} 字）`,
+          });
           finishDiagnostics(event, conversationId);
           if (event.type === 'end' || event.type === 'error') {
             const historyMessageIds = toolContext.getChatHistory().map(({ id }) => id);
@@ -360,46 +396,6 @@ export default defineBackground({
           }
         });
 
-        // 注册会话级 Agent 实例
-        const agent = new ConversationAgent({
-          conversationId,
-          toolContext,
-          createManager: () => generationManager,
-          broadcast: (event, convId) =>
-            broadcast(chatPorts, generationEventToServerMessage(event, convId)),
-          finishDiagnostics: (event, convId) => finishDiagnostics(event, convId),
-          saveCheckpoint: (event, convId, historyIds) => {
-            void saveRunCheckpoint({
-              id: `checkpoint-${crypto.randomUUID()}`,
-              runId: event.requestId,
-              conversationId: convId,
-              historyMessageIds: historyIds,
-              phase:
-                event.message.status === 'cancelled'
-                  ? 'interrupted'
-                  : event.type === 'error'
-                    ? 'interrupted'
-                    : 'stable',
-              createdAt: Date.now(),
-            }).catch(() => void 0);
-          },
-          saveRuntimeSettings: (convId, modelIdentity) => {
-            void loadConversationRuntimeSettings(convId)
-              .then(async (settings) => {
-                if (!settings) {
-                  await saveConversationRuntimeSettings({
-                    conversationId: convId,
-                    modelIdentity: modelIdentity as never,
-                    thinkingLevel: 'off',
-                    contextWindowTokens: 128_000,
-                    maxOutputTokens: 8_192,
-                    updatedAt: Date.now(),
-                  });
-                }
-              })
-              .catch(() => void 0);
-          },
-        });
         return generationManager;
       },
       createChromeRunRegistryStore(),
@@ -1253,14 +1249,26 @@ export default defineBackground({
       if (!diagnostic || diagnostic.requestId !== event.requestId) return;
 
       if (event.type === 'error') {
-        recorder.logError('chat', event.message.errorMessage ?? '模型请求失败。');
-        recorder.finishRun('chat', 'error');
+        recorder.logError('chat', event.message.errorMessage ?? '模型请求失败。', conversationId);
       } else if (event.message.status === 'cancelled') {
-        recorder.step('chat', 'note', '用户停止。');
-        recorder.finishRun('chat', 'cancelled');
-      } else {
-        recorder.finishRun('chat', 'completed');
+        recorder.step('chat', 'note', '用户停止。', undefined, conversationId);
       }
+      recorder.logContext(
+        conversationId,
+        '任务结束',
+        `状态 ${event.message.status ?? 'completed'} · 模型回合 ${diagnostic.modelRounds}`,
+        `页面：${toolContext?.getPageSnapshot()?.url ?? '无'} · 历史 ${toolContext?.getChatHistory().length ?? 0} 条`,
+      );
+      recorder.finishRun(
+        'chat',
+        event.type === 'error'
+          ? 'error'
+          : event.message.status === 'cancelled'
+            ? 'cancelled'
+            : 'completed',
+        undefined,
+        conversationId,
+      );
       toolContext?.deleteDiagnostic(event.requestId);
     }
 

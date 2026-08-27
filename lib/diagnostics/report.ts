@@ -109,6 +109,7 @@ function renderRun(run: DiagnosticRun, index: number): string {
   lines.push(`## 任务 ${index + 1}（${SOURCE_LABEL[run.source]}） · ${STATUS_LABEL[run.status]}`);
   lines.push('');
   lines.push(`- 用户输入：${run.userInput || '（空）'}`);
+  if (run.conversationId) lines.push(`- 会话：\`${run.conversationId}\``);
   lines.push(`- 模型：\`${run.model}\` @ \`${run.baseUrlHost || '未知端点'}\``);
   lines.push(`- 开始：${fmtTime(run.startedAt)}　耗时：${fmtDuration(run)}`);
   lines.push(`- 版本：扩展 v${run.extensionVersion} / 适配器 v${run.adapterVersion}`);
@@ -146,6 +147,35 @@ function renderRun(run: DiagnosticRun, index: number): string {
     lines.push('### LLM 调用明细');
     lines.push('');
     lines.push(run.llmCalls.map((c, i) => renderLlmCallDetail(c, i)).join('\n'));
+  }
+
+  // Agent 事件流（ChatGenerationEvent 逐条摘要，与 UI 广播一一对应）
+  const events = run.events ?? [];
+  if (events.length > 0) {
+    lines.push('### Agent 事件流');
+    lines.push('');
+    lines.push('| 时刻 | 事件 | 摘要 |');
+    lines.push('| --- | --- | --- |');
+    for (const event of events) {
+      lines.push(
+        `| +${(event.atMs / 1000).toFixed(1)}s | \`${event.type}\` | ${event.summary.replace(/\|/g, '\\|')} |`,
+      );
+    }
+    lines.push('');
+  }
+
+  // Agent 内部状态快照（ToolContext 内容、运行状态等关键节点）
+  const snapshots = run.contextSnapshots ?? [];
+  if (snapshots.length > 0) {
+    lines.push('### Agent 上下文快照');
+    lines.push('');
+    for (const snapshot of snapshots) {
+      lines.push(
+        `- **${snapshot.phase}**（+${(snapshot.atMs / 1000).toFixed(1)}s）：${snapshot.summary}`,
+      );
+      if (snapshot.detail) lines.push(`  - ${snapshot.detail}`);
+    }
+    lines.push('');
   }
 
   // 步骤详情附录（DOM outline 等超长内容）

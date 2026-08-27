@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AgentRunRegistry, AgentRunSnapshot } from '@/lib/generation/registry';
+import { describe, expect, it, vi } from 'vitest';
+import type { AgentRunRegistry } from '@/lib/generation/registry';
 import { AgentManager } from './agent-manager';
 import type { ConversationAgent } from './conversation-agent';
 import { ToolContextManager } from './tool-context';

@@ -478,17 +478,19 @@ export default function App() {
                   </button>
                 </div>
               ) : null}
-              {/* 会话工具条：诊断日志属于当前会话，放在消息区内。 */}
+              {/* 会话工具条：诊断日志属于当前会话，放在消息区内；仅 dev 构建显示。 */}
               <div className="flex items-center justify-between gap-1.5">
-                <ConversationRuntimeControls conversationId={activeConversationId} />
-                <button
-                  type="button"
-                  className="flex items-center gap-1 rounded-lg border border-line bg-surface px-2 py-1 text-[10px] font-medium text-ink-soft transition-all duration-200 hover:border-brand hover:text-brand-strong active:scale-[0.98]"
-                  onClick={downloadDiagnostics}
-                  title="导出执行日志和当前 Boss 页面 DOM 结构（已限量脱敏）"
-                >
-                  <ScrollText size={11} /> 下载诊断日志
-                </button>
+                <div />
+                {import.meta.env.DEV ? (
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 rounded-lg border border-line bg-surface px-2 py-1 text-[10px] font-medium text-ink-soft transition-all duration-200 hover:border-brand hover:text-brand-strong active:scale-[0.98]"
+                    onClick={downloadDiagnostics}
+                    title="导出执行日志和当前 Boss 页面 DOM 结构（已限量脱敏）"
+                  >
+                    <ScrollText size={11} /> 下载诊断日志
+                  </button>
+                ) : null}
               </div>
 
               {messages.map((m) => {
@@ -625,6 +627,8 @@ export default function App() {
               className={pendingUserQuestion ? 'ask-user-composer' : ''}
             />
           </div>
+          {/* 会话运行偏好：模型与思考等级，输入框下方独立一行 */}
+          <ConversationRuntimeControls conversationId={activeConversationId} />
         </div>
       )}
     </div>

@@ -2961,3 +2961,126 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ─── 通用选择框（SmartSelect） ─── */
+.smart-select-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  background: var(--color-surface);
+  color: var(--color-ink-soft);
+  font-size: 10px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    border-color 0.2s,
+    color 0.2s,
+    box-shadow 0.2s,
+    background 0.2s;
+}
+
+.smart-select-trigger:hover {
+  border-color: var(--color-brand);
+  color: var(--color-brand-strong);
+}
+
+.smart-select-trigger:focus-visible {
+  outline: none;
+  border-color: var(--color-brand);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand) 14%, transparent);
+}
+
+.smart-select-trigger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.smart-select-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.smart-select-chevron {
+  flex: 0 0 auto;
+  color: var(--color-ink-faint);
+  transition: transform 0.2s;
+}
+
+.smart-select-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.smart-select-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  min-width: max-content;
+  max-width: 260px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--color-line);
+  border-radius: 12px;
+  background: var(--color-surface);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 14%);
+}
+
+.smart-select-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 10px;
+  color: var(--color-ink);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.smart-select-item.is-active,
+.smart-select-item:hover {
+  background: color-mix(in srgb, var(--color-brand) 9%, transparent);
+}
+
+.smart-select-item.is-selected {
+  color: var(--color-brand-strong);
+  font-weight: 600;
+}
+
+.smart-select-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.smart-select-hint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-ink-faint);
+  font-weight: 400;
+}
+
+.smart-select-check {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--color-brand);
+}
+
+/* 会话运行偏好：输入框下方独立一行 */
+.conversation-runtime-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 0 2px;
+  border: 0;
+  min-inline-size: 0;
+}

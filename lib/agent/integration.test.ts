@@ -6,12 +6,11 @@ import type { ChatGenerationEvent, ChatGenerationManager } from '@/lib/generatio
 import type { AgentRunRegistry, AgentRunSnapshot } from '@/lib/generation/registry';
 import { AgentManager } from './agent-manager';
 import { ConversationAgent } from './conversation-agent';
-import { ToolContext, ToolContextManager } from './tool-context';
+import { ToolContextManager } from './tool-context';
 
 // ─── 模拟 ChatGenerationManager ───
 
 function createMockGenerationManager(
-  conversationId: string,
   publish: (event: ChatGenerationEvent) => void,
 ): ChatGenerationManager {
   let running = false;
@@ -109,7 +108,7 @@ function createMockRegistry(): AgentRunRegistry {
     managerForConversation(conversationId: string) {
       let manager = managers.get(conversationId);
       if (!manager) {
-        manager = createMockGenerationManager(conversationId, () => {});
+        manager = createMockGenerationManager(() => {});
         managers.set(conversationId, manager);
       }
       return manager;
@@ -175,10 +174,10 @@ describe('多会话并行集成测试', () => {
         return new ConversationAgent({
           conversationId,
           toolContext,
-          createManager: (convId, publish) => {
+          createManager: (convId) => {
             const manager = registry.managerForConversation(convId);
             // 重新订阅事件
-            (manager.subscribe as ReturnType<typeof vi.fn>).mockImplementation((listener) => {
+            (manager.subscribe as ReturnType<typeof vi.fn>).mockImplementation(() => {
               // 模拟订阅：保存 listener 以便后续触发
               return () => {};
             });

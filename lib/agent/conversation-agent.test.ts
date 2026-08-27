@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { PageTurnSnapshot } from '@/lib/domain/types';
 import type { ChatGenerationEvent, ChatGenerationManager } from '@/lib/generation/manager';
 import { ConversationAgent } from './conversation-agent';
@@ -187,7 +187,7 @@ describe('ConversationAgent', () => {
   describe('事件处理', () => {
     it('事件触发广播和诊断收尾', () => {
       const manager = createMockManager();
-      const { agent, broadcast, finishDiagnostics } = createAgent('conv-1', manager);
+      const { broadcast, finishDiagnostics } = createAgent('conv-1', manager);
 
       // 模拟 manager 触发事件（通过 createManager 的 publish 回调）
       const event: ChatGenerationEvent = {
@@ -195,13 +195,9 @@ describe('ConversationAgent', () => {
         requestId: 'req-1',
         message: { id: 'msg-1' } as never,
       };
-      // 从 createManager 工厂中拿到 publish 回调
-      const publishFn = (manager.subscribe as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
-      // 实际上 ConversationAgent 内部通过 createManager 的第二个参数订阅
-      // 我们需要直接调用 handleEvent 的私有路径——通过 createManager 捕获
       // 重新创建 agent 来捕获 publish
       let capturedPublish: ((event: ChatGenerationEvent) => void) | undefined;
-      const agent2 = new ConversationAgent({
+      new ConversationAgent({
         conversationId: 'conv-1',
         toolContext: new ToolContext('conv-1'),
         createManager: (_id, publish) => {

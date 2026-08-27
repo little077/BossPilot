@@ -1,22 +1,27 @@
 // ─── 会话运行偏好 ───
 // 职责：把模型与思考等级绑定到当前会话；运行中修改只影响下一轮。
+// 使用通用 Select 组件，视觉与交互与项目其他选择控件保持一致。
 
 import { useEffect, useMemo, useState } from 'react';
 import type { ConversationRuntimeSettings, ThinkingLevel } from '@/lib/domain/chat';
 import type { ProviderStateView } from '@/lib/domain/types';
 import type { ProviderCommandResponse } from '@/lib/ipc/protocol';
 import { loadConversationRuntimeSettings, saveConversationRuntimeSettings } from '@/lib/storage/db';
+import { Select } from './ui/Select';
 
 interface ConversationRuntimeControlsProps {
   conversationId: string | null;
 }
 
-const THINKING_OPTIONS: Array<{ value: ThinkingLevel; label: string }> = [
-  { value: 'off', label: '标准' },
-  { value: 'low', label: '轻度思考' },
-  { value: 'medium', label: '中度思考' },
-  { value: 'high', label: '深度思考' },
+const THINKING_OPTIONS: Array<{ value: ThinkingLevel; label: string; hint?: string }> = [
+  { value: 'off', label: '标准', hint: '速度优先，不做额外推理' },
+  { value: 'low', label: '轻度思考', hint: '复杂问题适度推理' },
+  { value: 'medium', label: '中度思考', hint: '平衡速度与推理深度' },
+  { value: 'high', label: '深度思考', hint: '强模型推理模式' },
 ];
+
+/** 模型 identity 分隔符：providerId 与 modelId 之间。 */
+const IDENTITY_SEP = '\u0000';
 
 export function ConversationRuntimeControls({ conversationId }: ConversationRuntimeControlsProps) {
   const [providers, setProviders] = useState<ProviderStateView | null>(null);
@@ -39,18 +44,18 @@ export function ConversationRuntimeControls({ conversationId }: ConversationRunt
     };
   }, [conversationId]);
 
-  const models = useMemo(
+  const modelOptions = useMemo(
     () =>
       providers?.connections.flatMap((connection) =>
         connection.models.map((model) => ({
-          value: `${connection.providerId}\u0000${model.id}`,
+          value: `${connection.providerId}${IDENTITY_SEP}${model.id}`,
           label: `${connection.providerId} / ${model.name}`,
         })),
       ) ?? [],
     [providers],
   );
   const identity = settings?.modelIdentity ?? providers?.activeModel;
-  const modelValue = identity ? `${identity.providerId}\u0000${identity.modelId}` : '';
+  const modelValue = identity ? `${identity.providerId}${IDENTITY_SEP}${identity.modelId}` : '';
 
   const persist = async (next: ConversationRuntimeSettings) => {
     setSettings(next);
@@ -60,17 +65,12 @@ export function ConversationRuntimeControls({ conversationId }: ConversationRunt
   if (!conversationId || !providers) return null;
 
   return (
-    <fieldset className="flex items-center gap-1.5">
-      <legend className="sr-only">当前会话运行设置</legend>
-      <label className="sr-only" htmlFor="conversation-model">
-        当前会话模型
-      </label>
-      <select
-        id="conversation-model"
-        className="max-w-36 rounded-lg border border-line bg-surface px-1.5 py-1 text-[10px] text-ink-soft"
+    <fieldset className="conversation-runtime-controls" aria-label="当前会话运行设置">
+      <Select
         value={modelValue}
-        onChange={(event) => {
-          const [providerId, modelId] = event.target.value.split('\u0000');
+        options={modelOptions}
+        onChange={(value) => {
+          const [providerId, modelId] = value.split(IDENTITY_SEP);
           if (!providerId || !modelId) return;
           void persist({
             conversationId,
@@ -81,22 +81,14 @@ export function ConversationRuntimeControls({ conversationId }: ConversationRunt
             updatedAt: Date.now(),
           });
         }}
-      >
-        {models.map((model) => (
-          <option key={model.value} value={model.value}>
-            {model.label}
-          </option>
-        ))}
-      </select>
-      <label className="sr-only" htmlFor="conversation-thinking">
-        思考等级
-      </label>
-      <select
-        id="conversation-thinking"
-        className="rounded-lg border border-line bg-surface px-1.5 py-1 text-[10px] text-ink-soft"
+        ariaLabel="当前会话模型"
+        placeholder="选择模型"
+        allowEmpty={false}
+      />
+      <Select
         value={settings?.thinkingLevel ?? 'off'}
-        onChange={(event) => {
-          const thinkingLevel = event.target.value as ThinkingLevel;
+        options={THINKING_OPTIONS}
+        onChange={(thinkingLevel) => {
           void persist({
             conversationId,
             ...(identity ? { modelIdentity: identity } : {}),
@@ -106,13 +98,10 @@ export function ConversationRuntimeControls({ conversationId }: ConversationRunt
             updatedAt: Date.now(),
           });
         }}
-      >
-        {THINKING_OPTIONS.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
+        ariaLabel="思考等级"
+        placeholder="思考等级"
+        allowEmpty={false}
+      />
     </fieldset>
   );
 }

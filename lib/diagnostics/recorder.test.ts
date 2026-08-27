@@ -66,6 +66,73 @@ describe('beginRun', () => {
     expect(chat?.steps.map((s) => s.summary)).toEqual(['收到用户输入', '聊天步骤']);
     expect(task?.steps.map((s) => s.summary)).toEqual(['收到用户输入', '任务步骤']);
   });
+
+  it('多会话并行的 chat 轨按 conversationId 隔离', () => {
+    recorder.beginRun('chat', '会话 A 输入', config, 'conv-a');
+    recorder.beginRun('chat', '会话 B 输入', config, 'conv-b');
+    recorder.step('chat', 'note', 'A 的步骤', undefined, 'conv-a');
+    recorder.step('chat', 'note', 'B 的步骤', undefined, 'conv-b');
+    recorder.finishRun('chat', 'completed', undefined, 'conv-a');
+    recorder.finishRun('chat', 'completed', undefined, 'conv-b');
+
+    const runs = recorder.snapshotRuns();
+    expect(runs).toHaveLength(2);
+    const a = runs.find((r) => r.conversationId === 'conv-a');
+    const b = runs.find((r) => r.conversationId === 'conv-b');
+    expect(a?.steps.map((s) => s.summary)).toEqual(['收到用户输入', 'A 的步骤']);
+    expect(b?.steps.map((s) => s.summary)).toEqual(['收到用户输入', 'B 的步骤']);
+    expect(a?.status).toBe('completed');
+    expect(b?.status).toBe('completed');
+  });
+
+  it('logEvent 记录事件流摘要并按会话隔离', () => {
+    recorder.beginRun('chat', '输入', config, 'conv-a');
+    recorder.beginRun('chat', '输入', config, 'conv-b');
+    recorder.logEvent('conv-a', { type: 'start', requestId: 'req-1', summary: '开始生成' });
+    recorder.logEvent('conv-b', { type: 'end', requestId: 'req-2', summary: '完成' });
+
+    const runs = recorder.snapshotRuns();
+    const a = runs.find((r) => r.conversationId === 'conv-a');
+    const b = runs.find((r) => r.conversationId === 'conv-b');
+    expect(a?.events).toEqual([
+      expect.objectContaining({ type: 'start', requestId: 'req-1', summary: '开始生成' }),
+    ]);
+    expect(b?.events).toEqual([
+      expect.objectContaining({ type: 'end', requestId: 'req-2', summary: '完成' }),
+    ]);
+  });
+
+  it('logContext 记录内部状态快照，detail 脱敏截断', () => {
+    recorder.beginRun('chat', '输入', config, 'conv-a');
+    recorder.logContext(
+      'conv-a',
+      '任务启动',
+      '会话 conv-a · 模型 m',
+      '页面：https://example.com?token=sk-abcdef123456',
+    );
+    recorder.logContext('conv-a', '任务结束', '状态 completed');
+
+    const run = must(recorder.snapshotRuns()[0]);
+    expect(run.contextSnapshots).toHaveLength(2);
+    expect(run.contextSnapshots?.[0]).toMatchObject({
+      phase: '任务启动',
+      summary: '会话 conv-a · 模型 m',
+    });
+    expect(run.contextSnapshots?.[0]?.detail).toBe('页面：https://example.com?token=***');
+  });
+
+  it('clear 只清指定会话的 chat 轨', () => {
+    recorder.beginRun('chat', 'A', config, 'conv-a');
+    recorder.finishRun('chat', 'completed', undefined, 'conv-a');
+    recorder.beginRun('chat', 'B', config, 'conv-b');
+    recorder.finishRun('chat', 'completed', undefined, 'conv-b');
+
+    recorder.clear('conv-a');
+
+    const runs = recorder.snapshotRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.conversationId).toBe('conv-b');
+  });
 });
 
 describe('step / logLlm / logError', () => {

@@ -17,6 +17,11 @@ vi.mock('@/lib/providers/client', () => ({
   sendProviderCommand: sendProviderCommandMock,
 }));
 
+vi.mock('@/lib/storage/db', () => ({
+  loadConversationRuntimeSettings: vi.fn().mockResolvedValue(null),
+  saveConversationRuntimeSettings: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock('./Composer', async () => {
   const React = await import('react');
   return {
@@ -512,5 +517,88 @@ describe('Composer 草稿与模型引导', () => {
     };
     view.rerender(<App />);
     expect(await screen.findByRole('textbox', { name: '草稿输入' })).toHaveValue('A 的未发送草稿');
+  });
+});
+
+describe('会话运行偏好（模型选择器）', () => {
+  const PROVIDER_STATE = {
+    version: 1 as const,
+    activeModel: { providerId: 'openai', modelId: 'gpt-test' },
+    connections: [
+      {
+        providerId: 'openai',
+        baseUrl: 'https://api.openai.com/v1',
+        hasApiKey: true,
+        apiKeyLastFour: '1234',
+        models: [{ id: 'gpt-test', name: 'GPT 测试' }],
+        selectedModelId: 'gpt-test',
+      },
+    ],
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('模型选择器位于输入框下方（dock 区域），不在消息区顶部', async () => {
+    vi.stubGlobal('chrome', {
+      runtime: {
+        sendMessage: vi.fn().mockResolvedValue({ ok: true, state: PROVIDER_STATE }),
+      },
+    });
+    useAgentPortMock.mockReturnValue({
+      ...basePort,
+      activeConversationId: 'conversation-running',
+      messages: [
+        { id: 'user-1', role: 'user', content: '读取当前岗位', createdAt: 1 },
+        { id: 'ai-1', role: 'assistant', content: '好的', createdAt: 2 },
+      ],
+    });
+    render(<App />);
+
+    const modelSelect = await screen.findByRole('button', { name: '当前会话模型' });
+    const thinkingSelect = screen.getByRole('button', { name: '思考等级' });
+
+    // 两个选择器都位于输入框下方的独立行容器内
+    const controlsRow = modelSelect.closest('.conversation-runtime-controls');
+    expect(controlsRow).not.toBeNull();
+    expect(controlsRow?.contains(thinkingSelect)).toBe(true);
+    // 该行位于 dock（会话底部输入区），跟随在 Composer 之后
+    const dock = modelSelect.closest('.redscope-dock');
+    expect(dock).not.toBeNull();
+    expect(dock?.querySelector('[data-testid="composer"]')).not.toBeNull();
+  });
+
+  it('切换模型持久化到会话运行时设置', async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal('chrome', {
+      runtime: {
+        sendMessage: vi.fn().mockResolvedValue({ ok: true, state: PROVIDER_STATE }),
+      },
+    });
+    useAgentPortMock.mockReturnValue({
+      ...basePort,
+      activeConversationId: 'conversation-running',
+      messages: [
+        { id: 'user-1', role: 'user', content: '读取当前岗位', createdAt: 1 },
+        { id: 'ai-1', role: 'assistant', content: '好的', createdAt: 2 },
+      ],
+    });
+    render(<App />);
+
+    const modelSelect = await screen.findByRole('button', { name: '当前会话模型' });
+    expect(modelSelect).toHaveTextContent('openai / GPT 测试');
+
+    // 打开后可用键盘导航（End 定位到末项，Enter 选中）
+    await user.click(modelSelect);
+    await user.keyboard('{End}{Enter}');
+
+    const { saveConversationRuntimeSettings } = await import('@/lib/storage/db');
+    expect(saveConversationRuntimeSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: 'conversation-running',
+        modelIdentity: expect.objectContaining({ providerId: 'openai', modelId: 'gpt-test' }),
+      }),
+    );
   });
 });

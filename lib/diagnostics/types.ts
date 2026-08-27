@@ -73,6 +73,8 @@ export interface DiagnosticRun {
   source: DiagnosticSource;
   /** 触发本次任务的用户输入（已脱敏）。 */
   userInput: string;
+  /** 会话 ID（chat 轨专用；多会话并行时用于区分归属）。 */
+  conversationId?: string;
   model: string;
   /** 端点主机名（不含完整 URL / 路径 / 参数）。 */
   baseUrlHost: string;
@@ -85,4 +87,32 @@ export interface DiagnosticRun {
   errorSummary?: string;
   steps: DiagnosticStep[];
   llmCalls: DiagnosticLlmCall[];
+  /** Agent 事件流：ChatGenerationEvent 逐条摘要（start/update/end/error）。 */
+  events?: DiagnosticEvent[];
+  /** Agent 内部状态快照（ToolContext 内容、运行状态等关键节点）。 */
+  contextSnapshots?: DiagnosticContextSnapshot[];
+}
+
+/** Agent 事件流中的一条：ChatGenerationEvent 的脱敏摘要。 */
+export interface DiagnosticEvent {
+  /** 相对任务开始的毫秒偏移。 */
+  atMs: number;
+  /** 事件类型（与 ChatGenerationEvent.type 对齐）。 */
+  type: string;
+  /** 关联的请求 ID。 */
+  requestId: string;
+  /** 一句话摘要（已脱敏）。 */
+  summary: string;
+}
+
+/** Agent 内部状态快照：关键节点（任务启动/结束、工具授权等）的上下文摘要。 */
+export interface DiagnosticContextSnapshot {
+  /** 相对任务开始的毫秒偏移。 */
+  atMs: number;
+  /** 快照节点名称（如：任务启动 / 任务结束）。 */
+  phase: string;
+  /** 一句话摘要（已脱敏）。 */
+  summary: string;
+  /** 可选补充细节（已脱敏、超长截断）。 */
+  detail?: string;
 }
