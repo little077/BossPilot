@@ -1,3 +1,4 @@
+import { ConversationAgent } from '@/lib/agent/conversation-agent';
 import { toolContextManager } from '@/lib/agent/tool-context';
 import { captureCurrentPageStructure } from '@/lib/diagnostics/page-structure';
 import { recorder } from '@/lib/diagnostics/recorder';
@@ -108,6 +109,7 @@ export default defineBackground({
     const generationAdapter = createPiGenerationAdapter();
     const pageInteraction = new PageInteractionCoordinator();
     const titleControllers = new Map<string, { controller: AbortController; requestId: string }>();
+    const conversationAgents = new Map<string, ConversationAgent>();
 
     const runRegistry = new AgentRunRegistry(
       (conversationId, publish) => {
@@ -357,6 +359,49 @@ export default defineBackground({
               .catch(() => void 0);
           }
         });
+
+        // 注册会话级 Agent 实例
+        const agent = new ConversationAgent({
+          conversationId,
+          toolContext,
+          createManager: () => generationManager,
+          broadcast: (event, convId) =>
+            broadcast(chatPorts, generationEventToServerMessage(event, convId)),
+          finishDiagnostics: (event, convId) => finishDiagnostics(event, convId),
+          saveCheckpoint: (event, convId, historyIds) => {
+            void saveRunCheckpoint({
+              id: `checkpoint-${crypto.randomUUID()}`,
+              runId: event.requestId,
+              conversationId: convId,
+              historyMessageIds: historyIds,
+              phase:
+                event.message.status === 'cancelled'
+                  ? 'interrupted'
+                  : event.type === 'error'
+                    ? 'interrupted'
+                    : 'stable',
+              createdAt: Date.now(),
+            }).catch(() => void 0);
+          },
+          saveRuntimeSettings: (convId, modelIdentity) => {
+            void loadConversationRuntimeSettings(convId)
+              .then(async (settings) => {
+                if (!settings) {
+                  await saveConversationRuntimeSettings({
+                    conversationId: convId,
+                    modelIdentity: modelIdentity as never,
+                    thinkingLevel: 'off',
+                    contextWindowTokens: 128_000,
+                    maxOutputTokens: 8_192,
+                    updatedAt: Date.now(),
+                  });
+                }
+              })
+              .catch(() => void 0);
+          },
+        });
+        conversationAgents.set(conversationId, agent);
+
         return generationManager;
       },
       createChromeRunRegistryStore(),
@@ -749,18 +794,25 @@ export default defineBackground({
       }
 
       const snapshot = await capturePageTurnSnapshot().catch(() => null);
+      const agent = conversationAgents.get(conversationId);
       const toolContext = toolContextManager.getOrCreate(conversationId);
-      toolContext.setPageSnapshot(snapshot);
-      toolContext.setChatHistory(history);
 
-      const lastUser = [...history].reverse().find((message) => message.role === 'user');
-      toolContext.setLatestUserText(lastUser?.content ?? '');
-      toolContext.setDiagnostic(requestId, {
-        conversationId,
-        requestId,
-        targetResolved: false,
-        modelRounds: 0,
-      });
+      if (agent) {
+        const lastUser = [...history].reverse().find((message) => message.role === 'user');
+        agent.prepareForNewTask(snapshot, history, lastUser?.content ?? '', requestId);
+      } else {
+        // Agent 尚未创建（首次调用），直接操作 toolContext
+        toolContext.setPageSnapshot(snapshot);
+        toolContext.setChatHistory(history);
+        const lastUser = [...history].reverse().find((message) => message.role === 'user');
+        toolContext.setLatestUserText(lastUser?.content ?? '');
+        toolContext.setDiagnostic(requestId, {
+          conversationId,
+          requestId,
+          targetResolved: false,
+          modelRounds: 0,
+        });
+      }
       await saveRunCheckpoint({
         id: `checkpoint-${crypto.randomUUID()}`,
         runId: requestId,
@@ -788,10 +840,14 @@ export default defineBackground({
         if (pending?.requestId !== requestId)
           await pageInteraction.clear(requestId).catch(() => void 0);
         if (pending?.requestId !== requestId) skillLoader.clear(requestId);
-        toolContext.deleteDiagnostic(requestId);
-        toolContext.setLatestUserText('');
-        toolContext.setPageSnapshot(null);
-        toolContext.setChatHistory([]);
+        if (agent) {
+          agent.cleanupAfterTask(requestId);
+        } else {
+          toolContext.deleteDiagnostic(requestId);
+          toolContext.setLatestUserText('');
+          toolContext.setPageSnapshot(null);
+          toolContext.setChatHistory([]);
+        }
       }
     }
 
@@ -836,6 +892,7 @@ export default defineBackground({
       }
 
       const history = messages.filter((message) => message.id !== pending.generation.message.id);
+      const agent = conversationAgents.get(conversationId);
       const toolContext = toolContextManager.getOrCreate(conversationId);
       if (toolContext.deleteCancelledPendingRequest(requestId)) {
         deferredManager.cancelDeferred(pending.generation);
@@ -855,10 +912,14 @@ export default defineBackground({
         return;
       }
 
-      toolContext.setPageSnapshot(pending.snapshot);
-      toolContext.setChatHistory(history);
       const lastUser = [...history].reverse().find((message) => message.role === 'user');
-      toolContext.setLatestUserText(lastUser?.content ?? '');
+      if (agent) {
+        agent.prepareForResume(pending.snapshot, history, lastUser?.content ?? '');
+      } else {
+        toolContext.setPageSnapshot(pending.snapshot);
+        toolContext.setChatHistory(history);
+        toolContext.setLatestUserText(lastUser?.content ?? '');
+      }
       // 先移除已经领取的旧暂停点；恢复过程中若再次暂停，会写入一个新的有效暂停点。
       await clearPendingPageTurn(requestId);
       try {
@@ -909,10 +970,14 @@ export default defineBackground({
           await pageInteraction.clear(requestId).catch(() => void 0);
           skillLoader.clear(requestId);
         }
-        toolContext.setLatestUserText('');
-        toolContext.setPageSnapshot(null);
-        toolContext.setChatHistory([]);
-        toolContext.deleteCancelledPendingRequest(requestId);
+        if (agent) {
+          agent.cleanupAfterResume(requestId);
+        } else {
+          toolContext.setLatestUserText('');
+          toolContext.setPageSnapshot(null);
+          toolContext.setChatHistory([]);
+          toolContext.deleteCancelledPendingRequest(requestId);
+        }
       }
     }
 
@@ -957,6 +1022,7 @@ export default defineBackground({
       }
 
       const history = messages.filter((message) => message.id !== pending.generation.message.id);
+      const agent = conversationAgents.get(conversationId);
       const toolContext = toolContextManager.getOrCreate(conversationId);
       if (toolContext.deleteCancelledPendingRequest(requestId)) {
         deferredManager.cancelDeferred(pending.generation);
@@ -984,10 +1050,14 @@ export default defineBackground({
         return;
       }
 
-      toolContext.setPageSnapshot(pending.snapshot);
-      toolContext.setChatHistory(history);
       const lastUser = [...history].reverse().find((message) => message.role === 'user');
-      toolContext.setLatestUserText(lastUser?.content ?? '');
+      if (agent) {
+        agent.prepareForResume(pending.snapshot, history, lastUser?.content ?? '');
+      } else {
+        toolContext.setPageSnapshot(pending.snapshot);
+        toolContext.setChatHistory(history);
+        toolContext.setLatestUserText(lastUser?.content ?? '');
+      }
       await clearPendingPageTurn(requestId);
       try {
         const resumeDeferred = async (override?: GenerationToolExecutionResult) => {
@@ -1113,10 +1183,14 @@ export default defineBackground({
           await pageInteraction.clear(requestId).catch(() => void 0);
           skillLoader.clear(requestId);
         }
-        toolContext.setLatestUserText('');
-        toolContext.setPageSnapshot(null);
-        toolContext.setChatHistory([]);
-        toolContext.deleteCancelledPendingRequest(requestId);
+        if (agent) {
+          agent.cleanupAfterResume(requestId);
+        } else {
+          toolContext.setLatestUserText('');
+          toolContext.setPageSnapshot(null);
+          toolContext.setChatHistory([]);
+          toolContext.deleteCancelledPendingRequest(requestId);
+        }
       }
     }
 
