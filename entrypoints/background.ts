@@ -658,8 +658,8 @@ export default defineBackground({
         switch (message.type) {
           case 'subscribe': {
             send({ type: 'snapshot', snapshot: orchestrator.getSnapshot() });
-            send({ type: 'run_state', runs: runRegistry.snapshots() });
-            for (const replay of runRegistry.replayEvents()) {
+            send({ type: 'run_state', runs: agentManager.getSnapshots() });
+            for (const replay of agentManager.getReplayEvents()) {
               send(generationEventToServerMessage(replay.event, replay.conversationId));
             }
             const pendingTurns = await listPendingPageTurns();
@@ -685,8 +685,8 @@ export default defineBackground({
                 message: pending.generation.message,
               });
             }
-            const activeRun = runRegistry
-              .snapshots()
+            const activeRun = agentManager
+              .getSnapshots()
               .find((run) => run.status === 'running' || run.status === 'waiting_user');
             send({
               type: 'chat_state',
@@ -702,7 +702,7 @@ export default defineBackground({
             await startChat(message.conversationId, message.runId, message.messages);
             break;
           case 'run:steer':
-            if (!runRegistry.steer(message.runId, message.content)) {
+            if (!agentManager.steerTask(message.runId, message.content)) {
               send({
                 type: 'error',
                 requestId: message.runId,
@@ -715,7 +715,7 @@ export default defineBackground({
             await startChat(message.conversationId, message.runId, message.messages);
             break;
           case 'run:cancel':
-            runRegistry.stop(message.runId);
+            agentManager.stopTask(message.runId);
             break;
           case 'summarize_conversation':
             await summarizeConversation(
@@ -744,7 +744,7 @@ export default defineBackground({
           case 'cancel': {
             if (message.scope !== 'task') {
               const requestId = message.requestId;
-              if (requestId && !runRegistry.stop(requestId)) {
+              if (requestId && !agentManager.stopTask(requestId)) {
                 const pending = await claimPendingPageTurn(requestId);
                 if (pending) {
                   await clearPendingPageTurn(requestId);
@@ -766,8 +766,9 @@ export default defineBackground({
             break;
           }
           case 'clear_chat':
-            runRegistry.clearReplay();
-            if (!runRegistry.snapshots().some((run) => run.status === 'running')) recorder.clear();
+            agentManager.clearReplay();
+            if (!agentManager.getSnapshots().some((run) => run.status === 'running'))
+              recorder.clear();
             break;
           case 'resume_captcha':
             orchestrator.resumeCaptcha();
@@ -837,7 +838,7 @@ export default defineBackground({
       const pendingForConversation = (await listPendingPageTurns()).find(
         (turn) => turn.conversationId === conversationId,
       );
-      if (runRegistry.runningForConversation(conversationId) || pendingForConversation) {
+      if (agentManager.getRunState(conversationId) || pendingForConversation) {
         broadcast(chatPorts, {
           type: 'error',
           requestId,
@@ -876,9 +877,7 @@ export default defineBackground({
       });
 
       try {
-        await runRegistry.enqueue(conversationId, requestId, async (generationManager) => {
-          await generationManager.start(requestId, pageContextHistory(history, snapshot));
-        });
+        await agentManager.startTask(conversationId, requestId, history, snapshot);
       } catch (error) {
         toolContext.deleteDiagnostic(requestId);
         // 解析阶段还没有 stream_start；重连窗口可能已通过 chat_state 绑定本 requestId，
