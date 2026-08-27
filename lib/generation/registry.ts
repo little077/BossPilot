@@ -1,6 +1,7 @@
 // ─── 多会话 Agent 运行注册表 ───
 // 职责：限制全局并发、维护 FIFO 队列，并把每个会话绑定到独立生成管理器。
 
+import { keepAlive } from '@/lib/agent/keep-alive';
 import type { ChatGenerationEvent, ChatGenerationManager } from '@/lib/generation/manager';
 
 export type AgentRunStatus =
@@ -101,8 +102,22 @@ export class AgentRunRegistry {
     };
     this.runs.set(requestId, snapshot);
 
+    // 获取保活锁，防止 SW 在长时间任务期间被终止
+    const releaseKeepAlive = keepAlive.acquire(conversationId);
+
     const promise = new Promise<void>((resolve, reject) => {
-      this.queue.push({ snapshot, execute, resolve, reject });
+      this.queue.push({
+        snapshot,
+        execute: async (manager) => {
+          try {
+            await execute(manager);
+          } finally {
+            releaseKeepAlive();
+          }
+        },
+        resolve,
+        reject,
+      });
     });
     this.refreshQueuePositions();
     void this.persistAndPublish();
@@ -140,6 +155,8 @@ export class AgentRunRegistry {
       const [item] = this.queue.splice(queueIndex, 1);
       if (!item) return false;
       this.update(requestId, 'cancelled');
+      // 队列中取消时释放保活锁
+      keepAlive.release(item.snapshot.conversationId);
       item.resolve();
       this.refreshQueuePositions();
       void this.persistAndPublish();
