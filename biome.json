@@ -15,7 +15,8 @@
       "!!coverage",
       "!!playwright-report",
       "!!test-results",
-      "!!design-prototype"
+      "!!design-prototype",
+      "!!skills/**/scripts"
     ]
   },
   "formatter": {

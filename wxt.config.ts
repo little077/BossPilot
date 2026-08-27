@@ -73,7 +73,7 @@ export default defineConfig({
       'downloads',
       'offscreen',
     ],
-    host_permissions: ['https://www.zhipin.com/*'],
+    host_permissions: ['https://www.zhipin.com/*', 'https://www.xiaohongshu.com/*'],
     // 模型端点在用户点「开通」时按具体 origin 申请；不把模型全网权限设为常驻权限。
     optional_host_permissions: ['https://*/*', 'http://*/*'],
     sandbox: {

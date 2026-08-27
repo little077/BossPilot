@@ -18,7 +18,14 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./tests/setup.ts'],
     include: ['**/*.test.{ts,tsx}'],
-    exclude: ['node_modules/**', '.output/**', '.wxt/**', 'coverage/**', 'design-prototype/**'],
+    exclude: [
+      'node_modules/**',
+      '.output/**',
+      '.wxt/**',
+      '.reference/**',
+      'coverage/**',
+      'design-prototype/**',
+    ],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json-summary', 'html'],
@@ -92,6 +99,7 @@ export default defineConfig({
         'entrypoints/sidepanel/SettingsView.tsx',
         'entrypoints/sidepanel/SkillSettings.tsx',
         'entrypoints/sidepanel/SkillEditor.tsx',
+        'entrypoints/sidepanel/SkillReference.ts',
         'entrypoints/sidepanel/AgentContextSettings.tsx',
         'entrypoints/sidepanel/McpSettings.tsx',
         'entrypoints/sidepanel/AgentHealthCheck.tsx',

@@ -7,6 +7,10 @@ playwright-report/
 test-results/
 stats.html
 stats-*.json
+.reference/
+
+# ─── 设计原型（仅本地参考，不进版本管理） ───
+design-prototype/
 
 # ─── 环境与本地配置 ───
 .env
