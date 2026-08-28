@@ -31,6 +31,7 @@ vi.mock('./Composer', async () => {
         className?: string;
         disabled?: boolean;
         running?: boolean;
+        tools?: React.ReactNode;
         draft?: { content: { content?: Array<{ content?: Array<{ text?: string }> }> } };
         onDraftChange?: (draft: {
           content: {
@@ -41,7 +42,10 @@ vi.mock('./Composer', async () => {
         }) => void;
         onSend: (value: string, attachments: []) => boolean | Promise<boolean>;
       }
-    >(function MockComposer({ className, disabled, running, draft, onDraftChange, onSend }, ref) {
+    >(function MockComposer(
+      { className, disabled, running, tools, draft, onDraftChange, onSend },
+      ref,
+    ) {
       const [text, setTextState] = React.useState(
         () => draft?.content.content?.[0]?.content?.map((node) => node.text ?? '').join('') ?? '',
       );
@@ -77,6 +81,10 @@ vi.mock('./Composer', async () => {
               onChange={(event) => setText(event.target.value)}
             />
           </label>
+          <div className="composer-tools">
+            <span>Enter 发送</span>
+            {tools}
+          </div>
           <button type="button" onClick={() => void onSend(text, [])}>
             触发发送
           </button>
@@ -530,7 +538,10 @@ describe('会话运行偏好（模型选择器）', () => {
         baseUrl: 'https://api.openai.com/v1',
         hasApiKey: true,
         apiKeyLastFour: '1234',
-        models: [{ id: 'gpt-test', name: 'GPT 测试' }],
+        models: [
+          { id: 'gpt-test', name: 'GPT 测试' },
+          { id: 'gpt-pro', name: 'GPT 专业版' },
+        ],
         selectedModelId: 'gpt-test',
       },
     ],
@@ -540,7 +551,7 @@ describe('会话运行偏好（模型选择器）', () => {
     vi.unstubAllGlobals();
   });
 
-  it('模型选择器位于输入框下方（dock 区域），不在消息区顶部', async () => {
+  it('模型选择器嵌入输入框内部工具行，不在输入框外部', async () => {
     vi.stubGlobal('chrome', {
       runtime: {
         sendMessage: vi.fn().mockResolvedValue({ ok: true, state: PROVIDER_STATE }),
@@ -556,17 +567,25 @@ describe('会话运行偏好（模型选择器）', () => {
     });
     render(<App />);
 
-    const modelSelect = await screen.findByRole('button', { name: '当前会话模型' });
-    const thinkingSelect = screen.getByRole('button', { name: '思考等级' });
+    const modelSelect = await screen.findByRole('combobox', { name: '当前会话模型' });
+    const thinkingSelect = screen.getByRole('combobox', { name: '思考等级' });
 
-    // 两个选择器都位于输入框下方的独立行容器内
+    // 两个选择器位于同一内联容器，且该容器渲染在 Composer 卡片内部（工具行）
     const controlsRow = modelSelect.closest('.conversation-runtime-controls');
     expect(controlsRow).not.toBeNull();
     expect(controlsRow?.contains(thinkingSelect)).toBe(true);
-    // 该行位于 dock（会话底部输入区），跟随在 Composer 之后
-    const dock = modelSelect.closest('.redscope-dock');
-    expect(dock).not.toBeNull();
-    expect(dock?.querySelector('[data-testid="composer"]')).not.toBeNull();
+    const composer = modelSelect.closest('[data-testid="composer"]');
+    expect(composer).not.toBeNull();
+    // 选择器位于「Enter 发送」提示之后（同一工具行内，提示在前、选择器在后）
+    const toolsRow = modelSelect.closest('.composer-tools');
+    expect(toolsRow).not.toBeNull();
+    const enterHint = toolsRow?.querySelector('span');
+    expect(enterHint?.textContent).toContain('Enter 发送');
+    expect(enterHint && controlsRow ? enterHint.compareDocumentPosition(controlsRow) : 0).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    // 输入框外部（dock 独立行）不应再有选择器容器
+    expect(document.querySelector('.redscope-dock > .conversation-runtime-controls')).toBeNull();
   });
 
   it('切换模型持久化到会话运行时设置', async () => {
@@ -586,18 +605,20 @@ describe('会话运行偏好（模型选择器）', () => {
     });
     render(<App />);
 
-    const modelSelect = await screen.findByRole('button', { name: '当前会话模型' });
+    const modelSelect = await screen.findByRole('combobox', { name: '当前会话模型' });
     expect(modelSelect).toHaveTextContent('openai / GPT 测试');
 
-    // 打开后可用键盘导航（End 定位到末项，Enter 选中）
+    // 打开下拉后切换到另一模型（Radix Select 在 jsdom 中键盘路径最可靠）：
+    // 当前项 gpt-test 高亮，ArrowDown 移到 gpt-pro，Enter 确认选中。
     await user.click(modelSelect);
-    await user.keyboard('{End}{Enter}');
+    await screen.findByRole('option', { name: 'openai / GPT 专业版' });
+    await user.keyboard('{ArrowDown}{Enter}');
 
     const { saveConversationRuntimeSettings } = await import('@/lib/storage/db');
     expect(saveConversationRuntimeSettings).toHaveBeenCalledWith(
       expect.objectContaining({
         conversationId: 'conversation-running',
-        modelIdentity: expect.objectContaining({ providerId: 'openai', modelId: 'gpt-test' }),
+        modelIdentity: expect.objectContaining({ providerId: 'openai', modelId: 'gpt-pro' }),
       }),
     );
   });

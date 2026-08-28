@@ -89,6 +89,24 @@ export async function openOrFocusTab(
   return { tab, reused: false };
 }
 
+export async function openNewTab(
+  targetUrl: string,
+  snapshot: PageTurnSnapshot | null,
+  signal: AbortSignal,
+): Promise<chrome.tabs.Tab> {
+  signal.throwIfAborted();
+  const target = new URL(targetUrl);
+  if (target.protocol !== 'https:' && target.protocol !== 'http:') {
+    throw new Error('INVALID_BROWSER_ACTION: 只允许新建 HTTP(S) 标签页。');
+  }
+  const createProperties: chrome.tabs.CreateProperties = { url: target.href, active: true };
+  if (snapshot?.windowId !== undefined) createProperties.windowId = snapshot.windowId;
+  const tab = await chrome.tabs.create(createProperties);
+  signal.throwIfAborted();
+  await focusWindow(tab.windowId);
+  return tab;
+}
+
 export async function waitForTabReady(
   tabId: number,
   signal: AbortSignal,

@@ -1,220 +1,166 @@
-// ─── 通用选择框（SmartSelect） ───
-// 企业级交互：悬停高亮、选中反馈、键盘导航（↑↓/Home/End/Enter/Escape）、
-// 点击外部关闭。视觉遵循项目设计令牌（surface/line/ink/brand），
-// 替代原生 <select>，保证多处在视觉与交互上的一致性。
+// ─── 通用选择框（shadcn/ui Select） ───
+// 基于 @radix-ui/react-select 的 shadcn 封装，替代原手写 Select。
+// Content 通过 Portal 挂载到 body 并以 Popper 定位，展开/收起完全脱离文档流，
+// 不会挤压父容器（从根因上避免输入框卡片跳动）。样式遵循项目设计令牌。
 
-import { Check, ChevronDown } from 'lucide-react';
-import { type KeyboardEvent, useEffect, useId, useRef, useState } from 'react';
+import * as SelectPrimitive from '@radix-ui/react-select';
+import { Check, ChevronDown, ChevronUp } from 'lucide-react';
+import type { ComponentProps } from 'react';
+import { cn } from '@/lib/utils';
 
-export interface SelectOption<T extends string> {
-  value: T;
-  label: string;
-  /** 辅助说明（列表项副标题，可省略）。 */
-  hint?: string;
-}
+const Select = SelectPrimitive.Root;
+const SelectGroup = SelectPrimitive.Group;
+const SelectValue = SelectPrimitive.Value;
 
-interface SelectProps<T extends string> {
-  value: T | '';
-  options: SelectOption<T>[];
-  onChange: (value: T) => void;
-  /** 无障碍标签（aria-label）。 */
-  ariaLabel: string;
-  /** 未选中时的占位文案。 */
-  placeholder?: string;
-  /** 是否显示「未选择」空选项（默认 true）。 */
-  allowEmpty?: boolean;
-  className?: string;
-  disabled?: boolean;
-}
-
-export function Select<T extends string>({
-  value,
-  options,
-  onChange,
-  ariaLabel,
-  placeholder = '未选择',
-  allowEmpty = true,
-  className = '',
-  disabled = false,
-}: SelectProps<T>) {
-  const [open, setOpen] = useState(false);
-  const [activeIndex, setActiveIndex] = useState(-1);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-  const listboxId = useId();
-
-  const selected = options.find((option) => option.value === value) ?? null;
-
-  // 点击组件外部关闭
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: PointerEvent) => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener('pointerdown', onPointerDown);
-    return () => document.removeEventListener('pointerdown', onPointerDown);
-  }, [open]);
-
-  // 列表滚动到活动项
-  useEffect(() => {
-    if (!open || activeIndex < 0 || !listRef.current) return;
-    const item = listRef.current.children[activeIndex] as HTMLElement | undefined;
-    item?.scrollIntoView({ block: 'nearest' });
-  }, [activeIndex, open]);
-
-  // 打开后把焦点移入列表，键盘导航随即接管
-  useEffect(() => {
-    if (open) listRef.current?.focus();
-  }, [open]);
-
-  const selectIndex = (index: number) => {
-    const option = options[index];
-    if (option) {
-      onChange(option.value);
-      setOpen(false);
-    }
-  };
-
-  const moveActive = (delta: number) => {
-    const total = options.length;
-    if (total === 0) return;
-    setActiveIndex((current) => {
-      if (current < 0) return delta > 0 ? 0 : total - 1;
-      return (current + delta + total) % total;
-    });
-  };
-
-  const handleTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-    if (event.key === 'ArrowDown') {
-      event.preventDefault();
-      setActiveIndex(0);
-      setOpen(true);
-    } else if (event.key === 'ArrowUp') {
-      event.preventDefault();
-      setActiveIndex(options.length - 1);
-      setOpen(true);
-    } else if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      setOpen((current) => !current);
-    } else if (event.key === 'Escape') {
-      event.preventDefault();
-      setOpen(false);
-    }
-  };
-
-  const handleListKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    switch (event.key) {
-      case 'ArrowDown':
-        event.preventDefault();
-        moveActive(1);
-        break;
-      case 'ArrowUp':
-        event.preventDefault();
-        moveActive(-1);
-        break;
-      case 'Home':
-        event.preventDefault();
-        setActiveIndex(0);
-        break;
-      case 'End':
-        event.preventDefault();
-        setActiveIndex(options.length - 1);
-        break;
-      case 'Enter':
-      case ' ':
-        event.preventDefault();
-        if (activeIndex >= 0) selectIndex(activeIndex);
-        break;
-      case 'Escape':
-        event.preventDefault();
-        setOpen(false);
-        break;
-      case 'Tab':
-        setOpen(false);
-        break;
-    }
-  };
-
+function SelectTrigger({
+  className,
+  children,
+  ...props
+}: ComponentProps<typeof SelectPrimitive.Trigger>) {
   return (
-    <div ref={rootRef} className={`smart-select relative ${className}`}>
-      <button
-        type="button"
-        className="smart-select-trigger"
-        aria-label={ariaLabel}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-controls={listboxId}
-        disabled={disabled}
-        onClick={() => setOpen((current) => !current)}
-        onKeyDown={handleTriggerKeyDown}
-      >
-        <span className="smart-select-value">{selected ? selected.label : placeholder}</span>
-        <ChevronDown size={12} className={`smart-select-chevron ${open ? 'is-open' : ''}`} />
-      </button>
-
-      {open ? (
-        <div
-          id={listboxId}
-          ref={listRef}
-          role="listbox"
-          tabIndex={-1}
-          aria-label={ariaLabel}
-          className="smart-select-list"
-          onKeyDown={handleListKeyDown}
-        >
-          {allowEmpty ? (
-            <div
-              role="option"
-              aria-selected={value === ''}
-              tabIndex={-1}
-              className={`smart-select-item ${value === '' ? 'is-selected' : ''}`}
-              onClick={() => {
-                onChange('' as T);
-                setOpen(false);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  onChange('' as T);
-                  setOpen(false);
-                }
-              }}
-              onMouseEnter={() => setActiveIndex(-1)}
-            >
-              <span className="smart-select-label">{placeholder}</span>
-              {value === '' ? <Check size={11} className="smart-select-check" /> : null}
-            </div>
-          ) : null}
-          {options.map((option, index) => {
-            const isSelected = option.value === value;
-            const isActive = index === activeIndex;
-            return (
-              <div
-                key={option.value}
-                role="option"
-                aria-selected={isSelected}
-                aria-label={option.hint ? `${option.label}，${option.hint}` : option.label}
-                tabIndex={-1}
-                className={`smart-select-item ${isSelected ? 'is-selected' : ''} ${isActive ? 'is-active' : ''}`}
-                onClick={() => selectIndex(index)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    selectIndex(index);
-                  }
-                }}
-                onMouseEnter={() => setActiveIndex(index)}
-              >
-                <span className="smart-select-label">{option.label}</span>
-                {option.hint ? <span className="smart-select-hint">{option.hint}</span> : null}
-                {isSelected ? <Check size={11} className="smart-select-check" /> : null}
-              </div>
-            );
-          })}
-        </div>
-      ) : null}
-    </div>
+    <SelectPrimitive.Trigger
+      data-slot="select-trigger"
+      className={cn(
+        'flex h-9 w-full items-center justify-between gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1 text-[10px] text-ink-soft transition-colors',
+        'hover:border-brand hover:text-brand-strong',
+        'focus-visible:border-brand focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-brand/15',
+        'disabled:cursor-not-allowed disabled:opacity-45',
+        '[&_svg]:shrink-0 [&_svg]:text-ink-faint',
+        className,
+      )}
+      {...props}
+    >
+      {children}
+      <SelectPrimitive.Icon asChild>
+        <ChevronDown size={12} className="transition-transform duration-200" />
+      </SelectPrimitive.Icon>
+    </SelectPrimitive.Trigger>
   );
 }
+
+function SelectScrollUpButton({
+  className,
+  ...props
+}: ComponentProps<typeof SelectPrimitive.ScrollUpButton>) {
+  return (
+    <SelectPrimitive.ScrollUpButton
+      data-slot="select-scroll-up-button"
+      className={cn('flex cursor-default items-center justify-center py-1', className)}
+      {...props}
+    >
+      <ChevronUp size={12} />
+    </SelectPrimitive.ScrollUpButton>
+  );
+}
+
+function SelectScrollDownButton({
+  className,
+  ...props
+}: ComponentProps<typeof SelectPrimitive.ScrollDownButton>) {
+  return (
+    <SelectPrimitive.ScrollDownButton
+      data-slot="select-scroll-down-button"
+      className={cn('flex cursor-default items-center justify-center py-1', className)}
+      {...props}
+    >
+      <ChevronDown size={12} />
+    </SelectPrimitive.ScrollDownButton>
+  );
+}
+
+function SelectContent({
+  className,
+  children,
+  position = 'popper',
+  ...props
+}: ComponentProps<typeof SelectPrimitive.Content>) {
+  return (
+    <SelectPrimitive.Portal>
+      <SelectPrimitive.Content
+        data-slot="select-content"
+        position={position}
+        className={cn(
+          'z-50 max-h-72 min-w-[8rem] overflow-y-auto rounded-xl border border-line bg-surface p-1 text-ink shadow-[0_8px_28px_rgb(0_0_0/14%)]',
+          position === 'popper' &&
+            'data-[side=bottom]:translate-y-1 data-[side=top]:-translate-y-1',
+          className,
+        )}
+        {...props}
+      >
+        <SelectScrollUpButton />
+        <SelectPrimitive.Viewport
+          className={cn(
+            position === 'popper' &&
+              'h-[var(--radix-select-trigger-height)] w-full min-w-[var(--radix-select-trigger-width)]',
+          )}
+        >
+          {children}
+        </SelectPrimitive.Viewport>
+        <SelectScrollDownButton />
+      </SelectPrimitive.Content>
+    </SelectPrimitive.Portal>
+  );
+}
+
+function SelectLabel({ className, ...props }: ComponentProps<typeof SelectPrimitive.Label>) {
+  return (
+    <SelectPrimitive.Label
+      data-slot="select-label"
+      className={cn('px-2 py-1.5 text-[9px] text-ink-faint', className)}
+      {...props}
+    />
+  );
+}
+
+function SelectItem({
+  className,
+  children,
+  ...props
+}: ComponentProps<typeof SelectPrimitive.Item>) {
+  return (
+    <SelectPrimitive.Item
+      data-slot="select-item"
+      className={cn(
+        'relative flex w-full cursor-pointer select-none items-center gap-1.5 rounded-lg py-1.5 pr-7 pl-2 text-[10px] text-ink outline-none transition-colors',
+        'focus:bg-brand/10 data-[highlighted]:bg-brand/10',
+        'data-[state=checked]:font-semibold data-[state=checked]:text-brand-strong',
+        'data-[disabled]:pointer-events-none data-[disabled]:opacity-45',
+        className,
+      )}
+      {...props}
+    >
+      <span className="absolute right-2 flex size-3.5 items-center justify-center">
+        <SelectPrimitive.ItemIndicator>
+          <Check size={11} className="text-brand" />
+        </SelectPrimitive.ItemIndicator>
+      </span>
+      <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+    </SelectPrimitive.Item>
+  );
+}
+
+function SelectSeparator({
+  className,
+  ...props
+}: ComponentProps<typeof SelectPrimitive.Separator>) {
+  return (
+    <SelectPrimitive.Separator
+      data-slot="select-separator"
+      className={cn('pointer-events-none -mx-1 my-1 h-px bg-line', className)}
+      {...props}
+    />
+  );
+}
+
+export {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectScrollDownButton,
+  SelectScrollUpButton,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+};

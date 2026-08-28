@@ -37,7 +37,7 @@ BossPilot 是一个类 Cebian 的 AI 求职副驾，以 **Chrome MV3 浏览器�
 - **Biome 是唯一**的格式化、Lint 与 import 整理工具。**不要引入 ESLint 或 Prettier**。
 - 跨运行时传输的数据结构定义在 `lib/domain/types.ts`，消息类型定义在 `lib/ipc/protocol.ts`——不要在别处重复声明。
 - **中文注释**：重要模块头部写「职责说明」块注释；注释解释「为什么这么做」，而非复述代码在做什么。
-- UI 使用 Tailwind 工具类 + `assets/app.css` 中的设计令牌（`--color-brand` 等），**不要硬编码颜色值**。
+- UI 新增或修改的组件样式统一使用 Tailwind 工具类；`assets/app.css` 只保留设计令牌、全局基础样式和无法由组件承载的跨页面规则，**不要新增组件级选择器，也不要硬编码颜色值**。
 - 所有交互按钮必须声明 `type`、可访问名称与键盘路径；表单标签必须与控件显式关联（Biome a11y 会检查）。
 - 新增核心模块时，**同步把文件加入 `vitest.config.ts` 的覆盖范围**并补测试，不得靠排除文件来绕过覆盖率门槛。
 

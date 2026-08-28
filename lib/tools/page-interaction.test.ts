@@ -41,6 +41,8 @@ const storageGet = vi.fn();
 const storageSet = vi.fn();
 const storageRemove = vi.fn();
 let sessionValue: unknown;
+let sessionValueMirror: unknown;
+let sessionStorage: Record<string, unknown> = {};
 let currentTabUrl = PAGE_URL;
 
 function call(
@@ -75,6 +77,8 @@ function locatorByName(name: string): PageInteractiveElementCandidate {
 
 beforeEach(() => {
   sessionValue = undefined;
+  sessionValueMirror = undefined;
+  sessionStorage = {};
   currentTabUrl = PAGE_URL;
   history.replaceState({}, '', PAGE_URL);
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
@@ -144,14 +148,31 @@ beforeEach(() => {
         },
       ],
     );
-  storageGet.mockReset().mockImplementation(async () => ({
-    bosspilot_page_observation_v1: sessionValue,
-  }));
-  storageSet.mockReset().mockImplementation(async (value: Record<string, unknown>) => {
-    sessionValue = value.bosspilot_page_observation_v1;
+  storageGet.mockReset().mockImplementation(async () => {
+    if (sessionValue !== sessionValueMirror) {
+      sessionStorage =
+        sessionValue === undefined ? {} : { bosspilot_page_observation_v1: sessionValue };
+      sessionValueMirror = sessionValue;
+    }
+    return { ...sessionStorage };
   });
-  storageRemove.mockReset().mockImplementation(async () => {
-    sessionValue = undefined;
+  storageSet.mockReset().mockImplementation(async (value: Record<string, unknown>) => {
+    sessionStorage = { ...sessionStorage, ...value };
+    const collection = value.bosspilot_page_observations_v2 as
+      | { observations?: Record<string, unknown> }
+      | undefined;
+    if (collection?.observations) {
+      sessionValue = Object.values(collection.observations)[0];
+      sessionValueMirror = sessionValue;
+    }
+  });
+  storageRemove.mockReset().mockImplementation(async (keys: string | string[]) => {
+    for (const key of Array.isArray(keys) ? keys : [keys]) delete sessionStorage[key];
+    const collection = sessionStorage.bosspilot_page_observations_v2 as
+      | { observations?: Record<string, unknown> }
+      | undefined;
+    sessionValue = collection?.observations ? Object.values(collection.observations)[0] : undefined;
+    sessionValueMirror = sessionValue;
   });
   vi.stubGlobal('chrome', {
     tabs: {
@@ -403,6 +424,28 @@ describe('captureInteractivePage', () => {
     expect(result.elements.find(({ name }) => name === '接受条款')).toMatchObject({
       checked: true,
     });
+  });
+
+  it('distinguishes oversized and stale visual captures', async () => {
+    setPage('<button type="button">查看图表</button>');
+    const coordinator = new PageInteractionCoordinator();
+    for (const [message, errorCode] of [
+      ['截图超过大小上限', 'VISUAL_CAPTURE_TOO_LARGE'],
+      ['页面文档已经变化', 'STALE_VISUAL_OBSERVATION'],
+    ] as const) {
+      captureVisibleTab.mockRejectedValueOnce(new Error(message));
+      await expect(
+        coordinator.observeVisual(
+          call('observe_visual_page', { reason: '读取图表' }),
+          SNAPSHOT,
+          new AbortController().signal,
+          `request-${errorCode}`,
+          true,
+          undefined,
+          VISION_CONTEXT,
+        ),
+      ).resolves.toMatchObject({ isError: true, errorCode });
+    }
   });
 
   it('filters hidden and off-screen controls, supports query, and reports truncation', () => {
@@ -990,6 +1033,19 @@ describe('PageInteractionCoordinator', () => {
         'request-1',
       ),
     ).resolves.toMatchObject({ errorCode: 'STALE_ELEMENT_REFERENCE' });
+
+    const malformedCandidate = observe();
+    executeScript.mockResolvedValueOnce([
+      { documentId: 'document-1', result: { ...malformedCandidate, elements: [{}] } },
+    ]);
+    await expect(
+      coordinator.observe(
+        call('observe_page', {}),
+        SNAPSHOT,
+        new AbortController().signal,
+        'request-1',
+      ),
+    ).resolves.toMatchObject({ errorCode: 'STALE_ELEMENT_REFERENCE' });
   });
 
   it('rejects unsupported pages, changed tabs, invalid requests and stale refs', async () => {
@@ -1086,6 +1142,40 @@ describe('PageInteractionCoordinator', () => {
       ),
     ).resolves.toMatchObject({ errorCode: 'STALE_ELEMENT_REFERENCE' });
     expect(sessionValue).toBeUndefined();
+  });
+
+  it('isolates observations by conversation, request and tab', async () => {
+    setPage('<button>按钮</button>');
+    const coordinator = new PageInteractionCoordinator();
+    await coordinator.observe(
+      call('observe_page', {}),
+      SNAPSHOT,
+      new AbortController().signal,
+      'shared-request',
+      'conversation-a',
+    );
+    await coordinator.observe(
+      call('observe_page', {}),
+      SNAPSHOT,
+      new AbortController().signal,
+      'shared-request',
+      'conversation-b',
+    );
+
+    const collection = sessionStorage.bosspilot_page_observations_v2 as {
+      observations: Record<string, { conversationId: string }>;
+    };
+    expect(
+      Object.values(collection.observations).map(({ conversationId }) => conversationId),
+    ).toEqual(['conversation-a', 'conversation-b']);
+
+    await coordinator.clear('shared-request', 'conversation-a', SNAPSHOT.tabId);
+    const remaining = sessionStorage.bosspilot_page_observations_v2 as {
+      observations: Record<string, { conversationId: string }>;
+    };
+    expect(Object.values(remaining.observations)).toEqual([
+      expect.objectContaining({ conversationId: 'conversation-b' }),
+    ]);
   });
 
   it('maps cancellation and browser execution failures to safe public errors', async () => {
@@ -1608,6 +1698,8 @@ describe('PageInteractionCoordinator', () => {
       { action: 'fill', observationId, ref: 'e1' },
       { action: 'select', observationId, ref: 'e1' },
       { action: 'check', observationId, ref: 'e1' },
+      { action: 'fill', observationId, ref: 'e1', value: 'x'.repeat(2_001) },
+      { action: 'scroll_until', deltaY: -10 },
     ]) {
       await expect(
         coordinator.interact(
@@ -1618,6 +1710,191 @@ describe('PageInteractionCoordinator', () => {
         ),
       ).resolves.toMatchObject({ errorCode: 'INVALID_PAGE_INTERACTION' });
     }
+  });
+
+  it('scrolls deterministically until the page bottom within a hard step limit', async () => {
+    vi.useFakeTimers();
+    setPage('<main>长页面</main>');
+    Object.defineProperty(document.documentElement, 'scrollHeight', {
+      configurable: true,
+      value: 1_800,
+    });
+    const progress = vi.fn();
+    const coordinator = new PageInteractionCoordinator();
+    const pending = coordinator.interact(
+      call('interact_page', { action: 'scroll_until', deltaY: 700, maxSteps: 5 }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-scroll',
+      false,
+      progress,
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+    const outcome = await pending;
+
+    expect(outcome).toMatchObject({ isError: false, statusText: '已滚动到页面底部' });
+    if (!('deferred' in outcome)) {
+      expect(outcome.content).toContain('"passes":2');
+      expect(outcome.content).toContain('"stopReason":"bottom"');
+    }
+    expect(progress).toHaveBeenCalledTimes(2);
+  });
+
+  it('finds a visible target before scrolling and stops after maxSteps when absent', async () => {
+    setPage('<button>下载报告</button>');
+    const coordinator = new PageInteractionCoordinator();
+    const found = await coordinator.interact(
+      call('interact_page', { action: 'scroll_until', query: '下载报告', maxSteps: 3 }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-found',
+    );
+    expect(found).toMatchObject({ isError: false, statusText: '已找到目标控件' });
+    expect(window.scrollBy).not.toHaveBeenCalled();
+
+    vi.useFakeTimers();
+    Object.defineProperty(document.documentElement, 'scrollHeight', {
+      configurable: true,
+      value: 10_000,
+    });
+    const progress = vi.fn();
+    const missing = coordinator.interact(
+      call('interact_page', { action: 'scroll_until', query: '不存在的控件', maxSteps: 2 }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-missing',
+      false,
+      progress,
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(missing).resolves.toMatchObject({
+      isError: true,
+      errorCode: 'ELEMENT_NOT_FOUND',
+      statusText: '自动滚动后未找到目标',
+    });
+    expect(progress).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops at the bottom when a scroll target is absent', async () => {
+    setPage('<main>短页面</main>');
+    Object.defineProperty(document.documentElement, 'scrollHeight', {
+      configurable: true,
+      value: 700,
+    });
+    const coordinator = new PageInteractionCoordinator();
+    await expect(
+      coordinator.interact(
+        call('interact_page', { action: 'scroll_until', query: '不存在' }),
+        SNAPSHOT,
+        new AbortController().signal,
+        'request-bottom-missing',
+      ),
+    ).resolves.toMatchObject({
+      isError: true,
+      errorCode: 'ELEMENT_NOT_FOUND',
+      detail: expect.stringContaining('页面底部'),
+    });
+  });
+
+  it('uses safe scroll defaults and stops immediately when the viewport cannot move', async () => {
+    setPage('<main>无法滚动</main>');
+    Object.defineProperty(document.documentElement, 'scrollHeight', {
+      configurable: true,
+      value: 10_000,
+    });
+    Object.defineProperty(window, 'scrollBy', { configurable: true, value: vi.fn() });
+    const coordinator = new PageInteractionCoordinator();
+    const outcome = await coordinator.interact(
+      call('interact_page', { action: 'scroll_until' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-no-progress',
+    );
+    expect(outcome).toMatchObject({
+      isError: true,
+      errorCode: 'VERIFICATION_FAILED',
+      detail: expect.stringContaining('没有产生新位置'),
+    });
+  });
+
+  it('propagates permission deferral and missing scoped observations during auto-scroll', async () => {
+    setPage('<main>页面</main>');
+    const coordinator = new PageInteractionCoordinator();
+    permissionsContains.mockResolvedValueOnce(false);
+    executeScript.mockRejectedValueOnce(new Error('Cannot access contents of the page'));
+    await expect(
+      coordinator.interact(
+        call('interact_page', { action: 'scroll_until', query: '目标' }),
+        SNAPSHOT,
+        new AbortController().signal,
+        'request-deferred-scroll',
+      ),
+    ).resolves.toMatchObject({ deferred: true, kind: 'page_permission' });
+
+    permissionsContains.mockResolvedValue(true);
+    storageSet.mockResolvedValueOnce(undefined);
+    await expect(
+      coordinator.interact(
+        call('interact_page', { action: 'scroll_until', query: '目标' }),
+        SNAPSHOT,
+        new AbortController().signal,
+        'request-missing-observation',
+      ),
+    ).resolves.toMatchObject({
+      isError: true,
+      errorCode: 'STALE_ELEMENT_REFERENCE',
+      detail: expect.stringContaining('自动滚动期间'),
+    });
+  });
+
+  it('stops when a bounded scroll script fails or returns to the same observable state', async () => {
+    setPage('<main>动态页面</main>');
+    Object.defineProperty(document.documentElement, 'scrollHeight', {
+      configurable: true,
+      value: 10_000,
+    });
+    const coordinator = new PageInteractionCoordinator();
+    executeScript.mockImplementation(
+      async (options: { func: (...args: unknown[]) => unknown; args?: unknown[] }) => [
+        {
+          documentId: 'document-1',
+          frameId: 0,
+          result:
+            options.func.name === 'performPageInteraction'
+              ? { version: 2 }
+              : options.func(...(options.args ?? [])),
+        },
+      ],
+    );
+    await expect(
+      coordinator.interact(
+        call('interact_page', { action: 'scroll_until', query: '目标', maxSteps: 2 }),
+        SNAPSHOT,
+        new AbortController().signal,
+        'request-script-error',
+      ),
+    ).resolves.toMatchObject({ isError: true, errorCode: 'INTERACTION_FAILED' });
+
+    vi.useFakeTimers();
+    executeScript.mockImplementation(
+      async (options: { func: (...args: unknown[]) => unknown; args?: unknown[] }) => {
+        const result = options.func(...(options.args ?? []));
+        if (options.func.name === 'performPageInteraction') window.scrollY = 0;
+        return [{ documentId: 'document-1', frameId: 0, result }];
+      },
+    );
+    const repeated = coordinator.interact(
+      call('interact_page', { action: 'scroll_until', query: '目标' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-repeated-state',
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(repeated).resolves.toMatchObject({
+      isError: true,
+      errorCode: 'ELEMENT_NOT_FOUND',
+      detail: expect.stringContaining('没有产生新位置'),
+    });
   });
 
   it('supports bounded scroll, wait, back and forward and can clear persisted refs', async () => {

@@ -625,10 +625,13 @@ export default function App() {
               onDraftChange={(draft) => updateComposerDraft(composerDraftKey, draft)}
               onCancel={cancelChat}
               className={pendingUserQuestion ? 'ask-user-composer' : ''}
+              tools={
+                activeConversationId ? (
+                  <ConversationRuntimeControls conversationId={activeConversationId} />
+                ) : undefined
+              }
             />
           </div>
-          {/* 会话运行偏好：模型与思考等级，输入框下方独立一行 */}
-          <ConversationRuntimeControls conversationId={activeConversationId} />
         </div>
       )}
     </div>

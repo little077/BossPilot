@@ -16,6 +16,17 @@ Object.defineProperty(HTMLElement.prototype, 'innerText', {
 HTMLElement.prototype.scrollIntoView = vi.fn();
 HTMLElement.prototype.scrollBy = vi.fn();
 
+// jsdom 未实现 Pointer Capture API；Radix UI（Select 等）在指针交互时依赖它们。
+if (!HTMLElement.prototype.hasPointerCapture) {
+  HTMLElement.prototype.hasPointerCapture = () => false;
+}
+if (!HTMLElement.prototype.setPointerCapture) {
+  HTMLElement.prototype.setPointerCapture = () => undefined;
+}
+if (!HTMLElement.prototype.releasePointerCapture) {
+  HTMLElement.prototype.releasePointerCapture = () => undefined;
+}
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();

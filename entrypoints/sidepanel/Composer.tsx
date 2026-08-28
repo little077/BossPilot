@@ -7,7 +7,15 @@ import Placeholder from '@tiptap/extension-placeholder';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { ArrowUp, FileText, Image, Paperclip, Square, X } from 'lucide-react';
-import { type Ref, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import {
+  type ReactNode,
+  type Ref,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   attachmentFromFile,
   MAX_ATTACHMENTS,
@@ -45,6 +53,8 @@ interface ComposerProps {
   className?: string;
   /** Ask User 等待态：普通输入保持可见但不可编辑，答案只能从上方暂停面板提交。 */
   waitingForAnswer?: boolean;
+  /** 输入框工具行右侧的内联控件（模型选择器等），渲染在「Enter 发送」提示之后。 */
+  tools?: ReactNode;
   ref?: Ref<ComposerHandle>;
 }
 
@@ -58,6 +68,7 @@ export function Composer({
   clearOnSend = true,
   className = '',
   waitingForAnswer = false,
+  tools,
   draft,
   onDraftChange,
   ref,
@@ -357,7 +368,7 @@ export function Composer({
         </div>
       ) : null}
       <footer className="flex items-center justify-between gap-2 px-2.5 pb-2">
-        <div className="composer-tools">
+        <div className="composer-tools flex min-w-0 flex-1 items-center gap-[5px]">
           <input
             ref={fileInputRef}
             type="file"
@@ -369,6 +380,7 @@ export function Composer({
           />
           <button
             type="button"
+            className="grid size-6 shrink-0 cursor-pointer place-items-center rounded-md border-0 bg-transparent text-ink-faint hover:bg-brand-soft hover:text-brand disabled:cursor-not-allowed disabled:opacity-45"
             aria-label="添加图片或文本文件"
             title="添加图片或文本文件"
             disabled={running || disabled || waitingForAnswer || readingAttachment || submitting}
@@ -376,9 +388,12 @@ export function Composer({
           >
             <Paperclip size={11} />
           </button>
-          <span className={`text-[10px] ${waitingForAnswer ? 'text-warning' : 'text-ink-faint'}`}>
+          <span
+            className={`min-w-0 flex-[0_1_auto] truncate text-[10px] ${waitingForAnswer ? 'text-warning' : 'text-ink-faint'}`}
+          >
             {waitingForAnswer ? '回答后会从当前步骤继续' : 'Enter 发送'}
           </span>
+          {tools}
         </div>
         {running ? (
           <div className="flex items-center gap-1">

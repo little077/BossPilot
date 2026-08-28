@@ -14,8 +14,34 @@ const MAX_COMPACTION_INPUT_CHARS = 80_000;
 export function estimateGenerationTokens(messages: GenerationInputMessage[]): number {
   return messages.reduce((total, message) => {
     const imageTokens = 'images' in message ? (message.images?.length ?? 0) * 1_024 : 0;
-    return total + Math.ceil(message.content.length / 4) + imageTokens + 12;
+    const toolCallTokens =
+      message.role === 'assistant' && message.toolCalls?.length
+        ? Math.ceil(JSON.stringify(message.toolCalls).length / 4)
+        : 0;
+    return total + Math.ceil(message.content.length / 4) + imageTokens + toolCallTokens + 12;
   }, 0);
+}
+
+export function findCompactionCutPoint(messages: GenerationInputMessage[]): number {
+  if (messages.length <= KEEP_RECENT_MESSAGES + 1) return 0;
+  const desired = Math.max(1, messages.length - KEEP_RECENT_MESSAGES);
+  const nextUser = messages.findIndex(
+    (message, index) => index >= desired && message.role === 'user',
+  );
+  if (nextUser >= desired) return nextUser;
+
+  let cut = desired;
+  while (cut > 0 && messages[cut]?.role === 'toolResult') {
+    const toolResult = messages[cut];
+    if (toolResult?.role !== 'toolResult') break;
+    const owner = findToolCallOwner(messages, toolResult.toolCallId, cut - 1);
+    if (owner < 0) {
+      cut += 1;
+      break;
+    }
+    cut = owner;
+  }
+  return Math.max(1, Math.min(cut, messages.length - 1));
 }
 
 export async function compactGenerationContext(
@@ -24,15 +50,12 @@ export async function compactGenerationContext(
   messages: GenerationInputMessage[],
   signal: AbortSignal,
 ): Promise<GenerationInputMessage[]> {
-  if (messages.length <= KEEP_RECENT_MESSAGES + 1) return messages;
-  const recent = messages.slice(-KEEP_RECENT_MESSAGES);
+  const cutPoint = findCompactionCutPoint(messages);
+  if (cutPoint === 0) return messages;
+  const recent = messages.slice(cutPoint);
   const firstUser = messages.find((message) => message.role === 'user');
-  const recentSet = new Set(recent);
-  const old = messages.filter((message) => !recentSet.has(message));
-  const transcript = old
-    .map((message) => `${message.role}: ${message.content}`)
-    .join('\n\n')
-    .slice(-MAX_COMPACTION_INPUT_CHARS);
+  const old = messages.slice(0, cutPoint);
+  const transcript = old.map(messageToTranscript).join('\n\n').slice(-MAX_COMPACTION_INPUT_CHARS);
   let summary = '';
   try {
     for await (const event of adapter.stream(target, {
@@ -74,7 +97,7 @@ export async function compactGenerationContext(
     );
   }
   const compacted: GenerationInputMessage[] = [
-    ...(firstUser && !recentSet.has(firstUser) ? [{ ...firstUser }] : []),
+    ...(firstUser && !recent.includes(firstUser) ? [{ ...firstUser }] : []),
     {
       role: 'user',
       content: `<compacted_context>\n${normalized}\n</compacted_context>`,
@@ -83,4 +106,43 @@ export async function compactGenerationContext(
     ...recent,
   ];
   return compacted;
+}
+
+function findToolCallOwner(
+  messages: GenerationInputMessage[],
+  toolCallId: string,
+  fromIndex: number,
+): number {
+  for (let index = fromIndex; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (
+      message?.role === 'assistant' &&
+      message.toolCalls?.some((toolCall) => toolCall.id === toolCallId)
+    ) {
+      return index;
+    }
+    if (message?.role === 'user') break;
+  }
+  return -1;
+}
+
+function messageToTranscript(message: GenerationInputMessage): string {
+  const parts = [`role: ${message.role}`, `content: ${message.content}`];
+  if (message.role === 'assistant' && message.toolCalls?.length) {
+    parts.push(`toolCalls: ${clipJson(message.toolCalls, 8_000)}`);
+  }
+  if (message.role === 'toolResult') {
+    parts.push(`toolCallId: ${message.toolCallId}`);
+    parts.push(`toolName: ${message.toolName}`);
+    parts.push(`isError: ${message.isError}`);
+  }
+  if ('images' in message && message.images?.length) {
+    parts.push(`images: ${message.images.length}`);
+  }
+  return parts.join('\n');
+}
+
+function clipJson(value: unknown, maxChars: number): string {
+  const serialized = JSON.stringify(value);
+  return serialized.length > maxChars ? serialized.slice(0, maxChars) : serialized;
 }

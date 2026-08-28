@@ -11,6 +11,7 @@ import {
 import type {
   GenerationAdapter,
   GenerationEvent,
+  GenerationInputMessage,
   GenerationRequest,
   GenerationToolDeferredResult,
   GenerationToolDefinition,
@@ -276,6 +277,72 @@ describe('ChatGenerationManager', () => {
     await manager.start('request-settings', HISTORY);
 
     expect(requestSeen).toMatchObject({ maxOutputTokens: 4_096, thinkingLevel: 'high' });
+  });
+
+  it('continues once after a model length stop without repeating committed text', async () => {
+    const requests: GenerationRequest[] = [];
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        requests.push(request);
+        yield { type: 'text-delta', delta: requests.length === 1 ? '前半' : '后半' };
+        yield {
+          type: 'finish',
+          reason: requests.length === 1 ? 'length' : 'stop',
+          usage: USAGE,
+        };
+      },
+    };
+    const manager = createManager(adapter);
+    const result = await manager.start('request-length', HISTORY);
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.messages).toContainEqual(
+      expect.objectContaining({ role: 'assistant', content: '前半', finishReason: 'length' }),
+    );
+    expect(requests[1]?.messages).toContainEqual(
+      expect.objectContaining({ role: 'user', content: expect.stringContaining('从断点继续') }),
+    );
+    expect(result).toMatchObject({ status: 'completed', content: '前半\n\n后半' });
+  });
+
+  it('stops after two consecutive model length limits', async () => {
+    const adapter: GenerationAdapter = {
+      async *stream() {
+        yield { type: 'text-delta', delta: '片段' };
+        yield { type: 'finish', reason: 'length', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter);
+    await expect(manager.start('request-double-length', HISTORY)).resolves.toMatchObject({
+      status: 'error',
+      errorCode: 'OUTPUT_LIMIT_EXCEEDED',
+      retryable: true,
+    });
+  });
+
+  it('uses the per-conversation context window and reserves output space before streaming', async () => {
+    const adapter: GenerationAdapter = {
+      async *stream() {
+        yield { type: 'text-delta', delta: '完成' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const compactMessages = vi.fn(async (messages: GenerationInputMessage[]) => messages);
+    const manager = createManager(adapter, () => target(), {
+      contextWindowTokens: 128_000,
+      compactionThreshold: 0.95,
+      generationSettings: async () => ({
+        contextWindowTokens: 1_000,
+        maxOutputTokens: 400,
+      }),
+      compactMessages: async (_target, messages) => compactMessages(messages),
+    });
+
+    await manager.start('request-runtime-context', [
+      { id: 'long', role: 'user', content: 'x'.repeat(2_500), createdAt: 1 },
+    ]);
+
+    expect(compactMessages).toHaveBeenCalledOnce();
   });
 
   it('executes a tool and keeps tools available for the next model request', async () => {
@@ -580,6 +647,15 @@ describe('ChatGenerationManager', () => {
       isError: false,
       statusText: `已完成 ${call.id}`,
       content: `result:${call.id}`,
+      sourceUrl: 'https://example.com/page',
+      extractionMode: 'article',
+      returnedChars: 0,
+      truncated: false,
+      enrichmentStatus: 'success',
+      outputPath: '/report.md',
+      riskLevel: 'read',
+      authorizationStatus: 'not_required',
+      recoverability: 'safe_retry',
     }));
     const adapter: GenerationAdapter = {
       async *stream(_target, request) {
@@ -610,7 +686,19 @@ describe('ChatGenerationManager', () => {
       content: '两步操作已经完成。',
       usage: { totalTokens: 18 },
       toolActivities: [
-        { callId: 'call-1', status: 'succeeded' },
+        {
+          callId: 'call-1',
+          status: 'succeeded',
+          sourceUrl: 'https://example.com/page',
+          extractionMode: 'article',
+          returnedChars: 0,
+          truncated: false,
+          enrichmentStatus: 'success',
+          outputPath: '/report.md',
+          riskLevel: 'read',
+          authorizationStatus: 'not_required',
+          recoverability: 'safe_retry',
+        },
         { callId: 'call-2', status: 'succeeded' },
       ],
       toolActivity: { callId: 'call-2', status: 'succeeded' },

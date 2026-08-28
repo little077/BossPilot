@@ -2,6 +2,10 @@
 // 职责：以短生命周期观察快照把页面语义与实际 DOM 隔离；模型只能使用临时 ref，
 // 不能提交 CSS selector 或任意脚本。每次动作后旧 ref 失效，并尽力返回新观察。
 
+import {
+  type BrowserResourceCoordinator,
+  browserResourceCoordinator,
+} from '@/lib/browser/resource-lock';
 import { captureBrowserPageFingerprint } from '@/lib/browser/semantic-search';
 import { captureMarkedPageScreenshot } from '@/lib/browser/visual-page';
 import type {
@@ -89,13 +93,23 @@ export const INTERACT_PAGE_TOOL: GenerationToolDefinition = {
   name: 'interact_page',
   label: '操作页面控件',
   description:
-    '使用最近一次 observe_page 返回的 observationId 和元素 ref 执行一个受约束动作。支持 click、fill、select、check、scroll、wait、back、forward。click/fill/select/check 必须携带最新 observationId 和 ref；每次动作后引用失效并尽力返回新观察。表单提交、发送、投递、发布、删除、支付等可能产生外部影响的动作会由执行器强制暂停确认；密码和文件输入始终禁止。',
+    '使用最近一次 observe_page 返回的 observationId 和元素 ref 执行一个受约束动作。支持 click、fill、select、check、scroll、scroll_until、wait、back、forward。scroll_until 会在严格步数与距离上限内滚动，直到找到 query 对应的可见控件或到达页面底部。click/fill/select/check 必须携带最新 observationId 和 ref；每次动作后引用失效并尽力返回新观察。表单提交、发送、投递、发布、删除、支付等可能产生外部影响的动作会由执行器强制暂停确认；密码和文件输入始终禁止。',
   parameters: {
     type: 'object',
     properties: {
       action: {
         type: 'string',
-        enum: ['click', 'fill', 'select', 'check', 'scroll', 'wait', 'back', 'forward'],
+        enum: [
+          'click',
+          'fill',
+          'select',
+          'check',
+          'scroll',
+          'scroll_until',
+          'wait',
+          'back',
+          'forward',
+        ],
       },
       observationId: {
         type: 'string',
@@ -117,7 +131,19 @@ export const INTERACT_PAGE_TOOL: GenerationToolDefinition = {
         type: 'number',
         minimum: -1500,
         maximum: 1500,
-        description: 'scroll 的垂直距离；正数向下，负数向上，默认 600。',
+        description:
+          'scroll 的垂直距离，或 scroll_until 的单步距离；后者只接受 100-1500 的正数。默认 600。',
+      },
+      query: {
+        type: 'string',
+        description:
+          'scroll_until 可选目标：持续查找角色或名称包含该文本的可见控件；省略时滚动到页面底部。最多 120 字。',
+      },
+      maxSteps: {
+        type: 'number',
+        minimum: 1,
+        maximum: 8,
+        description: 'scroll_until 最多滚动多少步，默认 5，最大 8。',
       },
       waitMs: {
         type: 'number',
@@ -132,7 +158,7 @@ export const INTERACT_PAGE_TOOL: GenerationToolDefinition = {
 };
 
 type ElementAction = 'click' | 'fill' | 'select' | 'check';
-type PageAction = ElementAction | 'scroll' | 'wait' | 'back' | 'forward';
+type PageAction = ElementAction | 'scroll' | 'scroll_until' | 'wait' | 'back' | 'forward';
 
 interface InteractionRequest {
   action: PageAction;
@@ -141,6 +167,8 @@ interface InteractionRequest {
   value?: string;
   checked?: boolean;
   deltaY?: number;
+  query?: string;
+  maxSteps?: number;
   waitMs?: number;
 }
 
@@ -150,6 +178,7 @@ interface StoredElement extends PageInteractiveElementCandidate {
 
 interface StoredObservation {
   version: 1;
+  conversationId: string;
   requestId: string;
   observationId: string;
   documentId: string;
@@ -158,6 +187,11 @@ interface StoredObservation {
   viewport: PageInteractionObservationResult['viewport'];
   truncated: boolean;
   expiresAt: number;
+}
+
+interface StoredObservationCollection {
+  version: 2;
+  observations: Record<string, StoredObservation>;
 }
 
 interface PageEffectVerification {
@@ -174,7 +208,8 @@ interface PageActionRunResult {
 
 type InteractionProgress = (statusText: string, detail?: string) => void;
 
-const OBSERVATION_KEY = 'bosspilot_page_observation_v1';
+const LEGACY_OBSERVATION_KEY = 'bosspilot_page_observation_v1';
+const OBSERVATIONS_KEY = 'bosspilot_page_observations_v2';
 const OBSERVATION_TTL_MS = 10 * 60 * 1_000;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 80;
@@ -182,21 +217,32 @@ const MAX_VISUAL_LIMIT = 40;
 const DEFAULT_VISUAL_LIMIT = 30;
 const MAX_QUERY_CHARS = 120;
 const MAX_VALUE_CHARS = 2_000;
+const DEFAULT_SCROLL_UNTIL_STEPS = 5;
+const MAX_SCROLL_UNTIL_STEPS = 8;
 const VERIFICATION_TIMEOUT_MS = 3_000;
 const VERIFICATION_POLL_MS = 250;
 const TOOL_DATA_OPEN = '<untrusted_page_interaction_data>';
 const TOOL_DATA_CLOSE = '</untrusted_page_interaction_data>';
 
 export class PageInteractionCoordinator {
+  constructor(
+    private readonly resources: BrowserResourceCoordinator = browserResourceCoordinator,
+  ) {}
+
   async observe(
     call: GenerationToolCall,
     snapshot: PageTurnSnapshot | null,
     signal: AbortSignal,
     requestId: string,
+    conversationId = '',
   ): Promise<GenerationToolExecutionOutcome> {
     const query = normalizeInline(call.arguments.query, MAX_QUERY_CHARS);
     const limit = boundedInteger(call.arguments.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
-    return this.captureObservation(snapshot, signal, requestId, query, limit, true);
+    const capture = () =>
+      this.captureObservation(snapshot, signal, requestId, conversationId, query, limit, true);
+    return snapshot && !signal.aborted
+      ? this.resources.withTab(snapshot.tabId, signal, capture)
+      : capture();
   }
 
   async observeVisual(
@@ -207,6 +253,43 @@ export class PageInteractionCoordinator {
     approved: boolean,
     reportProgress: InteractionProgress | undefined,
     context: GenerationToolExecutionContext,
+    conversationId = '',
+  ): Promise<GenerationToolExecutionOutcome> {
+    if (!snapshot || signal.aborted) {
+      return this.observeVisualLocked(
+        call,
+        snapshot,
+        signal,
+        requestId,
+        approved,
+        reportProgress,
+        context,
+        conversationId,
+      );
+    }
+    return this.resources.withTabAndFocus(snapshot.tabId, signal, () =>
+      this.observeVisualLocked(
+        call,
+        snapshot,
+        signal,
+        requestId,
+        approved,
+        reportProgress,
+        context,
+        conversationId,
+      ),
+    );
+  }
+
+  private async observeVisualLocked(
+    call: GenerationToolCall,
+    snapshot: PageTurnSnapshot | null,
+    signal: AbortSignal,
+    requestId: string,
+    approved: boolean,
+    reportProgress: InteractionProgress | undefined,
+    context: GenerationToolExecutionContext,
+    conversationId: string,
   ): Promise<GenerationToolExecutionOutcome> {
     if (!context.model.supportsImageInput) {
       return {
@@ -241,7 +324,15 @@ export class PageInteractionCoordinator {
     const query = normalizeInline(call.arguments.query, MAX_QUERY_CHARS);
     const limit = boundedInteger(call.arguments.limit, DEFAULT_VISUAL_LIMIT, 1, MAX_VISUAL_LIMIT);
     reportProgress?.('正在准备视觉观察', '先核对页面文档并收集可绑定的控件引用。');
-    const observed = await this.captureObservation(snapshot, signal, requestId, query, limit, true);
+    const observed = await this.captureObservation(
+      snapshot,
+      signal,
+      requestId,
+      conversationId,
+      query,
+      limit,
+      true,
+    );
     if ('deferred' in observed) {
       return observed.kind === 'page_permission'
         ? {
@@ -266,7 +357,7 @@ export class PageInteractionCoordinator {
       };
     }
 
-    const observation = await loadObservation(requestId);
+    const observation = await loadObservation(conversationId, requestId, snapshot.tabId);
     if (!observation) {
       return {
         isError: true,
@@ -348,6 +439,42 @@ export class PageInteractionCoordinator {
     requestId: string,
     approved = false,
     reportProgress?: InteractionProgress,
+    conversationId = '',
+  ): Promise<GenerationToolExecutionOutcome> {
+    if (!snapshot || signal.aborted) {
+      return this.interactLocked(
+        call,
+        snapshot,
+        signal,
+        requestId,
+        approved,
+        reportProgress,
+        conversationId,
+      );
+    }
+    const interact = () =>
+      this.interactLocked(
+        call,
+        snapshot,
+        signal,
+        requestId,
+        approved,
+        reportProgress,
+        conversationId,
+      );
+    return ['click', 'back', 'forward'].includes(String(call.arguments.action))
+      ? this.resources.withTabAndFocus(snapshot.tabId, signal, interact)
+      : this.resources.withTab(snapshot.tabId, signal, interact);
+  }
+
+  private async interactLocked(
+    call: GenerationToolCall,
+    snapshot: PageTurnSnapshot | null,
+    signal: AbortSignal,
+    requestId: string,
+    approved: boolean,
+    reportProgress: InteractionProgress | undefined,
+    conversationId: string,
   ): Promise<GenerationToolExecutionOutcome> {
     const request = parseInteractionRequest(call.arguments);
     if (!request) return interactionFailure('INVALID_PAGE_INTERACTION', '页面操作参数无效');
@@ -360,7 +487,7 @@ export class PageInteractionCoordinator {
     if (signal.aborted) return cancelled();
     const validation = await validatePageTurnSnapshot(snapshot);
     if (!validation.ok) {
-      await this.clear(requestId);
+      await this.clear(requestId, conversationId, snapshot.tabId);
       return interactionFailure('STALE_ELEMENT_REFERENCE', validation.message, snapshot);
     }
 
@@ -371,6 +498,7 @@ export class PageInteractionCoordinator {
         snapshot,
         signal,
         requestId,
+        conversationId,
         '',
         DEFAULT_LIMIT,
         true,
@@ -387,13 +515,14 @@ export class PageInteractionCoordinator {
         else await chrome.tabs.goForward(snapshot.tabId);
         const tab = await waitForSettledTab(snapshot.tabId, signal);
         const nextSnapshot = snapshotFromTab(tab);
-        await this.clear(requestId);
+        await this.clear(requestId, conversationId, snapshot.tabId);
         reportProgress?.('正在验证页面导航', '检查标签页地址和文档是否已经更新。');
         const observed = await this.captureAfterAction(
           request.action,
           nextSnapshot,
           signal,
           requestId,
+          conversationId,
         );
         return this.finishVerifiedAction(
           request.action,
@@ -407,6 +536,10 @@ export class PageInteractionCoordinator {
       } catch (error) {
         return interactionFailure('INTERACTION_FAILED', publicError(error), snapshot);
       }
+    }
+
+    if (request.action === 'scroll_until') {
+      return this.scrollUntil(request, snapshot, signal, requestId, conversationId, reportProgress);
     }
 
     if (request.action === 'scroll') {
@@ -424,9 +557,15 @@ export class PageInteractionCoordinator {
       if ('deferred' in scriptResult || scriptResult.isError) return scriptResult;
       const tab = await waitForSettledTab(snapshot.tabId, signal, 1_500);
       const nextSnapshot = snapshotFromTab(tab);
-      await this.clear(requestId);
+      await this.clear(requestId, conversationId, snapshot.tabId);
       reportProgress?.('正在验证页面滚动', '检查视口是否确实发生变化。');
-      const observed = await this.captureAfterAction('scroll', nextSnapshot, signal, requestId);
+      const observed = await this.captureAfterAction(
+        'scroll',
+        nextSnapshot,
+        signal,
+        requestId,
+        conversationId,
+      );
       return this.finishVerifiedAction(
         'scroll',
         observed,
@@ -443,7 +582,7 @@ export class PageInteractionCoordinator {
         snapshot,
       );
     }
-    const observation = await loadObservation(requestId);
+    const observation = await loadObservation(conversationId, requestId, snapshot.tabId);
     if (!observation || observation.observationId !== request.observationId) {
       return interactionFailure(
         'STALE_ELEMENT_REFERENCE',
@@ -455,7 +594,7 @@ export class PageInteractionCoordinator {
       observation.snapshot.tabId !== snapshot.tabId ||
       navigationKey(observation.snapshot.url) !== navigationKey(snapshot.url)
     ) {
-      await this.clear(requestId);
+      await this.clear(requestId, conversationId, snapshot.tabId);
       return interactionFailure(
         'STALE_ELEMENT_REFERENCE',
         '页面已经变化，旧元素引用不再安全，请重新调用 observe_page。',
@@ -541,24 +680,101 @@ export class PageInteractionCoordinator {
       nextTab = await chrome.tabs.get(snapshot.tabId);
     }
     const nextSnapshot = snapshotFromTab(nextTab);
-    await this.clear(requestId);
+    await this.clear(requestId, conversationId, snapshot.tabId);
     const observed = await this.captureAfterAction(
       request.action,
       nextSnapshot,
       signal,
       requestId,
+      conversationId,
       outcome,
     );
     return this.finishVerifiedAction(request.action, observed, verified, evidence, nextSnapshot);
   }
 
-  async clear(requestId?: string): Promise<void> {
-    if (!requestId) {
-      await chrome.storage.session.remove(OBSERVATION_KEY);
-      return;
+  async clear(requestId?: string, conversationId?: string, tabId?: number): Promise<void> {
+    await mutateObservations((observations) => {
+      if (!requestId) return {};
+      return Object.fromEntries(
+        Object.entries(observations).filter(([, observation]) => {
+          if (observation.requestId !== requestId) return true;
+          if (conversationId !== undefined && observation.conversationId !== conversationId) {
+            return true;
+          }
+          return tabId !== undefined && observation.snapshot.tabId !== tabId;
+        }),
+      );
+    });
+  }
+
+  private async scrollUntil(
+    request: InteractionRequest,
+    snapshot: PageTurnSnapshot,
+    signal: AbortSignal,
+    requestId: string,
+    conversationId: string,
+    reportProgress: InteractionProgress | undefined,
+  ): Promise<GenerationToolExecutionOutcome> {
+    const query = request.query ?? '';
+    const maxSteps = request.maxSteps ?? DEFAULT_SCROLL_UNTIL_STEPS;
+    const deltaY = request.deltaY ?? 700;
+    let previousState = '';
+    let passes = 0;
+    let latest: GenerationToolExecutionOutcome | null = null;
+
+    while (true) {
+      latest = await this.captureObservation(
+        snapshot,
+        signal,
+        requestId,
+        conversationId,
+        query,
+        DEFAULT_LIMIT,
+        true,
+      );
+      if ('deferred' in latest || latest.isError) return latest;
+      const observation = await loadObservation(conversationId, requestId, snapshot.tabId);
+      if (!observation) {
+        return interactionFailure(
+          'STALE_ELEMENT_REFERENCE',
+          '自动滚动期间页面观察已经失效，请重新观察后再试。',
+          snapshot,
+        );
+      }
+      const found = query.length > 0 && observation.elements.length > 0;
+      const atBottom = viewportAtBottom(observation.viewport);
+      if (found || (!query && atBottom)) {
+        return scrollUntilResult(latest, query, passes, found ? 'target_found' : 'bottom', true);
+      }
+      if (atBottom) {
+        return scrollUntilResult(latest, query, passes, 'bottom', false);
+      }
+      if (passes >= maxSteps) {
+        return scrollUntilResult(latest, query, passes, 'max_steps', false);
+      }
+
+      const fingerprint = await captureFingerprint(snapshot.tabId, signal);
+      const state = `${observation.viewport.scrollY}:${observation.viewport.documentHeight}:${fingerprint ? fingerprintKey(fingerprint) : ''}`;
+      if (passes > 0 && state === previousState) {
+        return scrollUntilResult(latest, query, passes, 'no_progress', false);
+      }
+      previousState = state;
+      passes += 1;
+      reportProgress?.(
+        `正在自动滚动（${passes}/${maxSteps}）`,
+        query ? `查找可见控件“${clip(query, 80)}”` : '查找页面底部',
+      );
+      const execution = await this.runActionScript(
+        snapshot,
+        { action: 'scroll', deltaY, approved: true },
+        signal,
+      );
+      if ('deferred' in execution.outcome || execution.outcome.isError) return execution.outcome;
+      if (execution.script?.stateVerified !== true) {
+        return scrollUntilResult(latest, query, passes, 'no_progress', false);
+      }
+      await abortableDelay(200, signal);
     }
-    const current = await loadObservation(requestId);
-    if (current?.requestId === requestId) await chrome.storage.session.remove(OBSERVATION_KEY);
   }
 
   private async captureAfterAction(
@@ -566,12 +782,14 @@ export class PageInteractionCoordinator {
     snapshot: PageTurnSnapshot,
     signal: AbortSignal,
     requestId: string,
+    conversationId: string,
     actionResult?: GenerationToolExecutionResult,
   ): Promise<GenerationToolExecutionOutcome> {
     const observed = await this.captureObservation(
       snapshot,
       signal,
       requestId,
+      conversationId,
       '',
       DEFAULT_LIMIT,
       false,
@@ -639,6 +857,7 @@ export class PageInteractionCoordinator {
     snapshot: PageTurnSnapshot | null,
     signal: AbortSignal,
     requestId: string,
+    conversationId: string,
     query: string,
     limit: number,
     allowDeferred: boolean,
@@ -715,6 +934,7 @@ export class PageInteractionCoordinator {
     const latestSnapshot = snapshotFromTab(after.tab);
     await saveObservation({
       version: 1,
+      conversationId,
       requestId,
       observationId,
       documentId,
@@ -1501,7 +1721,10 @@ function parseInteractionRequest(value: Record<string, unknown>): InteractionReq
     typeof value.value === 'string' ? value.value.replaceAll('\u0000', '') : undefined;
   if (rawValue && rawValue.length > MAX_VALUE_CHARS) return null;
   const deltaY = boundedOptionalNumber(value.deltaY, -1_500, 1_500);
+  if (value.action === 'scroll_until' && deltaY !== undefined && deltaY < 100) return null;
   const waitMs = boundedOptionalNumber(value.waitMs, 100, 5_000);
+  const query = normalizeInline(value.query, MAX_QUERY_CHARS);
+  const maxSteps = boundedOptionalNumber(value.maxSteps, 1, MAX_SCROLL_UNTIL_STEPS);
   return {
     action: value.action,
     ...(observationId ? { observationId } : {}),
@@ -1509,6 +1732,8 @@ function parseInteractionRequest(value: Record<string, unknown>): InteractionReq
     ...(rawValue !== undefined ? { value: rawValue } : {}),
     ...(typeof value.checked === 'boolean' ? { checked: value.checked } : {}),
     ...(deltaY !== undefined ? { deltaY } : {}),
+    ...(query ? { query } : {}),
+    ...(maxSteps !== undefined ? { maxSteps } : {}),
     ...(waitMs !== undefined ? { waitMs } : {}),
   };
 }
@@ -1520,6 +1745,7 @@ function isPageAction(value: unknown): value is PageAction {
     value === 'select' ||
     value === 'check' ||
     value === 'scroll' ||
+    value === 'scroll_until' ||
     value === 'wait' ||
     value === 'back' ||
     value === 'forward'
@@ -1623,24 +1849,31 @@ function isVerificationEvidence(value: unknown): value is PageInteractionVerific
 }
 
 async function saveObservation(value: StoredObservation): Promise<void> {
-  await chrome.storage.session.set({ [OBSERVATION_KEY]: value });
+  await mutateObservations((observations) => ({
+    ...observations,
+    [observationScopeKey(value.conversationId, value.requestId, value.snapshot.tabId)]: value,
+  }));
 }
 
-async function loadObservation(requestId: string): Promise<StoredObservation | null> {
-  const stored = await chrome.storage.session.get(OBSERVATION_KEY);
-  const value = stored[OBSERVATION_KEY];
-  if (!isStoredObservation(value) || value.expiresAt <= Date.now()) {
-    if (value !== undefined) await chrome.storage.session.remove(OBSERVATION_KEY);
-    return null;
-  }
-  if (value.requestId !== requestId) return null;
-  return value;
+async function loadObservation(
+  conversationId: string,
+  requestId: string,
+  tabId: number,
+): Promise<StoredObservation | null> {
+  let result: StoredObservation | null = null;
+  await mutateObservations((observations) => {
+    const key = observationScopeKey(conversationId, requestId, tabId);
+    result = observations[key] ?? null;
+    return observations;
+  });
+  return result;
 }
 
 function isStoredObservation(value: unknown): value is StoredObservation {
   return (
     isRecord(value) &&
     value.version === 1 &&
+    typeof value.conversationId === 'string' &&
     typeof value.requestId === 'string' &&
     typeof value.observationId === 'string' &&
     typeof value.documentId === 'string' &&
@@ -1657,6 +1890,60 @@ function isStoredObservation(value: unknown): value is StoredObservation {
         isRecord(element) && typeof element.ref === 'string' && Boolean(parseCandidate(element)),
     )
   );
+}
+
+let observationMutationQueue: Promise<void> = Promise.resolve();
+
+async function mutateObservations(
+  mutate: (observations: Record<string, StoredObservation>) => Record<string, StoredObservation>,
+): Promise<void> {
+  const operation = observationMutationQueue.then(async () => {
+    const observations = await readObservationCollection();
+    const live = Object.fromEntries(
+      Object.entries(observations).filter(([, observation]) => observation.expiresAt > Date.now()),
+    );
+    const next = mutate(live);
+    if (Object.keys(next).length === 0) {
+      await chrome.storage.session.remove([OBSERVATIONS_KEY, LEGACY_OBSERVATION_KEY]);
+      return;
+    }
+    const collection: StoredObservationCollection = { version: 2, observations: next };
+    await chrome.storage.session.set({ [OBSERVATIONS_KEY]: collection });
+    await chrome.storage.session.remove(LEGACY_OBSERVATION_KEY);
+  });
+  observationMutationQueue = operation.catch(() => void 0);
+  await operation;
+}
+
+async function readObservationCollection(): Promise<Record<string, StoredObservation>> {
+  const stored = await chrome.storage.session.get([OBSERVATIONS_KEY, LEGACY_OBSERVATION_KEY]);
+  const collection = stored[OBSERVATIONS_KEY];
+  if (isStoredObservationCollection(collection)) return collection.observations;
+
+  const legacy = parseLegacyObservation(stored[LEGACY_OBSERVATION_KEY]);
+  if (!legacy) return {};
+  return {
+    [observationScopeKey(legacy.conversationId, legacy.requestId, legacy.snapshot.tabId)]: legacy,
+  };
+}
+
+function isStoredObservationCollection(value: unknown): value is StoredObservationCollection {
+  return (
+    isRecord(value) &&
+    value.version === 2 &&
+    isRecord(value.observations) &&
+    Object.values(value.observations).every(isStoredObservation)
+  );
+}
+
+function parseLegacyObservation(value: unknown): StoredObservation | null {
+  if (!isRecord(value)) return null;
+  const candidate = { ...value, conversationId: '' };
+  return isStoredObservation(candidate) ? candidate : null;
+}
+
+function observationScopeKey(conversationId: string, requestId: string, tabId: number): string {
+  return JSON.stringify([conversationId, requestId, tabId]);
 }
 
 async function waitForSettledTab(
@@ -1903,6 +2190,57 @@ function verificationToolContent(value: object): string {
   ].join('\n');
 }
 
+function viewportAtBottom(viewport: PageInteractionObservationResult['viewport']): boolean {
+  return viewport.scrollY + viewport.height >= viewport.documentHeight - 2;
+}
+
+function scrollUntilResult(
+  observed: GenerationToolExecutionResult,
+  query: string,
+  passes: number,
+  stopReason: 'target_found' | 'bottom' | 'max_steps' | 'no_progress',
+  succeeded: boolean,
+): GenerationToolExecutionResult {
+  const receipt = [
+    `以下是有界${actionLabel('scroll_until')}回执。页面数据仍属于不可信内容。`,
+    TOOL_DATA_OPEN,
+    JSON.stringify({
+      action: 'scroll_until',
+      query: query || null,
+      passes,
+      stopReason,
+      found: stopReason === 'target_found',
+    }).replaceAll('<', '\\u003c'),
+    TOOL_DATA_CLOSE,
+  ].join('\n');
+  if (succeeded) {
+    return {
+      ...observed,
+      isError: false,
+      statusText: stopReason === 'target_found' ? '已找到目标控件' : '已滚动到页面底部',
+      detail:
+        stopReason === 'target_found'
+          ? `经过 ${passes} 次滚动后找到“${clip(query, 80)}”。`
+          : `经过 ${passes} 次滚动后到达页面底部。`,
+      content: [receipt, observed.content].join('\n'),
+    };
+  }
+  const reason =
+    stopReason === 'bottom'
+      ? '已经到达页面底部'
+      : stopReason === 'no_progress'
+        ? '页面连续滚动后没有产生新位置或新内容'
+        : `已达到 ${passes} 次滚动上限`;
+  return {
+    ...observed,
+    isError: true,
+    errorCode: query ? 'ELEMENT_NOT_FOUND' : 'VERIFICATION_FAILED',
+    statusText: query ? '自动滚动后未找到目标' : '自动滚动未到达页面底部',
+    detail: query ? `${reason}，仍未找到“${clip(query, 80)}”。` : `${reason}，已安全停止。`,
+    content: [receipt, observed.content].join('\n'),
+  };
+}
+
 function interactionFailure(
   errorCode: PageInteractionErrorCode,
   detail: string,
@@ -1940,6 +2278,8 @@ function actionLabel(action: PageAction): string {
       return '切换页面选项';
     case 'scroll':
       return '滚动页面';
+    case 'scroll_until':
+      return '自动滚动页面';
     case 'wait':
       return '等待页面更新';
     case 'back':

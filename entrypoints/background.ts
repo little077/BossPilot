@@ -76,6 +76,7 @@ import {
 } from '@/lib/tools/page-interaction';
 import { READ_CURRENT_PAGE_TOOL, readCurrentPage } from '@/lib/tools/read-current-page';
 import { RUN_SKILL_TOOL, SkillRunCoordinator } from '@/lib/tools/run-skill';
+import { executeTab, TAB_TOOL } from '@/lib/tools/tab';
 import { WORKSPACE_TOOLS, WorkspaceToolCoordinator } from '@/lib/tools/workspace';
 
 function base64ToBuffer(value: string): ArrayBuffer {
@@ -127,6 +128,7 @@ export default defineBackground({
               ? {
                   maxOutputTokens: settings.maxOutputTokens,
                   thinkingLevel: settings.thinkingLevel,
+                  contextWindowTokens: settings.contextWindowTokens,
                 }
               : {};
           },
@@ -139,6 +141,7 @@ export default defineBackground({
           tools: async () => [
             READ_CURRENT_PAGE_TOOL,
             BROWSER_ACTION_TOOL,
+            TAB_TOOL,
             OBSERVE_PAGE_TOOL,
             OBSERVE_VISUAL_PAGE_TOOL,
             INTERACT_PAGE_TOOL,
@@ -178,12 +181,22 @@ export default defineBackground({
               case 'read_current_page':
                 result = await readCurrentPage(toolContext.getPageSnapshot(), signal);
                 break;
+              case 'tab':
+                result = await executeTab(
+                  call,
+                  toolContext.getPageSnapshot(),
+                  toolContext.getLatestUserText(),
+                  signal,
+                  reportProgress,
+                );
+                break;
               case 'observe_page':
                 result = await pageInteraction.observe(
                   call,
                   toolContext.getPageSnapshot(),
                   signal,
                   requestId,
+                  conversationId,
                 );
                 break;
               case 'observe_visual_page':
@@ -195,6 +208,7 @@ export default defineBackground({
                   toolContext.revokeToolCallApproval(call.id),
                   reportProgress,
                   context,
+                  conversationId,
                 );
                 break;
               case 'interact_page':
@@ -205,6 +219,7 @@ export default defineBackground({
                   requestId,
                   toolContext.revokeToolCallApproval(call.id),
                   reportProgress,
+                  conversationId,
                 );
                 break;
               case 'load_skill':
@@ -886,7 +901,7 @@ export default defineBackground({
       } finally {
         const pending = await loadPendingPageTurn(requestId).catch(() => null);
         if (pending?.requestId !== requestId)
-          await pageInteraction.clear(requestId).catch(() => void 0);
+          await pageInteraction.clear(requestId, conversationId).catch(() => void 0);
         if (pending?.requestId !== requestId) skillLoader.clear(requestId);
         if (agent) {
           agent.cleanupAfterTask(requestId);
@@ -1015,7 +1030,7 @@ export default defineBackground({
         toolContext.revokeToolCallApproval(pending.generation.toolCall.id);
         const nextPending = await loadPendingPageTurn(requestId).catch(() => null);
         if (nextPending?.requestId !== requestId) {
-          await pageInteraction.clear(requestId).catch(() => void 0);
+          await pageInteraction.clear(requestId, conversationId).catch(() => void 0);
           skillLoader.clear(requestId);
         }
         if (agent) {
@@ -1228,7 +1243,7 @@ export default defineBackground({
         toolContext.deleteSkillApproval(pending.generation.toolCall.id);
         const nextPending = await loadPendingPageTurn(requestId).catch(() => null);
         if (nextPending?.requestId !== requestId) {
-          await pageInteraction.clear(requestId).catch(() => void 0);
+          await pageInteraction.clear(requestId, conversationId).catch(() => void 0);
           skillLoader.clear(requestId);
         }
         if (agent) {

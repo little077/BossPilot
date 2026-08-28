@@ -80,8 +80,16 @@ export interface ChatGenerationManagerOptions {
   systemPrompt?: string | ((requestId: string) => string | Promise<string>);
   maxOutputTokens?: number;
   generationSettings?: () =>
-    | { maxOutputTokens?: number; thinkingLevel?: ThinkingLevel }
-    | Promise<{ maxOutputTokens?: number; thinkingLevel?: ThinkingLevel }>;
+    | {
+        maxOutputTokens?: number;
+        thinkingLevel?: ThinkingLevel;
+        contextWindowTokens?: number;
+      }
+    | Promise<{
+        maxOutputTokens?: number;
+        thinkingLevel?: ThinkingLevel;
+        contextWindowTokens?: number;
+      }>;
   /** 即使上游忽略 token 参数，也不得突破的 UTF-16 字符硬上限。 */
   maxOutputChars?: number;
   /** 全量流快照的最小广播间隔；终态不受该间隔影响。 */
@@ -139,6 +147,7 @@ const ABORTED = Symbol('generation-aborted');
 const DEFAULT_MAX_OUTPUT_CHARS = 100_000;
 const DEFAULT_STREAM_UPDATE_INTERVAL_MS = 50;
 const MAX_LENGTH_CONTINUATIONS = 1;
+const DEFAULT_OUTPUT_RESERVE_TOKENS = 8_192;
 export const DEFAULT_MAX_AGENT_TURNS = 200;
 export const DEFAULT_MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS = 3;
 
@@ -355,11 +364,34 @@ export class ChatGenerationManager {
       );
     }
 
+    const dynamicSettings = this.options.generationSettings
+      ? await this.options.generationSettings()
+      : {};
+    const contextWindowTokens = positiveInteger(
+      dynamicSettings.contextWindowTokens,
+      this.contextWindowTokens,
+    );
+    const configuredOutputTokens = dynamicSettings.maxOutputTokens ?? this.options.maxOutputTokens;
+    const defaultOutputReserve = Math.min(
+      DEFAULT_OUTPUT_RESERVE_TOKENS,
+      Math.max(1, Math.floor(contextWindowTokens / 4)),
+    );
+    const outputReserve = Math.min(
+      contextWindowTokens - 1,
+      positiveInteger(configuredOutputTokens, defaultOutputReserve),
+    );
+    const compactionLimit = Math.max(
+      1,
+      Math.min(
+        Math.floor(contextWindowTokens * this.compactionThreshold),
+        contextWindowTokens - outputReserve,
+      ),
+    );
+    const estimatedInputTokens =
+      estimateGenerationTokens(inputMessages) +
+      Math.ceil((turn.systemPrompt.length + JSON.stringify(turn.tools).length) / 4);
     let preparedMessages = inputMessages;
-    if (
-      this.options.compactMessages &&
-      estimateGenerationTokens(inputMessages) >= this.contextWindowTokens * this.compactionThreshold
-    ) {
+    if (this.options.compactMessages && estimatedInputTokens >= compactionLimit) {
       const message = requireMessage(turn);
       message.reasoningActivity = {
         status: 'running',
@@ -383,7 +415,13 @@ export class ChatGenerationManager {
     }
 
     turn.modelTurns += 1;
-    const outcome = await this.runGeneration(turn, target, preparedMessages, turn.tools);
+    const outcome = await this.runGeneration(
+      turn,
+      target,
+      preparedMessages,
+      turn.tools,
+      dynamicSettings,
+    );
     if (outcome.kind === 'terminal') return outcome.message;
 
     if (outcome.kind === 'length') {
@@ -640,6 +678,11 @@ export class ChatGenerationManager {
     target: ResolvedGenerationTarget,
     messages: GenerationInputMessage[],
     tools?: GenerationToolDefinition[],
+    dynamicSettings: {
+      maxOutputTokens?: number;
+      thinkingLevel?: ThinkingLevel;
+      contextWindowTokens?: number;
+    } = {},
   ): Promise<StreamOutcome> {
     turn.pendingToolCall = undefined;
     // 上一模型回合的文字已经进入 inputMessages，并保存在 committedContent 供 UI 持续展示。
@@ -647,9 +690,6 @@ export class ChatGenerationManager {
     turn.rawContent = '';
     requireMessage(turn).content = publicTurnContent(turn, false);
     const roundStartedAt = this.now();
-    const dynamicSettings = this.options.generationSettings
-      ? await this.options.generationSettings()
-      : {};
     const iterator = this.options.adapter
       .stream(target, {
         systemPrompt: turn.systemPrompt,

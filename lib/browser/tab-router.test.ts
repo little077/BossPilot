@@ -3,6 +3,7 @@ import type { PageTurnSnapshot } from '@/lib/domain/types';
 import {
   isSameTarget,
   KNOWN_BROWSER_DESTINATIONS,
+  openNewTab,
   openOrFocusTab,
   resolveBrowserTarget,
   waitForTabReady,
@@ -177,6 +178,17 @@ describe('tab routing', () => {
       active: true,
       windowId: 3,
     });
+  });
+
+  it('always creates a fresh HTTP(S) tab when explicitly requested', async () => {
+    create.mockResolvedValue({ id: 21, windowId: 3, url: 'https://example.com/' });
+    await expect(
+      openNewTab('https://example.com/', SNAPSHOT, new AbortController().signal),
+    ).resolves.toMatchObject({ id: 21 });
+    expect(query).not.toHaveBeenCalled();
+    await expect(
+      openNewTab('chrome://settings/', SNAPSHOT, new AbortController().signal),
+    ).rejects.toThrow('INVALID_BROWSER_ACTION');
   });
 
   it('reports a matching tab that disappears and observes cancellation', async () => {

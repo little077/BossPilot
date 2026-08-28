@@ -1,6 +1,7 @@
 // ─── 通用浏览器操作工具 ───
 // 职责：把模型给出的高层导航/搜索意图转换为确定性的标签页与页面交互流程，并在每次操作后验证结果。
 
+import { browserResourceCoordinator } from '@/lib/browser/resource-lock';
 import {
   captureBrowserPageFingerprint,
   performSemanticSearch,
@@ -101,10 +102,17 @@ export async function executeBrowserAction(
   }
   if (signal.aborted) return cancelled();
 
-  if (request.action === 'open_or_focus') {
-    return openTarget(request, snapshot, userText, signal, reportProgress);
+  try {
+    return await browserResourceCoordinator.withFocus(signal, () => {
+      if (request.action === 'open_or_focus') {
+        return openTarget(request, snapshot, userText, signal, reportProgress);
+      }
+      return searchTarget(request, snapshot, userText, signal, reportProgress);
+    });
+  } catch (error) {
+    if (signal.aborted) return cancelled();
+    throw error;
   }
-  return searchTarget(request, snapshot, userText, signal, reportProgress);
 }
 
 async function openTarget(

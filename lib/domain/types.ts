@@ -365,6 +365,7 @@ export interface PendingUserQuestion {
 export type DomainToolName =
   | 'read_current_page'
   | 'browser_action'
+  | 'tab'
   | 'observe_page'
   | 'observe_visual_page'
   | 'interact_page'
