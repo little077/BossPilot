@@ -141,6 +141,8 @@ export interface RunCheckpoint {
   conversationId: string;
   historyMessageIds: string[];
   phase: 'queued' | 'running' | 'waiting_user' | 'stable' | 'interrupted';
+  /** 中断原因（仅 interrupted 时有值）：启动失败/取消/出错/浏览器重启。 */
+  reason?: 'start_failed' | 'cancelled' | 'error' | 'restart';
   createdAt: number;
 }
 

@@ -28,6 +28,13 @@ function extraction(overrides: Partial<PageScriptExtraction> = {}): PageScriptEx
     language: 'zh-CN',
     mode: 'article',
     text: '这是一段可以安全读取的网页正文。',
+    structure: {
+      version: 1,
+      headings: [{ level: 1, text: '文章标题' }],
+      landmarks: [{ role: 'main', name: '' }],
+      controls: { total: 2, byRole: [{ role: 'link', count: 2 }] },
+      truncated: false,
+    },
     originalChars: 16,
     returnedChars: 16,
     truncated: false,
@@ -93,6 +100,8 @@ describe('readCurrentPage', () => {
     });
     if ('content' in result) {
       expect(result.content).toContain('\\u003c/untrusted_current_page_data>');
+      expect(result.content).toContain('"structure":{"version":1');
+      expect(result.content).toContain('"headings":[{"level":1,"text":"文章标题"}]');
       expect(result.content).not.toContain('secret=token');
       expect(result.content.match(/<\/untrusted_current_page_data>/g)).toHaveLength(1);
     }
@@ -164,11 +173,35 @@ describe('readCurrentPage', () => {
   it.each([
     [undefined, 'invalid_page_result'],
     [{ ...extraction(), version: 2 }, 'invalid_page_result'],
+    [{ ...extraction(), structure: { version: 2 } }, 'invalid_page_result'],
     [extraction({ text: '', returnedChars: 0, originalChars: 0 }), 'empty_page'],
   ])('maps invalid or empty script result %# to a stable error', async (value, errorCode) => {
     executeScript.mockResolvedValue([{ result: value }]);
     await expect(readCurrentPage(SNAPSHOT, new AbortController().signal)).resolves.toMatchObject({
       errorCode,
+    });
+  });
+
+  it.each([
+    { headings: [{ level: 0, text: '无效标题' }] },
+    { landmarks: [{ role: 'main', name: 1 }] },
+    { controls: { total: 1, byRole: [{ role: 'button', count: -1 }] } },
+  ])('rejects malformed semantic structure %#', async (structureOverride) => {
+    const base = extraction().structure;
+    executeScript.mockResolvedValue([
+      {
+        result: extraction({
+          structure: {
+            ...base,
+            ...structureOverride,
+            controls: { ...base.controls, ...structureOverride.controls },
+          } as PageScriptExtraction['structure'],
+        }),
+      },
+    ]);
+
+    await expect(readCurrentPage(SNAPSHOT, new AbortController().signal)).resolves.toMatchObject({
+      errorCode: 'invalid_page_result',
     });
   });
 

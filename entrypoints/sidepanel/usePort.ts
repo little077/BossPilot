@@ -173,6 +173,11 @@ export function useAgentPort() {
             await persistConversationRead(conversationId);
             next = { ...conversation, unread: false };
           }
+          const current = conversationsRef.current.find(({ id }) => id === conversationId);
+          // 标题只由改名 / AI 标题链路更新；消息保存的 DB 快照可能早于标题写入，不能覆盖标题。
+          next = current
+            ? { ...next, title: current.title, titleSource: current.titleSource }
+            : next;
           upsertConversation(next);
           setHistoryError('');
         })
@@ -428,7 +433,16 @@ export function useAgentPort() {
             titleRequestsRef.current.delete(message.conversationId);
             void saveAiConversationTitle(message.conversationId, message.title)
               .then((conversation) => {
-                if (conversation) upsertConversation(conversation);
+                if (!conversation) return;
+                const current = conversationsRef.current.find(
+                  ({ id }) => id === message.conversationId,
+                );
+                // 消息保存链路可能已把会话标记为已读；AI 标题快照不把未读状态改回去。
+                upsertConversation(
+                  current && !current.unread && conversation.unread
+                    ? { ...conversation, unread: false }
+                    : conversation,
+                );
               })
               .catch(() => setHistoryError(HISTORY_SAVE_ERROR));
             const queued = queuedTitleHistoriesRef.current.get(message.conversationId);

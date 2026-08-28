@@ -4,7 +4,7 @@ description: 在 Boss 直聘执行可验证的岗位搜索、岗位列表整理�
 metadata:
   bosspilot-origins: https://www.zhipin.com/*
   bosspilot-permissions: page.read
-allowed-tools: browser_action read_current_page observe_page observe_visual_page interact_page ask_user load_skill
+allowed-tools: browser_action read_current_page observe_page inspect_page observe_visual_page interact_page ask_user load_skill
 ---
 
 # Boss 求职搜索
@@ -17,7 +17,7 @@ allowed-tools: browser_action read_current_page observe_page observe_visual_page
 2. 只有缺少一个会显著改变搜索结果的条件时才调用 `ask_user`，一次只问最重要的问题。
 3. 调用 `browser_action` 搜索 Boss 直聘。已有合适标签页时复用，没有时再打开。
 4. 调用 `read_current_page` 读取列表或岗位详情。能从结构化增强得到信息时不要重复观察。
-5. 需要点击、翻页或打开岗位时，先 `observe_page`，再用最新的 `observationId + ref` 调用 `interact_page`。
+5. 需要点击、翻页或打开明确目标时，先用 `inspect_page` 按名称或角色查找；需要浏览当前视口全部控件时才用 `observe_page`。然后把最新的 `observationId + ref` 交给 `interact_page`。
 6. 只有 Canvas、无文字图标或 DOM 信息确实不足时才申请 `observe_visual_page`。
 7. 每个动作后检查工具验证结果。没有明确成功证据时，不得声称搜索、点击或页面切换成功。
 8. 输出候选岗位、匹配理由、风险和信息缺口；把事实与推断分开。

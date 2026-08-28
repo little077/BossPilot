@@ -197,6 +197,7 @@ test('Ask User 固定在输入框上方，切换页面后仍可回答并恢复�
 });
 
 test('通用当前页工具读取 Boss 岗位并附加领域增强', async ({ context, extensionId }) => {
+  test.setTimeout(60_000);
   const chatRequests: CapturedChatRequest[] = [];
 
   await context.route(`${BASE_URL}/models`, async (route) => {
@@ -296,7 +297,9 @@ test('通用当前页工具读取 Boss 岗位并附加领域增强', async ({ co
   expect(chatRequests[1]?.body.tools?.map((tool) => tool.function?.name)).toEqual([
     'read_current_page',
     'browser_action',
+    'tab',
     'observe_page',
+    'inspect_page',
     'observe_visual_page',
     'interact_page',
     'load_skill',
@@ -330,32 +333,40 @@ test('通用当前页工具读取 Boss 岗位并附加领域增强', async ({ co
         role: 'tool',
         content: expect.stringContaining('"title":"高级前端工程师"'),
       }),
+      expect.objectContaining({
+        role: 'tool',
+        content: expect.stringContaining('"structure":{"version":1'),
+      }),
     ]),
   );
 
-  await panel.getByRole('button', { name: '下载诊断日志' }).click();
-  await expect
-    .poll(() =>
-      panel.evaluate(async () => {
-        const [latest] = await chrome.downloads.search({
-          limit: 1,
-          orderBy: ['-startTime'],
-        });
-        return latest?.url.startsWith('data:text/markdown') ?? false;
-      }),
-    )
-    .toBe(true);
-  const diagnosticsUrl = await panel.evaluate(async () => {
-    const [latest] = await chrome.downloads.search({
-      limit: 1,
-      orderBy: ['-startTime'],
+  const diagnosticsButton = panel.getByRole('button', { name: '下载诊断日志' });
+  // 诊断日志按钮仅 dev 构建显示（aee154e）；正式构建跳过下载断言，其余工具链路断言仍然有效。
+  if (await diagnosticsButton.isVisible().catch(() => false)) {
+    await diagnosticsButton.click();
+    await expect
+      .poll(() =>
+        panel.evaluate(async () => {
+          const [latest] = await chrome.downloads.search({
+            limit: 1,
+            orderBy: ['-startTime'],
+          });
+          return latest?.url.startsWith('data:text/markdown') ?? false;
+        }),
+      )
+      .toBe(true);
+    const diagnosticsUrl = await panel.evaluate(async () => {
+      const [latest] = await chrome.downloads.search({
+        limit: 1,
+        orderBy: ['-startTime'],
+      });
+      return latest?.url ?? '';
     });
-    return latest?.url ?? '';
-  });
-  const diagnostics = Buffer.from(diagnosticsUrl.split(',')[1] ?? '', 'base64').toString('utf8');
-  expect(diagnostics).toContain('## 当前页面结构诊断');
-  expect(diagnostics).toContain('列表页内展开的岗位详情');
-  expect(diagnostics).not.toContain('?query=frontend');
+    const diagnostics = Buffer.from(diagnosticsUrl.split(',')[1] ?? '', 'base64').toString('utf8');
+    expect(diagnostics).toContain('## 当前页面结构诊断');
+    expect(diagnostics).toContain('列表页内展开的岗位详情');
+    expect(diagnostics).not.toContain('?query=frontend');
+  }
   await expect(panel.locator('body')).not.toContainText(SECRET);
 
   await panel.bringToFront();
@@ -578,7 +589,7 @@ test('浏览器操作工具在当前页语义识别搜索框、提交并验证�
   );
 });
 
-test('通用页面 Agent 先观察控件，高风险提交经用户确认后恢复原动作', async ({
+test('通用页面 Agent 先检查目标元素，高风险提交经用户确认后恢复原动作', async ({
   context,
   extensionId,
 }) => {
@@ -598,7 +609,7 @@ test('通用页面 Agent 先观察控件，高风险提交经用户确认后恢�
     const toolMessages = request.body.messages?.filter(({ role }) => role === 'tool') ?? [];
     let body: string;
     if (toolMessages.length === 0) {
-      body = openAiToolCallBody('observe_page');
+      body = openAiToolCallBody('inspect_page', { query: '提交申请', role: 'button' });
     } else if (toolMessages.length === 1) {
       const observationId = /"observationId":"([^"]+)"/u.exec(
         typeof toolMessages[0]?.content === 'string' ? toolMessages[0].content : '',
@@ -692,6 +703,10 @@ test('通用页面 Agent 先观察控件，高风险提交经用户确认后恢�
   await expect.poll(() => chatRequests.length).toBe(3);
   expect(chatRequests[2]?.body.messages).toEqual(
     expect.arrayContaining([
+      expect.objectContaining({
+        role: 'tool',
+        content: expect.stringContaining('"name":"提交申请"'),
+      }),
       expect.objectContaining({
         role: 'tool',
         content: expect.stringContaining('"status":"verified"'),

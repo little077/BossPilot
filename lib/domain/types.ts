@@ -166,6 +166,33 @@ export interface PageTurnSnapshot {
 
 export type PageExtractionMode = 'selection' | 'article' | 'main' | 'body-fallback';
 
+export interface PageSemanticHeading {
+  level: number;
+  text: string;
+}
+
+export interface PageSemanticLandmark {
+  role: string;
+  name: string;
+}
+
+export interface PageSemanticControlCount {
+  role: string;
+  count: number;
+}
+
+/** 与正文一起返回的有界页面结构，不包含 selector、输入值或隐藏内容。 */
+export interface PageSemanticStructure {
+  version: 1;
+  headings: PageSemanticHeading[];
+  landmarks: PageSemanticLandmark[];
+  controls: {
+    total: number;
+    byRole: PageSemanticControlCount[];
+  };
+  truncated: boolean;
+}
+
 /** 固定页面脚本返回的纯文本结果；任何网页 HTML 都不得跨越该边界。 */
 export interface PageScriptExtraction {
   version: 1;
@@ -174,6 +201,7 @@ export interface PageScriptExtraction {
   language: string;
   mode: PageExtractionMode;
   text: string;
+  structure: PageSemanticStructure;
   originalChars: number;
   returnedChars: number;
   truncated: boolean;
@@ -209,6 +237,7 @@ export type PageInteractionErrorCode =
   | 'INVALID_PAGE_INTERACTION'
   | 'OBSERVATION_REQUIRED'
   | 'STALE_ELEMENT_REFERENCE'
+  | 'AMBIGUOUS_TARGET'
   | 'ELEMENT_NOT_FOUND'
   | 'ELEMENT_NOT_INTERACTABLE'
   | 'SENSITIVE_INPUT_BLOCKED'
@@ -226,17 +255,27 @@ export type PageInteractionRisk = 'safe' | 'confirm' | 'blocked';
 export type PageInteractionVerificationEvidence =
   | 'click_dispatched'
   | 'input_value_matches'
+  | 'input_value_cleared'
   | 'selected_option_matches'
   | 'checked_state_matches'
+  | 'element_focused'
+  | 'keypress_dispatched'
+  | 'container_scrolled'
   | 'viewport_changed';
 
 /** 页面上下文脚本返回的候选元素；path 仅保存在扩展本地，不发送给模型。 */
 export interface PageInteractiveElementCandidate {
-  path: number[];
+  /**
+   * 从 documentElement 到元素的 children 索引链；'shadow' 表示从当前 shadow host
+   * 进入其 open shadow root（进入后下一个索引取 shadowRoot.children）。
+   */
+  path: Array<number | 'shadow'>;
   tag: string;
   role: string;
   name: string;
   type: string;
+  /** 元素所在 frame（chrome.scripting frameId）；缺省或 0 表示顶层 frame。 */
+  frameId?: number;
   disabled: boolean;
   checked?: boolean;
   selectedText?: string;
@@ -244,6 +283,8 @@ export interface PageInteractiveElementCandidate {
   destinationOrigin?: string;
   risk: PageInteractionRisk;
   riskReason?: string;
+  /** 元素是否位于当前视口；文档范围 inspect 也可以返回视口外元素。 */
+  inViewport?: boolean;
 }
 
 export interface PageViewportSnapshot {
@@ -263,6 +304,10 @@ export interface PageInteractionObservationResult {
   elements: PageInteractiveElementCandidate[];
   viewport: PageViewportSnapshot;
   truncated: boolean;
+  /** query 过滤后仍存在多个难以区分的候选时标记歧义，提示模型先细化目标。 */
+  ambiguous?: boolean;
+  /** 页面存在打开的弹窗（dialog[open] 或 aria-modal）时标记；弹窗内控件会优先返回。 */
+  modalOpen?: boolean;
 }
 
 /** 截图前注入的临时标记层结果；不包含页面正文或输入值。 */
@@ -282,7 +327,7 @@ export interface PageInteractionScriptResult {
   version: 1;
   ok: boolean;
   executionUrl: string;
-  action: 'click' | 'fill' | 'select' | 'check' | 'scroll';
+  action: 'click' | 'fill' | 'clear' | 'focus' | 'keypress' | 'select' | 'check' | 'scroll';
   risk: PageInteractionRisk;
   riskReason?: string;
   error?: PageInteractionErrorCode;
@@ -296,7 +341,7 @@ export interface PageElementVerificationResult {
   version: 1;
   ok: boolean;
   executionUrl: string;
-  action: 'fill' | 'select' | 'check';
+  action: 'fill' | 'clear' | 'focus' | 'select' | 'check';
   detail: string;
   evidence?: PageInteractionVerificationEvidence;
   error?: PageInteractionErrorCode;
@@ -367,6 +412,7 @@ export type DomainToolName =
   | 'browser_action'
   | 'tab'
   | 'observe_page'
+  | 'inspect_page'
   | 'observe_visual_page'
   | 'interact_page'
   | 'load_skill'

@@ -12,14 +12,24 @@ interface BuiltManifest {
   content_security_policy?: { sandbox?: string };
 }
 
-test('正式构建只常驻 Boss 直聘权限，模型端点保持按需授权', async () => {
+interface PackageManifest {
+  version: string;
+}
+
+test('正式构建只常驻内置站点权限，模型端点保持按需授权', async () => {
   const manifestPath = path.resolve('.output/chrome-mv3/manifest.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as BuiltManifest;
+  const packageManifest = JSON.parse(
+    await readFile(path.resolve('package.json'), 'utf8'),
+  ) as PackageManifest;
 
-  expect(manifest.version).toBe('1.3.1');
+  expect(manifest.version).toBe(packageManifest.version);
   expect(manifest.permissions).toContain('activeTab');
   expect(manifest.permissions).toContain('offscreen');
-  expect(manifest.host_permissions).toEqual(['https://www.zhipin.com/*']);
+  expect(manifest.host_permissions).toEqual([
+    'https://www.zhipin.com/*',
+    'https://www.xiaohongshu.com/*',
+  ]);
   expect(manifest.optional_host_permissions).toEqual(['https://*/*', 'http://*/*']);
   expect([...(manifest.permissions ?? []), ...(manifest.host_permissions ?? [])]).not.toContain(
     '<all_urls>',

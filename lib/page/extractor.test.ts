@@ -22,7 +22,49 @@ describe('extractCurrentDocument', () => {
     expect(result.text).not.toContain('window.secret');
     expect(result.text).not.toContain('用户填写的秘密');
     expect(result.text).not.toContain('泄露密钥');
+    expect(result.structure).toMatchObject({
+      version: 1,
+      headings: [{ level: 1, text: '通用 Agent 的页面感知' }],
+      controls: { total: 1, byRole: [{ role: 'textbox', count: 1 }] },
+      truncated: false,
+    });
     expect(result.untrusted).toBe(true);
+  });
+
+  it('returns a bounded semantic outline without selectors or form values', () => {
+    document.body.innerHTML = `
+      <header aria-label="站点页头"><nav aria-label="主导航"><a href="/private?q=secret">首页</a></nav></header>
+      <main><h1>产品中心</h1><section><h2>推荐内容</h2><button>查看详情</button></section></main>
+      <form aria-label="站内搜索"><label>关键词<input value="private value" /></label></form>
+      <span id="related-label">相关内容</span><aside aria-labelledby="related-label"></aside>
+      <div role="search" aria-label="快捷搜索"></div><section role="region" aria-labelledby="missing-id"></section>
+      <div role="button" tabindex="0" aria-label="自定义操作"></div>
+      <div contenteditable="true" aria-label="可编辑说明"></div>
+      <select aria-label="排序方式"><option>默认排序</option></select>
+      <footer title="站点页脚"></footer>
+    `;
+
+    const result = extractCurrentDocument();
+
+    expect(result.structure.headings).toEqual([
+      { level: 1, text: '产品中心' },
+      { level: 2, text: '推荐内容' },
+    ]);
+    expect(result.structure.landmarks).toEqual(
+      expect.arrayContaining([
+        { role: 'banner', name: '站点页头' },
+        { role: 'navigation', name: '主导航' },
+        { role: 'main', name: '' },
+        { role: 'form', name: '站内搜索' },
+        { role: 'complementary', name: '相关内容' },
+        { role: 'search', name: '快捷搜索' },
+        { role: 'region', name: '' },
+        { role: 'contentinfo', name: '站点页脚' },
+      ]),
+    );
+    expect(result.structure.controls).toMatchObject({ total: 6 });
+    expect(JSON.stringify(result.structure)).not.toContain('private');
+    expect(JSON.stringify(result.structure)).not.toContain('/private');
   });
 
   it('prefers a non-sensitive user selection and clips it', () => {

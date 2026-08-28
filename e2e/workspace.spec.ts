@@ -49,7 +49,7 @@ test('Agent 经用户确认后创建会话产物，并可在产物页预览', as
     .fill('把当前结论保存为 /reports/page-summary.md');
   await page.getByRole('button', { name: '发送' }).click();
 
-  await expect(page.getByText(/Agent 准备执行“workspace_create”/u)).toBeVisible();
+  await expect(page.getByText(/Agent 准备执行“创建工作区文件”/u)).toBeVisible();
   await page.getByRole('radio', { name: '确认执行' }).check({ force: true });
   await page.getByRole('button', { name: '继续执行' }).click();
   await expect(page.locator('.redscope-ai-message')).toContainText(

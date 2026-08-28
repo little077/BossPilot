@@ -31,6 +31,7 @@ const BOSS_SKILL_DEFINITION: SkillDefinition = {
     'browser_action',
     'read_current_page',
     'observe_page',
+    'inspect_page',
     'observe_visual_page',
     'interact_page',
     'ask_user',

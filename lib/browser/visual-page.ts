@@ -165,7 +165,7 @@ export function installVisualOverlay(
   expectedUrl: string,
   markers: Array<{
     ref: string;
-    path: number[];
+    path: Array<number | 'shadow'>;
     tag: string;
     risk: 'safe' | 'confirm' | 'blocked';
   }>,
@@ -281,16 +281,32 @@ export function installVisualOverlay(
 
   let markerCount = 0;
   for (const marker of markers) {
+    // path 遍历：'shadow' 表示从 shadow host 进入其 open shadow root。
+    let container: Element | ShadowRoot = document.documentElement;
     let element: Element = document.documentElement;
+    let pathBroken = false;
     for (const index of marker.path) {
-      const child = element.children.item(index);
+      if (index === 'shadow') {
+        if (!(container instanceof Element) || !container.shadowRoot) {
+          pathBroken = true;
+          break;
+        }
+        container = container.shadowRoot;
+        continue;
+      }
+      const child = container.children.item(index);
       if (!child) {
-        element = document.documentElement;
+        pathBroken = true;
         break;
       }
+      container = child;
       element = child;
     }
-    if (element === document.documentElement || element.tagName.toLowerCase() !== marker.tag) {
+    if (
+      pathBroken ||
+      element === document.documentElement ||
+      element.tagName.toLowerCase() !== marker.tag
+    ) {
       continue;
     }
     const rect = visibleRect(element);

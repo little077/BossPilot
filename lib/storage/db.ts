@@ -2,6 +2,7 @@
 // 对话会话与消息本地落库，冷启动/重连可回放。仅本地存储，无云同步、无遥测。
 
 import Dexie, { type Table } from 'dexie';
+import type { ToolCallLedgerEntry } from '@/lib/agent/tool-ledger';
 import type {
   ChatConversation,
   ChatMessage,
@@ -26,6 +27,7 @@ class BossPilotDb extends Dexie {
   workspaceVersions!: Table<WorkspaceVersion, string>;
   skillPackages!: Table<SkillPackage, string>;
   capabilityGrants!: Table<CapabilityGrant, string>;
+  runToolCalls!: Table<ToolCallLedgerEntry, string>;
 
   constructor() {
     super('bosspilot');
@@ -93,6 +95,21 @@ class BossPilotDb extends Dexie {
         'id, entryId, conversationId, [conversationId+path], [entryId+version], createdAt',
       skillPackages: 'name, updatedAt',
       capabilityGrants: 'id, skillName, capability, [skillName+capability], updatedAt',
+    });
+    // v6：工具调用台账（每次工具调用的策略决策/耗时/结果），供诊断报告回放。
+    this.version(6).stores({
+      conversations: 'id, ordinal, updatedAt, unread',
+      messages: 'id, conversationId, [conversationId+createdAt], createdAt',
+      conversationRuntimeSettings: 'conversationId, updatedAt',
+      runCheckpoints: 'id, runId, conversationId, [conversationId+createdAt], createdAt',
+      compactionSummaries: 'id, runId, conversationId, [conversationId+createdAt], createdAt',
+      workspaceEntries: 'id, conversationId, [conversationId+path], parentPath, updatedAt',
+      workspaceBodies: 'id, conversationId, [conversationId+path]',
+      workspaceVersions:
+        'id, entryId, conversationId, [conversationId+path], [entryId+version], createdAt',
+      skillPackages: 'name, updatedAt',
+      capabilityGrants: 'id, skillName, capability, [skillName+capability], updatedAt',
+      runToolCalls: 'id, runId, conversationId, [conversationId+createdAt], createdAt',
     });
   }
 }
@@ -220,6 +237,44 @@ export async function latestRunCheckpoint(conversationId: string): Promise<RunCh
     .limit(1)
     .toArray();
   return rows[0] ?? null;
+}
+
+/** 每个会话的最新检查点（供 SW 重启后的中断恢复扫描）。 */
+export async function latestRunCheckpoints(): Promise<RunCheckpoint[]> {
+  const rows = await db.runCheckpoints.orderBy('createdAt').reverse().toArray();
+  const byConversation = new Map<string, RunCheckpoint>();
+  for (const row of rows) {
+    if (!byConversation.has(row.conversationId)) byConversation.set(row.conversationId, row);
+  }
+  return [...byConversation.values()];
+}
+
+/** 中断恢复时把过期的检查点原地标记为 interrupted。 */
+export async function updateRunCheckpointPhase(
+  id: string,
+  phase: RunCheckpoint['phase'],
+): Promise<void> {
+  await db.runCheckpoints.update(id, { phase });
+}
+
+export async function saveToolCall(entry: ToolCallLedgerEntry): Promise<void> {
+  await db.runToolCalls.put(structuredClone(entry));
+}
+
+/** 读取工具调用台账；不传会话时返回全局最近记录，供诊断报告展示。 */
+export async function loadRecentToolCalls(
+  conversationId: string | undefined,
+  limit = 200,
+): Promise<ToolCallLedgerEntry[]> {
+  const rows = conversationId
+    ? await db.runToolCalls
+        .where('[conversationId+createdAt]')
+        .between([conversationId, Dexie.minKey], [conversationId, Dexie.maxKey])
+        .reverse()
+        .limit(limit)
+        .toArray()
+    : await db.runToolCalls.orderBy('createdAt').reverse().limit(limit).toArray();
+  return rows.reverse();
 }
 
 export async function saveCompactionSummary(summary: CompactionSummary): Promise<void> {

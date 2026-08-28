@@ -7,6 +7,7 @@ import type {
 import type { GenerationToolCall, GenerationToolExecutionContext } from '@/lib/generation/types';
 import {
   captureInteractivePage,
+  INSPECT_PAGE_TOOL,
   INTERACT_PAGE_TOOL,
   OBSERVE_PAGE_TOOL,
   OBSERVE_VISUAL_PAGE_TOOL,
@@ -46,7 +47,7 @@ let sessionStorage: Record<string, unknown> = {};
 let currentTabUrl = PAGE_URL;
 
 function call(
-  name: 'observe_page' | 'observe_visual_page' | 'interact_page',
+  name: 'observe_page' | 'inspect_page' | 'observe_visual_page' | 'interact_page',
   argumentsValue: Record<string, unknown>,
 ): GenerationToolCall {
   return { id: 'call-1', name, arguments: argumentsValue };
@@ -65,8 +66,13 @@ function setPage(body: string): void {
   document.body.innerHTML = body;
 }
 
-function observe(limit = 50, query = ''): PageInteractionObservationResult {
-  return captureInteractivePage(limit, query);
+function observe(
+  limit = 50,
+  query = '',
+  scope: 'viewport' | 'document' = 'viewport',
+  role = '',
+): PageInteractionObservationResult {
+  return captureInteractivePage(limit, query, scope, role);
 }
 
 function locatorByName(name: string): PageInteractiveElementCandidate {
@@ -203,6 +209,11 @@ describe('page interaction tool contracts', () => {
       name: 'observe_page',
       parameters: { additionalProperties: false },
     });
+    expect(INSPECT_PAGE_TOOL).toMatchObject({
+      name: 'inspect_page',
+      parameters: { additionalProperties: false },
+    });
+    expect(INSPECT_PAGE_TOOL.description).toContain('整个文档');
     expect(INTERACT_PAGE_TOOL).toMatchObject({
       name: 'interact_page',
       parameters: { required: ['action'], additionalProperties: false },
@@ -478,6 +489,10 @@ describe('captureInteractivePage', () => {
     expect(observe(50, '保留三').elements).toEqual([
       expect.objectContaining({ name: '保留三', role: 'button' }),
     ]);
+    expect(observe(50, '屏外', 'document', 'button').elements).toEqual([
+      expect.objectContaining({ name: '屏外', role: 'button', inViewport: false }),
+    ]);
+    expect(observe(50, '', 'document', 'link').elements).toEqual([]);
   });
 
   it('recognizes contenteditable, tabindex, onclick and search-form submit as safe', () => {
@@ -509,6 +524,7 @@ describe('captureInteractivePage', () => {
       <input type="radio" name="channel" />
       <input type="range" aria-label="音量" />
       <input type="search" placeholder="搜索关键词" />
+      <div role="button" tabindex="0">自定义文本按钮</div>
       <a>没有地址</a>
       <a href="http://[" aria-label="异常链接"></a>
       <button aria-disabled="true">不可用操作</button>
@@ -525,6 +541,7 @@ describe('captureInteractivePage', () => {
         expect.objectContaining({ name: 'channel', role: 'radio' }),
         expect.objectContaining({ name: '音量', role: 'slider' }),
         expect.objectContaining({ name: '搜索关键词', role: 'searchbox' }),
+        expect.objectContaining({ name: '自定义文本按钮', role: 'button' }),
         expect.objectContaining({ name: '异常链接', role: 'link' }),
         expect.objectContaining({ name: '不可用操作', disabled: true }),
       ]),
@@ -566,6 +583,50 @@ describe('captureInteractivePage', () => {
 
     expect(result.elements).toHaveLength(1);
     expect(result.elements[0]?.name).toHaveLength(160);
+  });
+
+  it('flags ambiguity when a query matches many similar controls', () => {
+    setPage(`
+      <button>删除</button><button>删除</button><button>删除</button>
+      <button>编辑</button><button>编辑</button>
+      <button>唯一按钮</button>
+    `);
+
+    const sameName = captureInteractivePage(50, '删除');
+    expect(sameName.ambiguous).toBe(true);
+    expect(sameName.elements).toHaveLength(3);
+
+    const sameRole = captureInteractivePage(50, 'button');
+    expect(sameRole.ambiguous).toBe(true);
+    expect(sameRole.elements.length).toBeGreaterThanOrEqual(3);
+
+    const unique = captureInteractivePage(50, '唯一按钮');
+    expect(unique.ambiguous).toBeUndefined();
+    expect(unique.elements).toHaveLength(1);
+
+    const noQuery = captureInteractivePage(50, '');
+    expect(noQuery.ambiguous).toBeUndefined();
+  });
+
+  it('prioritizes controls inside open modals and reports modal presence', () => {
+    setPage(`
+      <button>背后的按钮</button>
+      <dialog open><button>弹窗按钮</button></dialog>
+    `);
+
+    const modal = observe(1);
+    expect(modal.modalOpen).toBe(true);
+    expect(modal.elements[0]?.name).toBe('弹窗按钮');
+
+    setPage('<div role="dialog" aria-modal="true"><button>确认</button></div>');
+    const aria = captureInteractivePage(50, '');
+    expect(aria.modalOpen).toBe(true);
+    expect(aria.elements[0]?.name).toBe('确认');
+
+    setPage('<button>普通页面</button>');
+    const plain = observe();
+    expect(plain.modalOpen).toBeUndefined();
+    expect(plain.elements[0]?.name).toBe('普通页面');
   });
 });
 
@@ -776,7 +837,10 @@ describe('performPageInteraction', () => {
     const stalePath = { ...textarea, path: [...textarea.path, 99] };
     expect(
       performPageInteraction({ action: 'fill', locator: stalePath, value: 'x', approved: false }),
-    ).toMatchObject({ error: 'STALE_ELEMENT_REFERENCE' });
+    ).toMatchObject({
+      ok: true,
+      detail: expect.stringContaining('自动恢复过期定位'),
+    });
 
     const hidden = locatorByName('城市');
     const select = document.querySelector('select');
@@ -837,6 +901,248 @@ describe('performPageInteraction', () => {
       ok: true,
       detail: expect.stringContaining('600'),
     });
+  });
+
+  it('clears, focuses and presses keys on observed controls', () => {
+    setPage(`
+      <label for="name">姓名</label><input id="name" value="旧值" />
+      <button>聚焦目标</button>
+    `);
+    const input = document.querySelector<HTMLInputElement>('#name');
+    const button = document.querySelector<HTMLButtonElement>('button');
+    const keydown = vi.fn((event: KeyboardEvent) => event.preventDefault());
+    const keyup = vi.fn();
+    input?.addEventListener('keydown', keydown);
+    input?.addEventListener('keyup', keyup);
+
+    expect(
+      performPageInteraction({
+        action: 'clear',
+        locator: locatorByName('姓名'),
+        approved: false,
+      }),
+    ).toMatchObject({ ok: true, stateVerified: true, verificationEvidence: 'input_value_cleared' });
+    expect(input?.value).toBe('');
+
+    expect(
+      performPageInteraction({
+        action: 'focus',
+        locator: locatorByName('聚焦目标'),
+        approved: false,
+      }),
+    ).toMatchObject({ ok: true, stateVerified: true, verificationEvidence: 'element_focused' });
+    expect(document.activeElement).toBe(button);
+
+    expect(
+      performPageInteraction({
+        action: 'keypress',
+        locator: locatorByName('姓名'),
+        key: 'Enter',
+        approved: false,
+      }),
+    ).toMatchObject({ ok: true, detail: expect.stringContaining('Enter') });
+    expect(keydown).toHaveBeenCalledOnce();
+    expect(keyup).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(input);
+
+    expect(
+      performPageInteraction({
+        action: 'keypress',
+        locator: locatorByName('姓名'),
+        key: 'a',
+        modifiers: ['ctrl'],
+        approved: false,
+      }),
+    ).toMatchObject({ ok: true, detail: expect.stringContaining('ctrl+a') });
+
+    expect(
+      performPageInteraction({
+        action: 'keypress',
+        locator: locatorByName('姓名'),
+        approved: false,
+      }),
+    ).toMatchObject({ error: 'INVALID_PAGE_INTERACTION' });
+    expect(
+      performPageInteraction({
+        action: 'keypress',
+        locator: locatorByName('聚焦目标'),
+        key: 'Enter',
+        approved: false,
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
+  it('scrolls the nearest scrollable container when a ref is provided', () => {
+    setPage(`
+      <div id="list" style="overflow-y: auto"><button>列表项</button></div>
+      <button>页面按钮</button>
+    `);
+    const container = document.querySelector<HTMLElement>('#list');
+    if (container) {
+      Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 800 });
+      Object.defineProperty(container, 'clientHeight', { configurable: true, value: 200 });
+      Object.defineProperty(container, 'scrollTop', {
+        configurable: true,
+        writable: true,
+        value: 0,
+      });
+      Object.defineProperty(container, 'scrollBy', {
+        configurable: true,
+        value: vi.fn((options: { top?: number }) => {
+          container.scrollTop += options.top ?? 0;
+        }),
+      });
+    }
+    const item = locatorByName('列表项');
+    const windowBefore = window.scrollY;
+    expect(
+      performPageInteraction({ action: 'scroll', locator: item, deltaY: 300, approved: true }),
+    ).toMatchObject({ ok: true, verificationEvidence: 'container_scrolled' });
+    expect(container?.scrollTop).toBe(300);
+    expect(window.scrollY).toBe(windowBefore);
+  });
+
+  it('scrolls the container of the first visible query match and falls back to the page', () => {
+    setPage('<div id="list" style="overflow-y: auto"><button>列表项</button></div>');
+    const container = document.querySelector<HTMLElement>('#list');
+    if (container) {
+      Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 800 });
+      Object.defineProperty(container, 'clientHeight', { configurable: true, value: 200 });
+      Object.defineProperty(container, 'scrollTop', {
+        configurable: true,
+        writable: true,
+        value: 0,
+      });
+      Object.defineProperty(container, 'scrollBy', {
+        configurable: true,
+        value: vi.fn((options: { top?: number }) => {
+          container.scrollTop += options.top ?? 0;
+        }),
+      });
+    }
+    expect(
+      performPageInteraction({
+        action: 'scroll',
+        containerQuery: '列表项',
+        deltaY: 200,
+        approved: true,
+      }),
+    ).toMatchObject({ ok: true, verificationEvidence: 'container_scrolled' });
+    expect(container?.scrollTop).toBe(200);
+
+    setPage('<button>普通按钮</button>');
+    expect(
+      performPageInteraction({
+        action: 'scroll',
+        containerQuery: '不存在的控件',
+        deltaY: 200,
+        approved: true,
+      }),
+    ).toMatchObject({ ok: true, detail: expect.stringContaining('改为滚动页面') });
+
+    const plain = locatorByName('普通按钮');
+    expect(
+      performPageInteraction({ action: 'scroll', locator: plain, deltaY: 300, approved: true }),
+    ).toMatchObject({ ok: true, detail: expect.stringContaining('不在滚动容器内') });
+  });
+
+  it('observes, recovers and verifies controls inside open shadow roots', () => {
+    setPage('<div id="host"></div><button>页面按钮</button>');
+    const host = document.querySelector<HTMLElement>('#host');
+    const shadow = host?.attachShadow({ mode: 'open' });
+    const inner = document.createElement('button');
+    inner.textContent = '影子按钮';
+    shadow?.appendChild(inner);
+    const clicked = vi.fn();
+    inner.addEventListener('click', clicked);
+
+    const observed = observe();
+    const shadowButton = observed.elements.find((candidate) => candidate.name === '影子按钮');
+    expect(shadowButton).toBeDefined();
+    expect(shadowButton?.path).toContain('shadow');
+
+    expect(
+      performPageInteraction({ action: 'click', locator: shadowButton!, approved: false }),
+    ).toMatchObject({ ok: true });
+    expect(clicked).toHaveBeenCalledOnce();
+
+    // path 偏移后按身份恢复，恢复遍历穿透 shadow root
+    document.body.prepend(document.createElement('div'));
+    expect(
+      performPageInteraction({ action: 'click', locator: shadowButton!, approved: false }),
+    ).toMatchObject({ ok: true, detail: expect.stringContaining('自动恢复过期定位') });
+    expect(clicked).toHaveBeenCalledTimes(2);
+
+    // shadow 内输入框的填写与延迟复核
+    setPage('<div id="host2"></div>');
+    const host2 = document.querySelector<HTMLElement>('#host2');
+    const shadow2 = host2?.attachShadow({ mode: 'open' });
+    const input = document.createElement('input');
+    input.placeholder = '影子输入';
+    shadow2?.appendChild(input);
+    const locator2 = observe().elements.find((candidate) => candidate.name === '影子输入');
+    expect(locator2).toBeDefined();
+    expect(
+      performPageInteraction({
+        action: 'fill',
+        locator: locator2!,
+        value: 'hello',
+        approved: false,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(input.value).toBe('hello');
+    expect(
+      verifyPageElementState({
+        action: 'fill',
+        locator: locator2!,
+        value: 'hello',
+        expectedUrl: PAGE_URL,
+      }),
+    ).toMatchObject({ ok: true, evidence: 'input_value_matches' });
+  });
+
+  it('gates ambiguous matches inside shadow roots during recovery', () => {
+    setPage('<div id="host"></div>');
+    const host = document.querySelector<HTMLElement>('#host');
+    const shadow = host?.attachShadow({ mode: 'open' });
+    for (let i = 0; i < 2; i += 1) {
+      const button = document.createElement('button');
+      button.textContent = '删除';
+      shadow?.appendChild(button);
+    }
+    const locator = observe().elements.find((candidate) => candidate.name === '删除')!;
+    document.body.prepend(document.createElement('div'));
+    expect(performPageInteraction({ action: 'click', locator, approved: false })).toMatchObject({
+      ok: false,
+      error: 'AMBIGUOUS_TARGET',
+    });
+  });
+
+  it('recovers stale references by identity and gates ambiguous matches', () => {
+    // path 失效但名称唯一 → 自动恢复并继续执行
+    setPage('<button>唯一按钮</button>');
+    const locator = locatorByName('唯一按钮');
+    document.body.prepend(document.createElement('div'));
+    expect(performPageInteraction({ action: 'click', locator, approved: false })).toMatchObject({
+      ok: true,
+      detail: expect.stringContaining('自动恢复过期定位'),
+    });
+
+    // path 失效且存在多个同名候选 → 歧义门禁，绝不猜测
+    setPage('<button>删除</button><button>删除</button>');
+    const ambiguous = locatorByName('删除');
+    document.body.prepend(document.createElement('div'));
+    expect(
+      performPageInteraction({ action: 'click', locator: ambiguous, approved: false }),
+    ).toMatchObject({ ok: false, error: 'AMBIGUOUS_TARGET' });
+
+    // path 失效且无任何同名候选 → 恢复失败
+    setPage('<div><button>唯一按钮</button></div>');
+    const gone = locatorByName('唯一按钮');
+    document.body.innerHTML = '<p>页面内容已完全替换</p>';
+    expect(
+      performPageInteraction({ action: 'click', locator: gone, approved: false }),
+    ).toMatchObject({ ok: false, error: 'STALE_ELEMENT_REFERENCE' });
   });
 });
 
@@ -953,7 +1259,7 @@ describe('verifyPageElementState', () => {
         value: '目标说明',
         expectedUrl: PAGE_URL,
       }),
-    ).toMatchObject({ ok: false, error: 'STALE_ELEMENT_REFERENCE' });
+    ).toMatchObject({ ok: true, evidence: 'input_value_matches' });
     expect(
       verifyPageElementState({
         action: 'fill',
@@ -970,6 +1276,74 @@ describe('verifyPageElementState', () => {
         expectedUrl: 'not a valid URL',
       }),
     ).toMatchObject({ ok: false, error: 'STALE_ELEMENT_REFERENCE' });
+  });
+
+  it('verifies cleared and focused state, and reports rollback/focus loss', () => {
+    setPage('<label for="name">姓名</label><input id="name" value="" />');
+    const locator = locatorByName('姓名');
+    const input = document.querySelector<HTMLInputElement>('#name');
+
+    expect(
+      verifyPageElementState({
+        action: 'clear',
+        locator,
+        expectedUrl: PAGE_URL,
+      }),
+    ).toMatchObject({ ok: true, evidence: 'input_value_cleared' });
+
+    input?.focus();
+    expect(
+      verifyPageElementState({
+        action: 'focus',
+        locator,
+        expectedUrl: PAGE_URL,
+      }),
+    ).toMatchObject({ ok: true, evidence: 'element_focused' });
+
+    if (input) input.value = '被回填';
+    expect(
+      verifyPageElementState({
+        action: 'clear',
+        locator,
+        expectedUrl: PAGE_URL,
+      }),
+    ).toMatchObject({ ok: false, error: 'VERIFICATION_FAILED' });
+
+    document.body.focus();
+    input?.blur();
+    expect(
+      verifyPageElementState({
+        action: 'focus',
+        locator,
+        expectedUrl: PAGE_URL,
+      }),
+    ).toMatchObject({ ok: false, error: 'VERIFICATION_FAILED' });
+  });
+
+  it('recovers stale locators and gates ambiguous matches during verification', () => {
+    setPage('<label for="name">姓名</label><input id="name" value="张三" />');
+    const locator = locatorByName('姓名');
+    document.body.prepend(document.createElement('div'));
+    expect(
+      verifyPageElementState({
+        action: 'fill',
+        locator,
+        value: '张三',
+        expectedUrl: PAGE_URL,
+      }),
+    ).toMatchObject({ ok: true, evidence: 'input_value_matches' });
+
+    setPage('<button>删除</button><button>删除</button>');
+    const ambiguous = locatorByName('删除');
+    document.body.prepend(document.createElement('div'));
+    expect(
+      verifyPageElementState({
+        action: 'fill',
+        locator: ambiguous,
+        value: '',
+        expectedUrl: PAGE_URL,
+      }),
+    ).toMatchObject({ ok: false, error: 'AMBIGUOUS_TARGET' });
   });
 });
 
@@ -1000,6 +1374,38 @@ describe('PageInteractionCoordinator', () => {
       elements: expect.arrayContaining([
         expect.objectContaining({ ref: 'e1', path: expect.any(Array) }),
       ]),
+    });
+  });
+
+  it('inspects a named role across the document and returns grounded refs', async () => {
+    setPage('<button>打开详情</button><a href="/next">下一页</a>');
+    const coordinator = new PageInteractionCoordinator();
+
+    const outcome = await coordinator.inspect(
+      call('inspect_page', { query: '下一页', role: 'link' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-inspect',
+      'conversation-a',
+    );
+
+    expect(outcome).toMatchObject({
+      isError: false,
+      statusText: '已检查页面元素',
+      detail: expect.stringContaining('找到 1 个匹配元素'),
+    });
+    if (!('deferred' in outcome)) {
+      expect(outcome.content).toContain('"name":"下一页"');
+      expect(outcome.content).toContain('"ref":"e1"');
+      expect(outcome.content).not.toContain('"path"');
+    }
+    expect(executeScript).toHaveBeenCalledWith(
+      expect.objectContaining({ args: [30, '下一页', 'document', 'link'] }),
+    );
+    expect(sessionValue).toMatchObject({
+      conversationId: 'conversation-a',
+      requestId: 'request-inspect',
+      elements: [expect.objectContaining({ name: '下一页', ref: 'e1' })],
     });
   });
 
@@ -1050,6 +1456,30 @@ describe('PageInteractionCoordinator', () => {
 
   it('rejects unsupported pages, changed tabs, invalid requests and stale refs', async () => {
     const coordinator = new PageInteractionCoordinator();
+    await expect(
+      coordinator.inspect(
+        call('inspect_page', {}),
+        null,
+        new AbortController().signal,
+        'request-1',
+      ),
+    ).resolves.toMatchObject({ errorCode: 'OBSERVATION_REQUIRED' });
+    await expect(
+      coordinator.inspect(
+        call('inspect_page', { role: 'invalid' }),
+        SNAPSHOT,
+        new AbortController().signal,
+        'request-1',
+      ),
+    ).resolves.toMatchObject({ errorCode: 'INVALID_PAGE_INTERACTION' });
+    await expect(
+      coordinator.inspect(
+        call('inspect_page', { scope: 'frame' }),
+        SNAPSHOT,
+        new AbortController().signal,
+        'request-1',
+      ),
+    ).resolves.toMatchObject({ errorCode: 'INVALID_PAGE_INTERACTION' });
     await expect(
       coordinator.observe(
         call('observe_page', {}),
@@ -1384,6 +1814,142 @@ describe('PageInteractionCoordinator', () => {
       expect(outcome.content).toContain('previousReferencesInvalidated');
       expect(outcome.content).toContain('"observationId":"obs-');
     }
+  });
+
+  it('merges iframe elements and executes and verifies actions in the target frame', async () => {
+    vi.useFakeTimers();
+    setPage('<button id="open">顶层按钮</button>');
+    const frameCalls: Array<{ frameIds?: number[] }> = [];
+    executeScript.mockImplementation(async (options: unknown) => {
+      const target =
+        (options as { target?: { frameIds?: number[]; allFrames?: boolean } }).target ?? {};
+      const call = options as { func: (...a: unknown[]) => unknown; args?: unknown[] };
+      if (target.frameIds?.includes(7)) {
+        frameCalls.push({ frameIds: target.frameIds });
+        return [{ documentId: 'document-2', frameId: 7, result: call.func(...(call.args ?? [])) }];
+      }
+      if (target.allFrames) {
+        return [
+          {
+            documentId: 'document-1',
+            frameId: 0,
+            result: captureInteractivePage(50, '', 'document'),
+          },
+          {
+            documentId: 'document-2',
+            frameId: 7,
+            result: {
+              version: 1,
+              executionUrl: PAGE_URL,
+              title: 'frame',
+              elements: [
+                {
+                  path: [1, 0],
+                  tag: 'button',
+                  role: 'button',
+                  name: '顶层按钮',
+                  type: '',
+                  disabled: false,
+                  risk: 'safe',
+                  inViewport: true,
+                },
+              ],
+              viewport: {
+                scrollX: 0,
+                scrollY: 0,
+                width: 1024,
+                height: 768,
+                documentWidth: 1024,
+                documentHeight: 768,
+              },
+              truncated: false,
+            },
+          },
+        ];
+      }
+      return [{ documentId: 'document-1', frameId: 0, result: call.func(...(call.args ?? [])) }];
+    });
+
+    const coordinator = new PageInteractionCoordinator();
+    const observed = await coordinator.observe(
+      call('observe_page', {}),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    if ('deferred' in observed || observed.isError) throw new Error('Observation failed');
+    expect(observed.content).toContain('"ref":"e1"');
+    expect(observed.content).toContain('"ref":"e2"');
+    const observationId = /"observationId":"([^"]+)/u.exec(observed.content)?.[1];
+
+    const clicked = vi.fn(() => {
+      const button = document.querySelector('#open');
+      if (button) button.textContent = '已点击';
+    });
+    document.querySelector('#open')?.addEventListener('click', clicked);
+    const pending = coordinator.interact(
+      call('interact_page', { action: 'click', observationId, ref: 'e2' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    const outcome = await pending;
+    expect(outcome).toMatchObject({ isError: false });
+    expect(frameCalls.some((item) => item.frameIds?.[0] === 7)).toBe(true);
+  });
+
+  it('waits for controls that appear inside iframes', async () => {
+    vi.useFakeTimers();
+    setPage('<button>顶层按钮</button>');
+    const frameWithTarget = {
+      version: 1,
+      executionUrl: PAGE_URL,
+      title: 'frame',
+      elements: [
+        {
+          path: [0],
+          tag: 'button',
+          role: 'button',
+          name: '加载完成',
+          type: '',
+          disabled: false,
+          risk: 'safe',
+          inViewport: true,
+        },
+      ],
+      viewport: {
+        scrollX: 0,
+        scrollY: 0,
+        width: 1024,
+        height: 768,
+        documentWidth: 1024,
+        documentHeight: 768,
+      },
+      truncated: false,
+    };
+    executeScript.mockImplementation(async (options: unknown) => {
+      const target = (options as { target?: { allFrames?: boolean } }).target ?? {};
+      const call = options as { func: (...a: unknown[]) => unknown; args?: unknown[] };
+      if (target.allFrames) {
+        return [
+          { documentId: 'document-1', frameId: 0, result: call.func(...(call.args ?? [])) },
+          { documentId: 'document-2', frameId: 7, result: frameWithTarget },
+        ];
+      }
+      return [{ documentId: 'document-1', frameId: 0, result: call.func(...(call.args ?? [])) }];
+    });
+
+    const coordinator = new PageInteractionCoordinator();
+    const pending = coordinator.interact(
+      call('interact_page', { action: 'wait', query: '加载完成', waitMs: 500 }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-1',
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+    const outcome = await pending;
+    expect(outcome).toMatchObject({ isError: false, statusText: '等待的目标控件已出现' });
   });
 
   it('does not repeat a click when the page shows no observable result', async () => {
@@ -1941,5 +2507,110 @@ describe('PageInteractionCoordinator', () => {
     expect(sessionValue).toBeUndefined();
     await coordinator.clear();
     expect(storageRemove).toHaveBeenCalled();
+  });
+
+  it('waits for a matching control to appear or disappear with query conditions', async () => {
+    vi.useFakeTimers();
+    setPage('<button>目标按钮</button><span>普通文本</span>');
+    const coordinator = new PageInteractionCoordinator();
+    const signal = new AbortController().signal;
+
+    const appeared = coordinator.interact(
+      call('interact_page', { action: 'wait', query: '目标按钮', waitMs: 500 }),
+      SNAPSHOT,
+      signal,
+      'request-1',
+    );
+    await vi.advanceTimersByTimeAsync(1_200);
+    await expect(appeared).resolves.toMatchObject({
+      isError: false,
+      content: expect.stringContaining('目标控件已出现'),
+    });
+
+    // 移除按钮后，wait_hidden 应立即观察到“消失”
+    document.querySelector('button')?.remove();
+    const hidden = coordinator.interact(
+      call('interact_page', { action: 'wait_hidden', query: '目标按钮', waitMs: 500 }),
+      SNAPSHOT,
+      signal,
+      'request-1',
+    );
+    await vi.advanceTimersByTimeAsync(1_200);
+    await expect(hidden).resolves.toMatchObject({
+      isError: false,
+      content: expect.stringContaining('目标控件已消失'),
+    });
+
+    const missing = coordinator.interact(
+      call('interact_page', { action: 'wait', query: '不存在的控件', waitMs: 200 }),
+      SNAPSHOT,
+      signal,
+      'request-1',
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(missing).resolves.toMatchObject({
+      isError: false,
+      content: expect.stringContaining('等待超时，目标控件未出现'),
+    });
+
+    const noQuery = coordinator.interact(
+      call('interact_page', { action: 'wait_hidden' }),
+      SNAPSHOT,
+      signal,
+      'request-1',
+    );
+    await expect(noQuery).resolves.toMatchObject({
+      isError: true,
+      errorCode: 'INVALID_PAGE_INTERACTION',
+    });
+  });
+
+  it('waits for navigation completion or URL change and times out otherwise', async () => {
+    vi.useFakeTimers();
+    setPage('<button>按钮</button>');
+    const coordinator = new PageInteractionCoordinator();
+    const signal = new AbortController().signal;
+
+    const loadingThenComplete = coordinator.interact(
+      call('interact_page', { action: 'wait_navigation', waitMs: 800 }),
+      SNAPSHOT,
+      signal,
+      'request-1',
+    );
+    let loading = true;
+    tabsGet.mockImplementation(async () => ({
+      id: 7,
+      windowId: 3,
+      url: loading ? PAGE_URL : 'https://www.zhipin.com/next',
+      title: '交互测试',
+      status: loading ? 'loading' : 'complete',
+    }));
+    await vi.advanceTimersByTimeAsync(300);
+    loading = false;
+    await vi.advanceTimersByTimeAsync(1_200);
+    await expect(loadingThenComplete).resolves.toMatchObject({
+      isError: false,
+      statusText: expect.stringContaining('导航'),
+    });
+
+    const unchanged = coordinator.interact(
+      call('interact_page', { action: 'wait_navigation', waitMs: 200 }),
+      SNAPSHOT,
+      signal,
+      'request-1',
+    );
+    tabsGet.mockImplementation(async () => ({
+      id: 7,
+      windowId: 3,
+      url: PAGE_URL,
+      title: '交互测试',
+      status: 'complete',
+    }));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(unchanged).resolves.toMatchObject({
+      isError: true,
+      errorCode: 'VERIFICATION_FAILED',
+      content: expect.stringContaining('等待超时，页面没有发生导航'),
+    });
   });
 });

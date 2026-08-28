@@ -1,6 +1,10 @@
 import { AgentManager } from '@/lib/agent/agent-manager';
 import { ConversationAgent } from '@/lib/agent/conversation-agent';
+import { PolicyEngine, policyConfirm, policyDenied } from '@/lib/agent/policy-engine';
+import { TaskStateMachine, terminalPhaseForEvent } from '@/lib/agent/task-state-machine';
+import { type CatalogToolExecutor, ToolCatalog, type ToolRisk } from '@/lib/agent/tool-catalog';
 import { toolContextManager } from '@/lib/agent/tool-context';
+import { ToolLedger } from '@/lib/agent/tool-ledger';
 import { captureCurrentPageStructure } from '@/lib/diagnostics/page-structure';
 import { recorder } from '@/lib/diagnostics/recorder';
 import { redact } from '@/lib/diagnostics/redaction';
@@ -14,6 +18,7 @@ import { createPiGenerationAdapter } from '@/lib/generation/pi-adapter';
 import { AgentRunRegistry, createChromeRunRegistryStore } from '@/lib/generation/registry';
 import { resolveActiveGenerationTarget, resolveGenerationTarget } from '@/lib/generation/resolve';
 import type {
+  GenerationToolDefinition,
   GenerationToolExecutionOutcome,
   GenerationToolExecutionResult,
 } from '@/lib/generation/types';
@@ -61,14 +66,15 @@ import type { SkillPackage } from '@/lib/skills/types';
 import { createTrustedStorageGate } from '@/lib/storage/access';
 import {
   loadConversationRuntimeSettings,
+  loadRecentToolCalls,
   saveConversationRuntimeSettings,
-  saveRunCheckpoint,
 } from '@/lib/storage/db';
 import { ASK_USER_TOOL, askUser } from '@/lib/tools/ask-user';
 import { BROWSER_ACTION_TOOL, executeBrowserAction } from '@/lib/tools/browser-action';
 import { LOAD_SKILL_TOOL, SkillLoadCoordinator } from '@/lib/tools/load-skill';
 import { MemoryToolCoordinator, SAVE_MEMORY_TOOL, SEARCH_MEMORY_TOOL } from '@/lib/tools/memory';
 import {
+  INSPECT_PAGE_TOOL,
   INTERACT_PAGE_TOOL,
   OBSERVE_PAGE_TOOL,
   OBSERVE_VISUAL_PAGE_TOOL,
@@ -112,6 +118,133 @@ export default defineBackground({
     const pageInteraction = new PageInteractionCoordinator();
     const titleControllers = new Map<string, { controller: AbortController; requestId: string }>();
 
+    // ─── 工具目录与策略引擎 ───
+    // 工具定义、风险声明与执行器集中注册，Policy Engine 在入口统一门禁。
+    const toolCatalog = new ToolCatalog();
+    const registerTool = (
+      definition: GenerationToolDefinition,
+      risk: ToolRisk,
+      execute: CatalogToolExecutor,
+    ) => toolCatalog.register({ definition, risk, execute });
+    const workspaceWriteNames = new Set([
+      'workspace_create',
+      'workspace_mkdir',
+      'workspace_edit',
+      'workspace_rename',
+      'workspace_delete',
+      'workspace_save_url',
+    ]);
+    registerTool(READ_CURRENT_PAGE_TOOL, 'safe', async (ctx) =>
+      readCurrentPage(ctx.toolContext.getPageSnapshot(), ctx.signal),
+    );
+    registerTool(BROWSER_ACTION_TOOL, 'safe', async (ctx) => {
+      const result = await executeBrowserAction(
+        ctx.call,
+        ctx.toolContext.getPageSnapshot(),
+        ctx.toolContext.getLatestUserText(),
+        ctx.signal,
+        ctx.reportProgress,
+      );
+      if (!('deferred' in result) && !result.isError) {
+        const nextSnapshot =
+          result.nextPageSnapshot ?? (await capturePageTurnSnapshot().catch(() => null));
+        ctx.toolContext.setPageSnapshot(nextSnapshot);
+      }
+      return result;
+    });
+    registerTool(TAB_TOOL, 'safe', async (ctx) =>
+      executeTab(
+        ctx.call,
+        ctx.toolContext.getPageSnapshot(),
+        ctx.toolContext.getLatestUserText(),
+        ctx.signal,
+        ctx.reportProgress,
+      ),
+    );
+    registerTool(OBSERVE_PAGE_TOOL, 'safe', async (ctx) =>
+      pageInteraction.observe(
+        ctx.call,
+        ctx.toolContext.getPageSnapshot(),
+        ctx.signal,
+        ctx.requestId,
+        ctx.conversationId,
+      ),
+    );
+    registerTool(INSPECT_PAGE_TOOL, 'safe', async (ctx) =>
+      pageInteraction.inspect(
+        ctx.call,
+        ctx.toolContext.getPageSnapshot(),
+        ctx.signal,
+        ctx.requestId,
+        ctx.conversationId,
+      ),
+    );
+    registerTool(OBSERVE_VISUAL_PAGE_TOOL, 'safe', async (ctx) =>
+      pageInteraction.observeVisual(
+        ctx.call,
+        ctx.toolContext.getPageSnapshot(),
+        ctx.signal,
+        ctx.requestId,
+        ctx.approved,
+        ctx.reportProgress,
+        ctx.modelContext,
+        ctx.conversationId,
+      ),
+    );
+    registerTool(INTERACT_PAGE_TOOL, 'safe', async (ctx) =>
+      pageInteraction.interact(
+        ctx.call,
+        ctx.toolContext.getPageSnapshot(),
+        ctx.signal,
+        ctx.requestId,
+        ctx.approved,
+        ctx.reportProgress,
+        ctx.conversationId,
+      ),
+    );
+    registerTool(LOAD_SKILL_TOOL, 'safe', async (ctx) =>
+      skillLoader.execute(
+        ctx.call,
+        ctx.requestId,
+        ctx.signal,
+        ctx.toolContext.getPageSnapshot()?.url,
+      ),
+    );
+    registerTool(RUN_SKILL_TOOL, 'safe', async (ctx) => {
+      const approval = ctx.toolContext.getSkillApproval(ctx.call.id) ?? null;
+      const result = await skillRunner.execute(ctx.call, ctx.conversationId, approval, ctx.signal);
+      ctx.toolContext.deleteSkillApproval(ctx.call.id);
+      return result;
+    });
+    for (const definition of [SEARCH_MEMORY_TOOL, SAVE_MEMORY_TOOL]) {
+      registerTool(definition, 'safe', (ctx) =>
+        memoryTools.execute(ctx.call, ctx.toolContext.getLatestUserText(), ctx.signal),
+      );
+    }
+    for (const definition of WORKSPACE_TOOLS) {
+      // 写操作走 Policy Engine 统一确认门禁；执行器内部保留未授权防御作为纵深。
+      const risk: ToolRisk = workspaceWriteNames.has(definition.name) ? 'confirm' : 'safe';
+      registerTool(definition, risk, (ctx) =>
+        workspaceTools.execute(ctx.call, ctx.conversationId, ctx.approved, ctx.signal),
+      );
+    }
+    registerTool(ASK_USER_TOOL, 'safe', async (ctx) => askUser(ctx.call));
+    toolCatalog.registerPattern('mcp__', {
+      definition: {
+        name: 'mcp__*',
+        label: 'MCP 外部服务工具',
+        description: 'MCP 服务器动态提供的工具；只读性由服务器声明决定。',
+        parameters: { type: 'object', properties: {}, additionalProperties: true },
+      },
+      risk: 'safe',
+      execute: (ctx) => mcpService.execute(ctx.call, ctx.approved, ctx.signal),
+    });
+    const policyEngine = new PolicyEngine(toolCatalog);
+    // 任务状态机统一管理 checkpoint phase 转换与 SW 重启后的中断恢复；
+    // 工具台账记录每次调用的策略决策与结果，供诊断报告回放。
+    const taskStateMachine = new TaskStateMachine();
+    const toolLedger = new ToolLedger();
+
     const runRegistry = new AgentRunRegistry(
       (conversationId, publish) => {
         // 每个会话独立的工具上下文
@@ -139,19 +272,8 @@ export default defineBackground({
           compactMessages: (target, messages, signal) =>
             compactGenerationContext(generationAdapter, target, messages, signal),
           tools: async () => [
-            READ_CURRENT_PAGE_TOOL,
-            BROWSER_ACTION_TOOL,
-            TAB_TOOL,
-            OBSERVE_PAGE_TOOL,
-            OBSERVE_VISUAL_PAGE_TOOL,
-            INTERACT_PAGE_TOOL,
-            LOAD_SKILL_TOOL,
-            RUN_SKILL_TOOL,
-            SEARCH_MEMORY_TOOL,
-            SAVE_MEMORY_TOOL,
-            ...WORKSPACE_TOOLS,
+            ...toolCatalog.definitions(),
             ...(await mcpService.generationTools()),
-            ASK_USER_TOOL,
           ],
           executeTool: async (call, signal, requestId, reportProgress, context) => {
             const toolStartedAt = Date.now();
@@ -162,119 +284,71 @@ export default defineBackground({
               JSON.stringify(call.arguments ?? {}),
               conversationId,
             );
-            let result: GenerationToolExecutionOutcome;
-            switch (call.name) {
-              case 'browser_action':
-                result = await executeBrowserAction(
-                  call,
-                  toolContext.getPageSnapshot(),
-                  toolContext.getLatestUserText(),
-                  signal,
-                  reportProgress,
-                );
-                if (!('deferred' in result) && !result.isError) {
-                  const nextSnapshot =
-                    result.nextPageSnapshot ?? (await capturePageTurnSnapshot().catch(() => null));
-                  toolContext.setPageSnapshot(nextSnapshot);
-                }
-                break;
-              case 'read_current_page':
-                result = await readCurrentPage(toolContext.getPageSnapshot(), signal);
-                break;
-              case 'tab':
-                result = await executeTab(
-                  call,
-                  toolContext.getPageSnapshot(),
-                  toolContext.getLatestUserText(),
-                  signal,
-                  reportProgress,
-                );
-                break;
-              case 'observe_page':
-                result = await pageInteraction.observe(
-                  call,
-                  toolContext.getPageSnapshot(),
-                  signal,
-                  requestId,
-                  conversationId,
-                );
-                break;
-              case 'observe_visual_page':
-                result = await pageInteraction.observeVisual(
-                  call,
-                  toolContext.getPageSnapshot(),
-                  signal,
-                  requestId,
-                  toolContext.revokeToolCallApproval(call.id),
-                  reportProgress,
-                  context,
-                  conversationId,
-                );
-                break;
-              case 'interact_page':
-                result = await pageInteraction.interact(
-                  call,
-                  toolContext.getPageSnapshot(),
-                  signal,
-                  requestId,
-                  toolContext.revokeToolCallApproval(call.id),
-                  reportProgress,
-                  conversationId,
-                );
-                break;
-              case 'load_skill':
-                result = await skillLoader.execute(
-                  call,
-                  requestId,
-                  signal,
-                  toolContext.getPageSnapshot()?.url,
-                );
-                break;
-              case 'run_skill':
-                result = await skillRunner.execute(
-                  call,
-                  conversationId,
-                  toolContext.getSkillApproval(call.id) ?? null,
-                  signal,
-                );
-                toolContext.deleteSkillApproval(call.id);
-                break;
-              case 'search_memory':
-              case 'save_memory':
-                result = await memoryTools.execute(call, toolContext.getLatestUserText(), signal);
-                break;
-              case 'workspace_create':
-              case 'workspace_mkdir':
-              case 'workspace_read':
-              case 'workspace_edit':
-              case 'workspace_rename':
-              case 'workspace_delete':
-              case 'workspace_list':
-              case 'workspace_search':
-              case 'workspace_save_url':
-                result = await workspaceTools.execute(
-                  call,
-                  conversationId,
-                  toolContext.revokeToolCallApproval(call.id),
-                  signal,
-                );
-                break;
-              case 'ask_user':
-                result = askUser(call);
-                break;
-              default:
-                result = isMcpToolName(call.name)
-                  ? await mcpService.execute(
-                      call,
-                      toolContext.revokeToolCallApproval(call.id),
-                      signal,
-                    )
-                  : {
-                      isError: true,
-                      statusText: '工具禁用',
-                      content: `未开放${call.name}`,
-                    };
+            // Policy Engine 统一门禁：deny 直接拒绝；confirm 且未获用户确认时挂起询问。
+            const decision = policyEngine.evaluate(call);
+            const ledgerBase = {
+              runId: requestId,
+              conversationId,
+              name: call.name,
+              risk: toolCatalog.get(call.name)?.risk ?? 'blocked',
+              approved: false,
+              paramsSummary: JSON.stringify(call.arguments ?? {}),
+            };
+            if (decision.decision === 'deny') {
+              const denied = policyDenied(call, decision);
+              recorder.step(
+                'chat',
+                'error',
+                `工具禁用：${call.name}`,
+                decision.reason,
+                conversationId,
+              );
+              void toolLedger.record({
+                ...ledgerBase,
+                decision: 'deny',
+                isError: true,
+                statusText: denied.statusText,
+                costMs: Date.now() - toolStartedAt,
+              });
+              return denied;
             }
+            const approved = toolContext.revokeToolCallApproval(call.id);
+            if (decision.decision === 'confirm' && !approved) {
+              void toolLedger.record({
+                ...ledgerBase,
+                decision: 'confirm',
+                isError: false,
+                statusText: '等待确认',
+                costMs: Date.now() - toolStartedAt,
+              });
+              return policyConfirm(call, decision, policyEngine.confirmQuestion(call, decision));
+            }
+            let result: GenerationToolExecutionOutcome;
+            try {
+              result = await toolCatalog.execute(call, {
+                signal,
+                requestId,
+                conversationId,
+                approved,
+                reportProgress,
+                modelContext: context,
+                toolContext,
+              });
+            } catch (error) {
+              result = {
+                isError: true,
+                statusText: '工具执行异常',
+                content: `工具执行失败：${error instanceof Error ? error.message : String(error)}`,
+              };
+            }
+            void toolLedger.record({
+              ...ledgerBase,
+              approved,
+              decision: decision.decision,
+              isError: 'deferred' in result ? false : result.isError,
+              statusText: result.statusText,
+              costMs: Date.now() - toolStartedAt,
+            });
             if ('deferred' in result) return result;
             if (result.nextPageSnapshot) {
               toolContext.setPageSnapshot(result.nextPageSnapshot);
@@ -305,6 +379,10 @@ export default defineBackground({
                 conversationId,
               ),
             );
+            void taskStateMachine.transition(conversationId, 'waiting_user', {
+              runId: generation.requestId,
+              historyMessageIds: history.map(({ id }) => id),
+            });
           },
           onModelRound: (round) => {
             const diagnostic = toolContext.getDiagnostic(round.requestId);
@@ -379,19 +457,19 @@ export default defineBackground({
           finishDiagnostics(event, conversationId);
           if (event.type === 'end' || event.type === 'error') {
             const historyMessageIds = toolContext.getChatHistory().map(({ id }) => id);
-            void saveRunCheckpoint({
-              id: `checkpoint-${crypto.randomUUID()}`,
+            const phase = terminalPhaseForEvent(event);
+            void taskStateMachine.transition(conversationId, phase, {
               runId: event.requestId,
-              conversationId,
               historyMessageIds,
-              phase:
-                event.message.status === 'cancelled'
-                  ? 'interrupted'
-                  : event.type === 'error'
-                    ? 'interrupted'
-                    : 'stable',
-              createdAt: Date.now(),
-            }).catch(() => void 0);
+              ...(phase === 'interrupted'
+                ? {
+                    reason:
+                      event.message.status === 'cancelled'
+                        ? ('cancelled' as const)
+                        : ('error' as const),
+                  }
+                : {}),
+            });
           }
           if (event.type === 'start' && event.message.modelIdentity) {
             void loadConversationRuntimeSettings(conversationId)
@@ -437,19 +515,19 @@ export default defineBackground({
             broadcast(chatPorts, generationEventToServerMessage(event, convId)),
           finishDiagnostics: (event, convId) => finishDiagnostics(event, convId),
           saveCheckpoint: (event, convId, historyIds) => {
-            void saveRunCheckpoint({
-              id: `checkpoint-${crypto.randomUUID()}`,
+            const phase = terminalPhaseForEvent(event);
+            void taskStateMachine.transition(convId, phase, {
               runId: event.requestId,
-              conversationId: convId,
               historyMessageIds: historyIds,
-              phase:
-                event.message.status === 'cancelled'
-                  ? 'interrupted'
-                  : event.type === 'error'
-                    ? 'interrupted'
-                    : 'stable',
-              createdAt: Date.now(),
-            }).catch(() => void 0);
+              ...(phase === 'interrupted'
+                ? {
+                    reason:
+                      event.message.status === 'cancelled'
+                        ? ('cancelled' as const)
+                        : ('error' as const),
+                  }
+                : {}),
+            });
           },
           saveRuntimeSettings: (convId, modelIdentity) => {
             void loadConversationRuntimeSettings(convId)
@@ -471,7 +549,16 @@ export default defineBackground({
       },
     });
 
-    void runRegistry.restore();
+    void runRegistry.restore().then(async () => {
+      // SW 重启后中断恢复：restore 已把活跃 run 挂回内存，剩下的非终态检查点
+      // 都是上次未跑完的残留任务，统一标记为 interrupted，避免 UI 误判为进行中。
+      const recovered = await taskStateMachine.recoverStaleRuns(
+        (runId) => runRegistry.managerForRequest(runId)?.currentRequestId === runId,
+      );
+      if (recovered.length > 0) {
+        broadcast(chatPorts, { type: 'chat_state', running: false });
+      }
+    });
     runRegistry.subscribe((runs) => broadcast(chatPorts, { type: 'run_state', runs }));
 
     chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
@@ -878,19 +965,20 @@ export default defineBackground({
           modelRounds: 0,
         });
       }
-      await saveRunCheckpoint({
-        id: `checkpoint-${crypto.randomUUID()}`,
+      await taskStateMachine.transition(conversationId, 'queued', {
         runId: requestId,
-        conversationId,
         historyMessageIds: history.map(({ id }) => id),
-        phase: 'queued',
-        createdAt: Date.now(),
       });
 
       try {
         await agentManager.startTask(conversationId, requestId, history, snapshot);
       } catch (error) {
         toolContext.deleteDiagnostic(requestId);
+        void taskStateMachine.transition(conversationId, 'interrupted', {
+          runId: requestId,
+          historyMessageIds: history.map(({ id }) => id),
+          reason: 'start_failed',
+        });
         // 解析阶段还没有 stream_start；重连窗口可能已通过 chat_state 绑定本 requestId，
         // 因此必须广播失败，不能只通知最初发起请求的 Port。
         broadcast(chatPorts, {
@@ -1019,6 +1107,12 @@ export default defineBackground({
         if (permissionAvailable && pending.generation.toolCall.name === 'observe_visual_page') {
           toolContext.approveToolCall(pending.generation.toolCall.id);
         }
+        if (conversationId) {
+          void taskStateMachine.transition(conversationId, 'running', {
+            runId: requestId,
+            historyMessageIds: history.map(({ id }) => id),
+          });
+        }
         await runRegistry.enqueue(conversationId, requestId, async (generationManager) => {
           await generationManager.resumeDeferred(
             pending.generation,
@@ -1122,6 +1216,12 @@ export default defineBackground({
         toolContext.setLatestUserText(lastUser?.content ?? '');
       }
       await clearPendingPageTurn(requestId);
+      if (conversationId) {
+        void taskStateMachine.transition(conversationId, 'running', {
+          runId: requestId,
+          historyMessageIds: history.map(({ id }) => id),
+        });
+      }
       try {
         const resumeDeferred = async (override?: GenerationToolExecutionResult) => {
           await runRegistry.enqueue(conversationId, requestId, async (generationManager) => {
@@ -1289,7 +1389,8 @@ export default defineBackground({
 
     async function downloadDiagnostics(): Promise<void> {
       const pageStructure = await captureCurrentPageStructure();
-      const markdown = buildDiagnosticsReport(recorder.snapshotRuns(), pageStructure);
+      const toolCalls = await loadRecentToolCalls(undefined, 200).catch(() => []);
+      const markdown = buildDiagnosticsReport(recorder.snapshotRuns(), pageStructure, toolCalls);
       const dataUrl = `data:text/markdown;charset=utf-8;base64,${base64EncodeUtf8(markdown)}`;
       await chrome.downloads.download({
         url: dataUrl,

@@ -12,6 +12,9 @@ stats-*.json
 # ─── 设计原型（仅本地参考，不进版本管理） ───
 design-prototype/
 
+# ─── 内部规划文档（含外部项目参考，仅本地，不进版本管理） ───
+docs/general-browser-agent-evolution-roadmap.md
+
 # ─── 环境与本地配置 ───
 .env
 .env.*

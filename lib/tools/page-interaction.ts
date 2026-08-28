@@ -61,6 +61,52 @@ export const OBSERVE_PAGE_TOOL: GenerationToolDefinition = {
   },
 };
 
+export const INSPECT_PAGE_TOOL: GenerationToolDefinition = {
+  name: 'inspect_page',
+  label: '查找页面元素',
+  description:
+    '根据可访问名称、可见文字或角色查找当前页面的可交互元素，并返回可直接交给 interact_page 的 observationId/ref。默认检查整个文档，可发现当前视口外但仍可操作的元素；适合查找“登录”“搜索”“下一页”等明确目标。不会返回 CSS selector、输入值或隐藏元素。',
+  parameters: {
+    type: 'object',
+    properties: {
+      query: {
+        type: 'string',
+        description: '可选：元素名称或可见文字包含的关键词，最多 120 字。',
+      },
+      role: {
+        type: 'string',
+        enum: [
+          'button',
+          'link',
+          'textbox',
+          'searchbox',
+          'combobox',
+          'checkbox',
+          'radio',
+          'switch',
+          'tab',
+          'menuitem',
+          'option',
+          'slider',
+        ],
+        description: '可选：只返回指定语义角色。',
+      },
+      scope: {
+        type: 'string',
+        enum: ['document', 'viewport'],
+        description: '检查整个文档或只检查当前视口，默认 document。',
+      },
+      limit: {
+        type: 'number',
+        minimum: 1,
+        maximum: 50,
+        description: '最多返回多少个元素，默认 30，最大 50。',
+      },
+    },
+    additionalProperties: false,
+  },
+};
+
 export const OBSERVE_VISUAL_PAGE_TOOL: GenerationToolDefinition = {
   name: 'observe_visual_page',
   label: '视觉观察当前页面',
@@ -93,7 +139,7 @@ export const INTERACT_PAGE_TOOL: GenerationToolDefinition = {
   name: 'interact_page',
   label: '操作页面控件',
   description:
-    '使用最近一次 observe_page 返回的 observationId 和元素 ref 执行一个受约束动作。支持 click、fill、select、check、scroll、scroll_until、wait、back、forward。scroll_until 会在严格步数与距离上限内滚动，直到找到 query 对应的可见控件或到达页面底部。click/fill/select/check 必须携带最新 observationId 和 ref；每次动作后引用失效并尽力返回新观察。表单提交、发送、投递、发布、删除、支付等可能产生外部影响的动作会由执行器强制暂停确认；密码和文件输入始终禁止。',
+    '使用最近一次 observe_page 返回的 observationId 和元素 ref 执行一个受约束动作。支持 click、fill、clear、focus、keypress、select、check、scroll、scroll_until、wait、wait_hidden、wait_navigation、back、forward。scroll_until 会在严格步数与距离上限内滚动，直到找到 query 对应的可见控件或到达页面底部。wait 带 query 时会轮询等待该名称/角色的控件出现，wait_hidden 等待其消失，wait_navigation 等待页面导航完成；都不需要 observationId。click/fill/clear/focus/keypress/select/check 必须携带最新 observationId 和 ref；每次动作后引用失效并尽力返回新观察。表单提交、发送、投递、发布、删除、支付等可能产生外部影响的动作会由执行器强制暂停确认；密码和文件输入始终禁止。',
   parameters: {
     type: 'object',
     properties: {
@@ -102,11 +148,16 @@ export const INTERACT_PAGE_TOOL: GenerationToolDefinition = {
         enum: [
           'click',
           'fill',
+          'clear',
+          'focus',
+          'keypress',
           'select',
           'check',
           'scroll',
           'scroll_until',
           'wait',
+          'wait_hidden',
+          'wait_navigation',
           'back',
           'forward',
         ],
@@ -122,6 +173,15 @@ export const INTERACT_PAGE_TOOL: GenerationToolDefinition = {
       value: {
         type: 'string',
         description: 'fill 要填写的文本，或 select 要选择的选项文本/值，最多 2000 字。',
+      },
+      key: {
+        type: 'string',
+        description: 'keypress 要按下的键，例如 Enter、Escape、Tab、ArrowDown、a 等，最多 40 字。',
+      },
+      modifiers: {
+        type: 'array',
+        items: { type: 'string', enum: ['ctrl', 'shift', 'alt', 'meta'] },
+        description: 'keypress 可选修饰键，默认无。',
       },
       checked: {
         type: 'boolean',
@@ -157,19 +217,31 @@ export const INTERACT_PAGE_TOOL: GenerationToolDefinition = {
   },
 };
 
-type ElementAction = 'click' | 'fill' | 'select' | 'check';
-type PageAction = ElementAction | 'scroll' | 'scroll_until' | 'wait' | 'back' | 'forward';
+type ElementAction = 'click' | 'fill' | 'clear' | 'focus' | 'keypress' | 'select' | 'check';
+type PageAction =
+  | ElementAction
+  | 'scroll'
+  | 'scroll_until'
+  | 'wait'
+  | 'wait_hidden'
+  | 'wait_navigation'
+  | 'back'
+  | 'forward';
+type PageObservationScope = 'viewport' | 'document';
 
 interface InteractionRequest {
   action: PageAction;
   observationId?: string;
   ref?: string;
   value?: string;
+  key?: string;
+  modifiers?: string[];
   checked?: boolean;
   deltaY?: number;
   query?: string;
   maxSteps?: number;
   waitMs?: number;
+  containerQuery?: string;
 }
 
 interface StoredElement extends PageInteractiveElementCandidate {
@@ -182,6 +254,8 @@ interface StoredObservation {
   requestId: string;
   observationId: string;
   documentId: string;
+  /** frameId → 该 frame 的 documentId；顶层为 0。 */
+  frameDocumentIds: Record<number, string>;
   snapshot: PageTurnSnapshot;
   elements: StoredElement[];
   viewport: PageInteractionObservationResult['viewport'];
@@ -198,6 +272,57 @@ interface PageEffectVerification {
   verified: boolean;
   evidence: string;
   tab: chrome.tabs.Tab;
+  openedTabs: chrome.tabs.Tab[];
+}
+
+// ---- 统一动作验证机制 ----
+// 每个动作声明自己的验证策略，验证只由 verifyActionExecution 一个入口执行：
+//   page_effect     观察副作用：轮询新标签页、地址变化或页面指纹变化（click）
+//   script_evidence 事件已消费或脚本直接报告状态，以脚本分发的证据为准（keypress / scroll）
+//   element_state   动作后回读元素状态并与期望比对（fill / select / check / clear / focus）
+//   navigation      对比动作前后的页面地址（back / forward）
+// 未声明策略的动作（wait / scroll_until 等观察性动作）不经过验证入口。
+type ActionVerificationPlan =
+  | { kind: 'page_effect' }
+  | { kind: 'script_evidence' }
+  | { kind: 'element_state' }
+  | { kind: 'navigation' };
+
+const ACTION_VERIFICATION_PLANS: Readonly<Partial<Record<PageAction, ActionVerificationPlan>>> = {
+  click: { kind: 'page_effect' },
+  keypress: { kind: 'script_evidence' },
+  scroll: { kind: 'script_evidence' },
+  fill: { kind: 'element_state' },
+  select: { kind: 'element_state' },
+  check: { kind: 'element_state' },
+  clear: { kind: 'element_state' },
+  focus: { kind: 'element_state' },
+  back: { kind: 'navigation' },
+  forward: { kind: 'navigation' },
+};
+
+interface ActionVerificationInput {
+  action: PageAction;
+  snapshot: PageTurnSnapshot;
+  signal: AbortSignal;
+  execution?: PageActionRunResult;
+  /** navigation 策略：动作完成后已确定的页面快照。 */
+  nextSnapshot?: PageTurnSnapshot;
+  element?: PageInteractiveElementCandidate;
+  documentId?: string;
+  frameId?: number;
+  frameDocumentId?: string;
+  value?: string;
+  checked?: boolean;
+  key?: string;
+  beforeFingerprint?: BrowserPageFingerprint | null;
+  beforeTabIds?: Set<number>;
+}
+
+interface ActionVerificationOutput {
+  verified: boolean;
+  evidence: string;
+  nextTab: chrome.tabs.Tab;
   openedTabs: chrome.tabs.Tab[];
 }
 
@@ -219,6 +344,7 @@ const MAX_QUERY_CHARS = 120;
 const MAX_VALUE_CHARS = 2_000;
 const DEFAULT_SCROLL_UNTIL_STEPS = 5;
 const MAX_SCROLL_UNTIL_STEPS = 8;
+const AMBIGUOUS_MATCH_THRESHOLD = 3;
 const VERIFICATION_TIMEOUT_MS = 3_000;
 const VERIFICATION_POLL_MS = 250;
 const TOOL_DATA_OPEN = '<untrusted_page_interaction_data>';
@@ -240,6 +366,52 @@ export class PageInteractionCoordinator {
     const limit = boundedInteger(call.arguments.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
     const capture = () =>
       this.captureObservation(snapshot, signal, requestId, conversationId, query, limit, true);
+    return snapshot && !signal.aborted
+      ? this.resources.withTab(snapshot.tabId, signal, capture)
+      : capture();
+  }
+
+  async inspect(
+    call: GenerationToolCall,
+    snapshot: PageTurnSnapshot | null,
+    signal: AbortSignal,
+    requestId: string,
+    conversationId = '',
+  ): Promise<GenerationToolExecutionOutcome> {
+    const query = normalizeInline(call.arguments.query, MAX_QUERY_CHARS);
+    const role = normalizeInspectRole(call.arguments.role);
+    if (call.arguments.role !== undefined && !role) {
+      return interactionFailure(
+        'INVALID_PAGE_INTERACTION',
+        'inspect_page 收到了不支持的元素角色。',
+      );
+    }
+    if (
+      call.arguments.scope !== undefined &&
+      call.arguments.scope !== 'viewport' &&
+      call.arguments.scope !== 'document'
+    ) {
+      return interactionFailure(
+        'INVALID_PAGE_INTERACTION',
+        'inspect_page 的 scope 必须是 document 或 viewport。',
+      );
+    }
+    const scope: PageObservationScope =
+      call.arguments.scope === 'viewport' ? 'viewport' : 'document';
+    const limit = boundedInteger(call.arguments.limit, 30, 1, 50);
+    const capture = () =>
+      this.captureObservation(
+        snapshot,
+        signal,
+        requestId,
+        conversationId,
+        query,
+        limit,
+        true,
+        scope,
+        role,
+        'inspect',
+      );
     return snapshot && !signal.aborted
       ? this.resources.withTab(snapshot.tabId, signal, capture)
       : capture();
@@ -462,7 +634,7 @@ export class PageInteractionCoordinator {
         reportProgress,
         conversationId,
       );
-    return ['click', 'back', 'forward'].includes(String(call.arguments.action))
+    return ['click', 'keypress', 'back', 'forward'].includes(String(call.arguments.action))
       ? this.resources.withTabAndFocus(snapshot.tabId, signal, interact)
       : this.resources.withTab(snapshot.tabId, signal, interact);
   }
@@ -491,6 +663,123 @@ export class PageInteractionCoordinator {
       return interactionFailure('STALE_ELEMENT_REFERENCE', validation.message, snapshot);
     }
 
+    if (request.action === 'wait_hidden' && !request.query) {
+      return interactionFailure(
+        'INVALID_PAGE_INTERACTION',
+        'wait_hidden 必须提供 query，等待匹配的控件消失。',
+        snapshot,
+      );
+    }
+    if (request.action === 'wait' && request.query) {
+      reportProgress?.(
+        '正在等待页面更新',
+        `轮询等待“${clip(request.query, 80)}”出现，最多 ${request.waitMs ?? 5_000}ms。`,
+      );
+      const appeared = await waitForQueryCondition(
+        snapshot.tabId,
+        request.query,
+        false,
+        request.waitMs ?? 5_000,
+        signal,
+      );
+      const observed = await this.captureObservation(
+        snapshot,
+        signal,
+        requestId,
+        conversationId,
+        request.query,
+        DEFAULT_LIMIT,
+        true,
+      );
+      if (!('deferred' in observed) && !observed.isError) {
+        return {
+          ...observed,
+          statusText: appeared ? '等待的目标控件已出现' : '等待超时，目标控件未出现',
+          content: [
+            appeared
+              ? '以下是条件等待回执：目标控件已出现。'
+              : '以下是条件等待回执：等待超时，目标控件未出现。',
+            TOOL_DATA_OPEN,
+            JSON.stringify({
+              action: 'wait',
+              query: request.query,
+              appeared,
+              waitMs: request.waitMs ?? 5_000,
+            }).replaceAll('<', '\\u003c'),
+            TOOL_DATA_CLOSE,
+          ].join('\n'),
+        };
+      }
+      return observed;
+    }
+    if (request.action === 'wait_hidden') {
+      reportProgress?.(
+        '正在等待页面更新',
+        `轮询等待“${clip(request.query ?? '', 80)}”消失，最多 ${request.waitMs ?? 5_000}ms。`,
+      );
+      const hidden = await waitForQueryCondition(
+        snapshot.tabId,
+        request.query ?? '',
+        true,
+        request.waitMs ?? 5_000,
+        signal,
+      );
+      const observed = await this.captureObservation(
+        snapshot,
+        signal,
+        requestId,
+        conversationId,
+        '',
+        DEFAULT_LIMIT,
+        true,
+      );
+      if (!('deferred' in observed) && !observed.isError) {
+        return {
+          ...observed,
+          statusText: hidden ? '等待的控件已消失' : '等待超时，控件仍然可见',
+          content: [
+            hidden
+              ? '以下是条件等待回执：目标控件已消失。'
+              : '以下是条件等待回执：等待超时，目标控件仍然可见。',
+            TOOL_DATA_OPEN,
+            JSON.stringify({
+              action: 'wait_hidden',
+              query: request.query,
+              hidden,
+              waitMs: request.waitMs ?? 5_000,
+            }).replaceAll('<', '\\u003c'),
+            TOOL_DATA_CLOSE,
+          ].join('\n'),
+        };
+      }
+      return observed;
+    }
+    if (request.action === 'wait_navigation') {
+      reportProgress?.('正在等待页面导航', `最多等待 ${request.waitMs ?? 5_000}ms。`);
+      const navigated = await waitForNavigation(snapshot.tabId, request.waitMs ?? 5_000, signal);
+      const tab = await chrome.tabs.get(snapshot.tabId);
+      const nextSnapshot = snapshotFromTab(tab);
+      await this.clear(requestId, conversationId, snapshot.tabId);
+      const observed = await this.captureAfterAction(
+        'wait_navigation',
+        nextSnapshot,
+        signal,
+        requestId,
+        conversationId,
+      );
+      const urlChanged = navigationKey(nextSnapshot.url) !== navigationKey(snapshot.url);
+      return this.finishVerifiedAction(
+        'wait_navigation',
+        observed,
+        navigated,
+        navigated
+          ? urlChanged
+            ? '页面已完成导航且地址已变化'
+            : '页面已完成导航'
+          : '等待超时，页面没有发生导航',
+        nextSnapshot,
+      );
+    }
     if (request.action === 'wait') {
       reportProgress?.('正在等待页面更新', `最多等待 ${request.waitMs ?? 1_000}ms 后重新观察。`);
       await abortableDelay(request.waitMs ?? 1_000, signal);
@@ -517,6 +806,12 @@ export class PageInteractionCoordinator {
         const nextSnapshot = snapshotFromTab(tab);
         await this.clear(requestId, conversationId, snapshot.tabId);
         reportProgress?.('正在验证页面导航', '检查标签页地址和文档是否已经更新。');
+        const verification = await verifyActionExecution({
+          action: request.action,
+          snapshot,
+          nextSnapshot,
+          signal,
+        });
         const observed = await this.captureAfterAction(
           request.action,
           nextSnapshot,
@@ -527,10 +822,8 @@ export class PageInteractionCoordinator {
         return this.finishVerifiedAction(
           request.action,
           observed,
-          navigationKey(nextSnapshot.url) !== navigationKey(snapshot.url),
-          navigationKey(nextSnapshot.url) !== navigationKey(snapshot.url)
-            ? '页面地址已变化'
-            : '没有观察到页面地址变化',
+          verification.verified,
+          verification.evidence,
           nextSnapshot,
         );
       } catch (error) {
@@ -559,6 +852,12 @@ export class PageInteractionCoordinator {
       const nextSnapshot = snapshotFromTab(tab);
       await this.clear(requestId, conversationId, snapshot.tabId);
       reportProgress?.('正在验证页面滚动', '检查视口是否确实发生变化。');
+      const verification = await verifyActionExecution({
+        action: 'scroll',
+        snapshot,
+        signal,
+        execution,
+      });
       const observed = await this.captureAfterAction(
         'scroll',
         nextSnapshot,
@@ -569,8 +868,8 @@ export class PageInteractionCoordinator {
       return this.finishVerifiedAction(
         'scroll',
         observed,
-        execution.script?.stateVerified === true,
-        execution.script?.stateVerified ? '页面视口已变化' : '页面视口没有发生变化',
+        verification.verified,
+        verification.evidence,
         snapshot,
       );
     }
@@ -616,6 +915,13 @@ export class PageInteractionCoordinator {
         snapshot,
       );
     }
+    if (request.action === 'keypress' && !request.key) {
+      return interactionFailure(
+        'INVALID_PAGE_INTERACTION',
+        'keypress 必须提供 key，例如 Enter、Escape、ArrowDown 或单个字符。',
+        snapshot,
+      );
+    }
     if (request.action === 'check' && request.checked === undefined) {
       return interactionFailure('INVALID_PAGE_INTERACTION', 'check 必须提供 checked。', snapshot);
     }
@@ -638,47 +944,39 @@ export class PageInteractionCoordinator {
         action: request.action,
         locator: element,
         value: request.value,
+        key: request.key,
+        modifiers: request.modifiers,
         checked: request.checked,
         approved,
         expectedUrl: snapshot.url,
       },
       signal,
       observation.documentId,
+      element.frameId ?? 0,
+      observation.frameDocumentIds[element.frameId ?? 0],
     );
     const outcome = execution.outcome;
     if ('deferred' in outcome || outcome.isError) return outcome;
 
     reportProgress?.('正在验证页面操作', '只观察页面结果，不会重复执行刚才的动作。');
-    let verified = false;
-    let evidence = '没有观察到可验证的页面变化';
-    let nextTab = await chrome.tabs.get(snapshot.tabId);
-    if (request.action === 'click') {
-      const effect = await waitForPageEffect(snapshot, beforeFingerprint, beforeTabIds, signal);
-      verified = effect.verified;
-      evidence = effect.evidence;
-      nextTab = effect.tab;
-      if (effect.openedTabs.length === 1 && effect.openedTabs[0]?.id !== undefined) {
-        const opened = await waitForSettledTab(effect.openedTabs[0].id, signal);
-        await chrome.tabs.update(opened.id as number, { active: true });
-        nextTab = opened;
-      }
-    } else {
-      const state = await verifyElementStateWithRetry(
-        snapshot.tabId,
-        observation.documentId,
-        {
-          action: request.action,
-          locator: element,
-          value: request.value,
-          checked: request.checked,
-          expectedUrl: snapshot.url,
-        },
-        signal,
-      );
-      verified = state.ok;
-      evidence = state.detail;
-      nextTab = await chrome.tabs.get(snapshot.tabId);
-    }
+    const verification = await verifyActionExecution({
+      action: request.action,
+      snapshot,
+      signal,
+      execution,
+      element,
+      documentId: observation.documentId,
+      frameId: element.frameId ?? 0,
+      frameDocumentId: observation.frameDocumentIds[element.frameId ?? 0],
+      value: request.value,
+      checked: request.checked,
+      key: request.key,
+      beforeFingerprint,
+      beforeTabIds,
+    });
+    const verified = verification.verified;
+    const evidence = verification.evidence;
+    const nextTab = verification.nextTab;
     const nextSnapshot = snapshotFromTab(nextTab);
     await this.clear(requestId, conversationId, snapshot.tabId);
     const observed = await this.captureAfterAction(
@@ -766,7 +1064,12 @@ export class PageInteractionCoordinator {
       );
       const execution = await this.runActionScript(
         snapshot,
-        { action: 'scroll', deltaY, approved: true },
+        {
+          action: 'scroll',
+          deltaY,
+          approved: true,
+          ...(query ? { containerQuery: query } : {}),
+        },
         signal,
       );
       if ('deferred' in execution.outcome || execution.outcome.isError) return execution.outcome;
@@ -861,6 +1164,9 @@ export class PageInteractionCoordinator {
     query: string,
     limit: number,
     allowDeferred: boolean,
+    scope: PageObservationScope = 'viewport',
+    role = '',
+    purpose: 'observe' | 'inspect' = 'observe',
   ): Promise<GenerationToolExecutionOutcome> {
     if (!snapshot?.isHttp || !snapshot.origin) {
       return interactionFailure(
@@ -884,9 +1190,9 @@ export class PageInteractionCoordinator {
     let injected: chrome.scripting.InjectionResult<unknown>[];
     try {
       injected = await chrome.scripting.executeScript({
-        target: { tabId: snapshot.tabId },
+        target: { tabId: snapshot.tabId, allFrames: true },
         func: captureInteractivePage,
-        args: [limit, query],
+        args: [limit, query, scope, role],
       });
     } catch (error) {
       if (!alreadyGranted && allowDeferred && isPageInjectionPermissionError(error)) {
@@ -904,16 +1210,18 @@ export class PageInteractionCoordinator {
       return interactionFailure('INTERACTION_FAILED', publicError(error), snapshot);
     }
     if (signal.aborted) return cancelled(snapshot);
-    const injection = injected[0];
-    const parsed = parseObservationResult(injection?.result);
+    // 顶层 frame 的结果用于 URL 校验、文档标识与视口信息；子 frame 元素按 frameId 合并。
+    const topLevel =
+      injected.find((item) => item.frameId === undefined || item.frameId === 0) ?? injected[0];
+    const parsed = parseObservationResult(topLevel?.result);
     if (!parsed || navigationKey(parsed.executionUrl) !== navigationKey(snapshot.url)) {
       return interactionFailure(
         'STALE_ELEMENT_REFERENCE',
-        '观察期间页面已经变化，请重新调用 observe_page。',
+        `检查期间页面已经变化，请重新调用 ${purpose === 'inspect' ? 'inspect_page' : 'observe_page'}。`,
         snapshot,
       );
     }
-    const documentId = normalizeInline(injection?.documentId, 128);
+    const documentId = normalizeInline(topLevel?.documentId, 128);
     if (!documentId) {
       return interactionFailure(
         'INTERACTION_FAILED',
@@ -926,8 +1234,23 @@ export class PageInteractionCoordinator {
       return interactionFailure('STALE_ELEMENT_REFERENCE', after.message, snapshot);
     }
 
+    const frameDocumentIds: Record<number, string> = { 0: documentId };
+    const frameElements: PageInteractiveElementCandidate[] = [];
+    for (const item of injected) {
+      const frameId = typeof item.frameId === 'number' ? item.frameId : 0;
+      if (frameId === 0) continue;
+      const frameDocId = normalizeInline(item.documentId, 128);
+      if (frameDocId) frameDocumentIds[frameId] = frameDocId;
+      const frameParsed = parseObservationResult(item.result);
+      if (frameParsed) {
+        for (const element of frameParsed.elements) {
+          frameElements.push({ ...element, frameId });
+        }
+      }
+    }
+
     const observationId = createObservationId();
-    const elements = parsed.elements.map((element, index) => ({
+    const elements = [...parsed.elements, ...frameElements].map((element, index) => ({
       ...element,
       ref: `e${index + 1}`,
     }));
@@ -938,6 +1261,7 @@ export class PageInteractionCoordinator {
       requestId,
       observationId,
       documentId,
+      frameDocumentIds,
       snapshot: latestSnapshot,
       elements,
       viewport: parsed.viewport,
@@ -945,21 +1269,37 @@ export class PageInteractionCoordinator {
       expiresAt: Date.now() + OBSERVATION_TTL_MS,
     });
     const publicElements = elements.map(({ path: _path, ...element }) => element);
+    const offscreenCount = elements.filter((element) => element.inViewport === false).length;
     return {
       isError: false,
-      statusText: '已观察当前页面控件',
-      detail: `当前视口发现 ${elements.length} 个可交互元素${parsed.truncated ? '（已达到返回上限）' : ''}。`,
-      content: observationToolContent({
-        observationId,
-        page: {
-          origin: latestSnapshot.origin,
-          url: latestSnapshot.safeUrl,
-          title: safePageTitle(parsed.title, parsed.executionUrl) || latestSnapshot.title,
-        },
-        viewport: parsed.viewport,
-        elements: publicElements,
-        truncated: parsed.truncated,
-      }),
+      statusText: purpose === 'inspect' ? '已检查页面元素' : '已观察当前页面控件',
+      detail:
+        purpose === 'inspect'
+          ? `${scope === 'document' ? '当前文档' : '当前视口'}找到 ${elements.length} 个匹配元素${offscreenCount > 0 ? `，其中 ${offscreenCount} 个在视口外` : ''}${parsed.truncated ? '（已达到返回上限）' : ''}。`
+          : `当前视口发现 ${elements.length} 个可交互元素${parsed.truncated ? '（已达到返回上限）' : ''}。`,
+      content: [
+        observationToolContent({
+          observationId,
+          page: {
+            origin: latestSnapshot.origin,
+            url: latestSnapshot.safeUrl,
+            title: safePageTitle(parsed.title, parsed.executionUrl) || latestSnapshot.title,
+          },
+          viewport: parsed.viewport,
+          elements: publicElements,
+          truncated: parsed.truncated,
+        }),
+        ...(parsed.ambiguous
+          ? [
+              '注意：本次 query 匹配到多个相似控件，结果可能存在歧义。请使用更精确的 query、role 过滤，或结合控件位置与编号确认目标后再操作。',
+            ]
+          : []),
+        ...(parsed.modalOpen
+          ? [
+              '注意：页面当前有打开的弹窗，弹窗内的控件已优先返回；操作弹窗背后的页面元素可能会无效。',
+            ]
+          : []),
+      ].join('\n'),
       sourceOrigin: latestSnapshot.origin,
       sourceTitle: latestSnapshot.title,
       sourceUrl: latestSnapshot.safeUrl,
@@ -972,20 +1312,30 @@ export class PageInteractionCoordinator {
     params: Parameters<typeof performPageInteraction>[0],
     signal: AbortSignal,
     documentId?: string,
+    frameId = 0,
+    frameDocumentId?: string,
   ): Promise<PageActionRunResult> {
     if (signal.aborted) return { outcome: cancelled(snapshot) };
+    const targetFrame = frameId > 0 ? frameId : 0;
     let injected: chrome.scripting.InjectionResult<unknown>[];
     try {
       injected = await chrome.scripting.executeScript({
         target: {
           tabId: snapshot.tabId,
-          ...(documentId ? { documentIds: [documentId] } : {}),
+          ...(targetFrame > 0
+            ? { frameIds: [targetFrame] }
+            : documentId
+              ? { documentIds: [documentId] }
+              : {}),
         },
         func: performPageInteraction,
         args: [params],
       });
     } catch (error) {
-      if (documentId && /document|frame.*not found|no frame|no matching/iu.test(String(error))) {
+      if (
+        documentId &&
+        /document|frame.*not found|no frame|no matching|frame.*changed/iu.test(String(error))
+      ) {
         return {
           outcome: interactionFailure(
             'STALE_ELEMENT_REFERENCE',
@@ -995,6 +1345,19 @@ export class PageInteractionCoordinator {
         };
       }
       return { outcome: interactionFailure('INTERACTION_FAILED', publicError(error), snapshot) };
+    }
+    if (targetFrame > 0) {
+      // 子 frame 执行：校验返回的 documentId 与观察时一致，防止 frame 已刷新。
+      const executedDocumentId = normalizeInline(injected[0]?.documentId, 128);
+      if (frameDocumentId && executedDocumentId !== frameDocumentId) {
+        return {
+          outcome: interactionFailure(
+            'STALE_ELEMENT_REFERENCE',
+            '元素所在的内嵌页面已经刷新，旧元素引用已失效。',
+            snapshot,
+          ),
+        };
+      }
     }
     const parsed = parseInteractionResult(injected[0]?.result);
     if (!parsed) {
@@ -1051,9 +1414,17 @@ export class PageInteractionCoordinator {
 export function captureInteractivePage(
   requestedLimit: number,
   requestedQuery: string,
+  requestedScope: PageObservationScope = 'viewport',
+  requestedRole = '',
 ): PageInteractionObservationResult {
   const limit = Math.min(80, Math.max(1, Math.floor(requestedLimit || 50)));
+  const scope: PageObservationScope = requestedScope === 'document' ? 'document' : 'viewport';
   const query = requestedQuery.replaceAll('\u0000', '').replace(/\s+/gu, ' ').trim().toLowerCase();
+  const roleQuery = requestedRole
+    .replaceAll('\u0000', '')
+    .replace(/\s+/gu, '')
+    .trim()
+    .toLowerCase();
   const clipText = (value: string, max = 160) => {
     const normalized = value.replaceAll('\u0000', '').replace(/\s+/gu, ' ').trim();
     return normalized.length > max ? normalized.slice(0, max) : normalized;
@@ -1101,9 +1472,14 @@ export function captureInteractivePage(
         .map((label) => label.textContent ?? '')
         .join(' ');
     }
-    const text = ['button', 'a', 'summary'].includes(element.tagName.toLowerCase())
-      ? ((element as HTMLElement).innerText ?? element.textContent ?? '')
-      : '';
+    const textRole = (element.getAttribute('role') ?? '').trim().toLowerCase();
+    const text =
+      ['button', 'a', 'summary'].includes(element.tagName.toLowerCase()) ||
+      ['button', 'link', 'menuitem', 'tab', 'option', 'checkbox', 'radio', 'switch'].includes(
+        textRole,
+      )
+        ? ((element as HTMLElement).innerText ?? element.textContent ?? '')
+        : '';
     const inputFallback =
       element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
         ? element instanceof HTMLInputElement &&
@@ -1151,7 +1527,7 @@ export function captureInteractivePage(
       'slider',
     ].includes(role);
   };
-  const visibleInViewport = (element: Element): boolean => {
+  const visibilityOf = (element: Element): { visible: boolean; inViewport: boolean } => {
     const own = getComputedStyle(element);
     if (
       own.display === 'none' ||
@@ -1159,7 +1535,7 @@ export function captureInteractivePage(
       Number.parseFloat(own.opacity || '1') <= 0.05 ||
       own.pointerEvents === 'none'
     ) {
-      return false;
+      return { visible: false, inViewport: false };
     }
     for (let parent = element.parentElement; parent; parent = parent.parentElement) {
       const style = getComputedStyle(parent);
@@ -1168,23 +1544,30 @@ export function captureInteractivePage(
         style.visibility === 'hidden' ||
         Number.parseFloat(style.opacity || '1') <= 0.05
       ) {
-        return false;
+        return { visible: false, inViewport: false };
       }
     }
     const rect = element.getBoundingClientRect();
-    return (
-      rect.width >= 4 &&
-      rect.height >= 4 &&
+    const visible = rect.width >= 4 && rect.height >= 4;
+    const inViewport =
+      visible &&
       rect.bottom > 0 &&
       rect.right > 0 &&
       rect.top < window.innerHeight &&
-      rect.left < window.innerWidth
-    );
+      rect.left < window.innerWidth;
+    return { visible, inViewport };
   };
-  const elementPath = (element: Element): number[] => {
-    const path: number[] = [];
+  const elementPath = (element: Element): Array<number | 'shadow'> => {
+    const path: Array<number | 'shadow'> = [];
     let current: Element | null = element;
     while (current && current !== document.documentElement) {
+      const parentNode: Node | null = current.parentNode;
+      if (parentNode instanceof ShadowRoot) {
+        // 元素在 open shadow root 内：记录 'shadow' 标记，继续从 host 向上。
+        path.unshift('shadow');
+        current = parentNode.host;
+        continue;
+      }
       const parent: Element | null = current.parentElement;
       if (!parent) return [];
       path.unshift(Array.from(parent.children).indexOf(current));
@@ -1218,75 +1601,122 @@ export function captureInteractivePage(
     return { risk: 'safe' };
   };
 
+  // 弹窗检测：打开的 dialog 或 aria-modal 容器内的控件优先返回，避免模型
+  // 拿到弹窗背后的旧页面元素后操作失效。
+  const modalRoots: Element[] = [];
+  for (const dialog of document.querySelectorAll('dialog[open]')) modalRoots.push(dialog);
+  for (const modal of document.querySelectorAll('[aria-modal="true"]')) {
+    if (!modalRoots.some((root) => root === modal)) modalRoots.push(modal);
+  }
+  const isInsideModal = (element: Element): boolean =>
+    modalRoots.some((root) => root.contains(element));
+
   const elements: PageInteractiveElementCandidate[] = [];
+  const outsideElements: PageInteractiveElementCandidate[] = [];
   let matched = 0;
-  const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
-  let node = walker.nextNode();
-  let scanned = 0;
-  while (node && scanned < 10_000) {
-    scanned += 1;
-    if (node instanceof Element) {
-      const role = roleOf(node);
-      const name = nameOf(node);
-      if (
-        isInteractive(node, role) &&
-        visibleInViewport(node) &&
-        (!query || `${role} ${name}`.toLowerCase().includes(query))
-      ) {
-        matched += 1;
-        if (elements.length < limit) {
-          const type =
-            node instanceof HTMLInputElement ? clipText(node.type.toLowerCase(), 30) : '';
-          const risk = riskOf(node, role, name);
-          let destinationOrigin: string | undefined;
-          if (node instanceof HTMLAnchorElement && node.href) {
-            try {
-              destinationOrigin = new URL(node.href).origin;
-            } catch {
-              destinationOrigin = undefined;
-            }
-          }
-          const candidate: PageInteractiveElementCandidate = {
-            path: elementPath(node),
-            tag: node.tagName.toLowerCase(),
-            role,
-            name,
-            type,
-            disabled:
-              ('disabled' in node && Boolean((node as HTMLInputElement).disabled)) ||
-              node.getAttribute('aria-disabled') === 'true',
-            risk: risk.risk,
-            ...(risk.reason ? { riskReason: risk.reason } : {}),
-            ...(destinationOrigin ? { destinationOrigin } : {}),
-          };
-          if (node instanceof HTMLInputElement) {
-            if (type === 'checkbox' || type === 'radio') candidate.checked = node.checked;
-            if (type !== 'password' && type !== 'file') candidate.hasValue = Boolean(node.value);
-          } else if (node instanceof HTMLTextAreaElement) {
-            candidate.hasValue = Boolean(node.value);
-          } else if (node instanceof HTMLSelectElement) {
-            candidate.selectedText = clipText(node.selectedOptions[0]?.textContent ?? '', 80);
-          } else if (
-            (node as HTMLElement).isContentEditable ||
-            ['', 'true', 'plaintext-only'].includes(
-              node.getAttribute('contenteditable') ?? 'missing',
-            )
-          ) {
-            candidate.hasValue = Boolean(node.textContent?.trim());
-          }
-          elements.push(candidate);
-        }
+  const buildCandidate = (
+    node: Element,
+    role: string,
+    name: string,
+    visibility: { visible: boolean; inViewport: boolean },
+  ): PageInteractiveElementCandidate => {
+    const type = node instanceof HTMLInputElement ? clipText(node.type.toLowerCase(), 30) : '';
+    const risk = riskOf(node, role, name);
+    let destinationOrigin: string | undefined;
+    if (node instanceof HTMLAnchorElement && node.href) {
+      try {
+        destinationOrigin = new URL(node.href).origin;
+      } catch {
+        destinationOrigin = undefined;
       }
     }
-    node = walker.nextNode();
+    const candidate: PageInteractiveElementCandidate = {
+      path: elementPath(node),
+      tag: node.tagName.toLowerCase(),
+      role,
+      name,
+      type,
+      disabled:
+        ('disabled' in node && Boolean((node as HTMLInputElement).disabled)) ||
+        node.getAttribute('aria-disabled') === 'true',
+      risk: risk.risk,
+      inViewport: visibility.inViewport,
+      ...(risk.reason ? { riskReason: risk.reason } : {}),
+      ...(destinationOrigin ? { destinationOrigin } : {}),
+    };
+    if (node instanceof HTMLInputElement) {
+      if (type === 'checkbox' || type === 'radio') candidate.checked = node.checked;
+      if (type !== 'password' && type !== 'file') candidate.hasValue = Boolean(node.value);
+    } else if (node instanceof HTMLTextAreaElement) {
+      candidate.hasValue = Boolean(node.value);
+    } else if (node instanceof HTMLSelectElement) {
+      candidate.selectedText = clipText(node.selectedOptions[0]?.textContent ?? '', 80);
+    } else if (
+      (node as HTMLElement).isContentEditable ||
+      ['', 'true', 'plaintext-only'].includes(node.getAttribute('contenteditable') ?? 'missing')
+    ) {
+      candidate.hasValue = Boolean(node.textContent?.trim());
+    }
+    return candidate;
+  };
+  // 显式栈遍历：TreeWalker 不穿透 shadow root，这里手动把 open shadow root 的
+  // 内容纳入观察（host 自身 → 普通子元素 → shadow 内容）。
+  const traversal: (Element | ShadowRoot)[] = [document.documentElement];
+  let scanned = 0;
+  while (traversal.length > 0 && scanned < 10_000) {
+    const container = traversal.pop()!;
+    const children = container.children;
+    for (let i = children.length - 1; i >= 0; i--) {
+      const child = children[i];
+      if (child) traversal.push(child);
+    }
+    if (!(container instanceof Element)) continue;
+    if (container.shadowRoot) traversal.push(container.shadowRoot);
+    scanned += 1;
+    const node: Element = container;
+    const role = roleOf(node);
+    const name = nameOf(node);
+    const visibility = visibilityOf(node);
+    if (
+      isInteractive(node, role) &&
+      visibility.visible &&
+      (scope === 'document' || visibility.inViewport) &&
+      (!roleQuery || role === roleQuery) &&
+      (!query || `${role} ${name}`.toLowerCase().includes(query))
+    ) {
+      matched += 1;
+      if (isInsideModal(node)) {
+        // 弹窗内元素优先占满 limit，避免被背后的旧页面元素挤掉。
+        if (elements.length < limit) {
+          elements.push(buildCandidate(node, role, name, visibility));
+        }
+      } else if (elements.length + outsideElements.length < limit) {
+        outsideElements.push(buildCandidate(node, role, name, visibility));
+      }
+    }
   }
+
+  // 弹窗内控件优先：合并后截断到 limit，确保弹窗内容不被背后的旧页面挤掉。
+  const allElements = [...elements, ...outsideElements];
+
+  // 歧义检测：query 命中多个难以区分的候选时标记 ambiguous，提示模型先细化目标。
+  // 判定：候选数 ≥ 3 且角色高度一致（如全是 button/link/textbox），
+  // 或候选数 ≥ 2 且可访问名称完全相同（如多个“删除”按钮）。
+  const roles = new Set(allElements.map((candidate) => candidate.role).filter(Boolean));
+  const names = new Set(
+    allElements.map((candidate) => candidate.name.toLowerCase()).filter(Boolean),
+  );
+  const ambiguous =
+    query !== '' &&
+    matched > 1 &&
+    ((matched >= AMBIGUOUS_MATCH_THRESHOLD && roles.size <= 1) || names.size <= 1);
 
   const root = document.documentElement;
   return {
     version: 1,
     executionUrl: window.location.href,
     title: clipText(document.title, 300),
-    elements,
+    elements: allElements,
     viewport: {
       scrollX: Math.round(window.scrollX),
       scrollY: Math.round(window.scrollY),
@@ -1295,17 +1725,22 @@ export function captureInteractivePage(
       documentWidth: Math.round(Math.max(root.scrollWidth, document.body?.scrollWidth ?? 0)),
       documentHeight: Math.round(Math.max(root.scrollHeight, document.body?.scrollHeight ?? 0)),
     },
-    truncated: matched > elements.length,
+    truncated: matched > allElements.length || traversal.length > 0,
+    ...(ambiguous ? { ambiguous: true } : {}),
+    ...(modalRoots.length > 0 ? { modalOpen: true } : {}),
   };
 }
 
 /** 自包含页面动作函数；执行前重新校验 path、角色、名称、可见性和风险。 */
 export function performPageInteraction(params: {
-  action: 'click' | 'fill' | 'select' | 'check' | 'scroll';
+  action: 'click' | 'fill' | 'clear' | 'focus' | 'keypress' | 'select' | 'check' | 'scroll';
   locator?: PageInteractiveElementCandidate;
   value?: string;
+  key?: string;
+  modifiers?: string[];
   checked?: boolean;
   deltaY?: number;
+  containerQuery?: string;
   approved: boolean;
   expectedUrl?: string;
 }): PageInteractionScriptResult {
@@ -1323,12 +1758,13 @@ export function performPageInteraction(params: {
     executionUrl: window.location.href,
     action: params.action,
     risk,
-    detail,
+    detail: recovered && ok ? `[已按名称/角色自动恢复过期定位] ${detail}` : detail,
     stateVerified,
     ...(error ? { error } : {}),
     ...(riskReason ? { riskReason } : {}),
     ...(verificationEvidence ? { verificationEvidence } : {}),
   });
+  let recovered = false;
   if (params.expectedUrl) {
     const keyOf = (value: string) => {
       try {
@@ -1348,8 +1784,10 @@ export function performPageInteraction(params: {
       );
     }
   }
-  if (params.action === 'scroll') {
-    const delta = Math.min(1_500, Math.max(-1_500, Math.round(params.deltaY ?? 600)));
+  const delta = Math.min(1_500, Math.max(-1_500, Math.round(params.deltaY ?? 600)));
+  const locator = params.locator;
+  const containerScroll = params.action === 'scroll' && Boolean(locator || params.containerQuery);
+  if (params.action === 'scroll' && !containerScroll) {
     const beforeScrollY = window.scrollY;
     window.scrollBy({ top: delta, left: 0, behavior: 'instant' });
     const changed = Math.abs(window.scrollY - beforeScrollY) >= 1;
@@ -1363,16 +1801,166 @@ export function performPageInteraction(params: {
       changed ? 'viewport_changed' : undefined,
     );
   }
-  const locator = params.locator;
   if (!locator || !Array.isArray(locator.path)) {
-    return result(false, 'safe', '缺少可信元素定位信息。', 'OBSERVATION_REQUIRED');
-  }
-  let element: Element = document.documentElement;
-  for (const index of locator.path) {
-    const child = element.children.item(index);
-    if (!child) {
-      return result(false, 'safe', '页面结构已经变化，元素路径失效。', 'STALE_ELEMENT_REFERENCE');
+    if (!params.containerQuery) {
+      return result(false, 'safe', '缺少可信元素定位信息。', 'OBSERVATION_REQUIRED');
     }
+    // 无 locator 的容器滚动：按 containerQuery 找第一个可见匹配元素，滚动其容器。
+    // 内联简化名称提取，避免依赖下方定义的 roleOf/nameOf（自包含脚本无模块级引用）。
+    const needle = params.containerQuery.replace(/\s+/gu, ' ').trim().toLowerCase();
+    const simplifiedNameOf = (target: Element): string => {
+      const clip = (value: string) =>
+        value.replaceAll('\u0000', '').replace(/\s+/gu, ' ').trim().slice(0, 160);
+      const labelledBy = (target.getAttribute('aria-labelledby') ?? '')
+        .split(/\s+/u)
+        .filter(Boolean)
+        .map((id) => document.getElementById(id)?.textContent ?? '')
+        .join(' ');
+      const aria = target.getAttribute('aria-label') ?? '';
+      let nativeLabel = '';
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement
+      ) {
+        nativeLabel = Array.from(target.labels ?? [])
+          .map((label) => label.textContent ?? '')
+          .join(' ');
+      }
+      const text = ['button', 'a', 'summary'].includes(target.tagName.toLowerCase())
+        ? ((target as HTMLElement).innerText ?? target.textContent ?? '')
+        : '';
+      return clip(
+        labelledBy ||
+          aria ||
+          nativeLabel ||
+          target.getAttribute('alt') ||
+          text ||
+          target.getAttribute('title') ||
+          target.getAttribute('placeholder') ||
+          target.getAttribute('name') ||
+          '',
+      );
+    };
+    const simplifiedRoleOf = (target: Element): string => {
+      const explicit = (target.getAttribute('role') ?? '').toLowerCase();
+      if (explicit) return explicit;
+      const tag = target.tagName.toLowerCase();
+      if (tag === 'a' && target.hasAttribute('href')) return 'link';
+      if (['button', 'select', 'textarea', 'summary'].includes(tag)) {
+        return tag === 'select' ? 'combobox' : tag === 'textarea' ? 'textbox' : 'button';
+      }
+      if (tag === 'input') {
+        const type = (target as HTMLInputElement).type.toLowerCase();
+        if (['button', 'submit', 'reset', 'image'].includes(type)) return 'button';
+        if (type === 'checkbox') return 'checkbox';
+        if (type === 'radio') return 'radio';
+        return 'textbox';
+      }
+      return '';
+    };
+    let matchedTarget: Element | null = null;
+    const traversal: (Element | ShadowRoot)[] = [document.documentElement];
+    while (traversal.length > 0 && !matchedTarget) {
+      const candidate = traversal.pop()!;
+      const candidateChildren = candidate.children;
+      for (let i = candidateChildren.length - 1; i >= 0; i--) {
+        const child = candidateChildren[i];
+        if (child) traversal.push(child);
+      }
+      if (!(candidate instanceof Element)) continue;
+      if (candidate.shadowRoot) traversal.push(candidate.shadowRoot);
+      const role = simplifiedRoleOf(candidate);
+      const name = simplifiedNameOf(candidate);
+      if (`${role} ${name}`.toLowerCase().includes(needle)) {
+        const candidateStyle = getComputedStyle(candidate);
+        const candidateRect = candidate.getBoundingClientRect();
+        let hidden = false;
+        for (let parent = candidate.parentElement; parent; parent = parent.parentElement) {
+          const parentStyle = getComputedStyle(parent);
+          if (
+            parentStyle.display === 'none' ||
+            parentStyle.visibility === 'hidden' ||
+            Number.parseFloat(parentStyle.opacity || '1') <= 0.05
+          ) {
+            hidden = true;
+            break;
+          }
+        }
+        if (
+          !hidden &&
+          candidateStyle.display !== 'none' &&
+          candidateStyle.visibility !== 'hidden' &&
+          candidateRect.width >= 4 &&
+          candidateRect.height >= 4
+        ) {
+          matchedTarget = candidate;
+        }
+      }
+    }
+    let scrolled = false;
+    if (matchedTarget) {
+      for (let parent = matchedTarget.parentElement; parent; parent = parent.parentElement) {
+        const parentStyle = getComputedStyle(parent);
+        const overflowY = parentStyle.overflowY;
+        if (
+          (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') &&
+          parent.scrollHeight > parent.clientHeight + 4 &&
+          parent !== document.body &&
+          parent !== document.documentElement
+        ) {
+          const before = parent.scrollTop;
+          parent.scrollBy({ top: delta, left: 0, behavior: 'instant' });
+          scrolled = Math.abs(parent.scrollTop - before) >= 1;
+          break;
+        }
+      }
+    }
+    if (!scrolled) {
+      const beforeScrollY = window.scrollY;
+      window.scrollBy({ top: delta, left: 0, behavior: 'instant' });
+      const changed = Math.abs(window.scrollY - beforeScrollY) >= 1;
+      return result(
+        true,
+        'safe',
+        matchedTarget
+          ? '未找到可滚动的匹配容器，已改为滚动页面。'
+          : '未找到匹配控件，已改为滚动页面。',
+        undefined,
+        undefined,
+        changed,
+        changed ? 'viewport_changed' : undefined,
+      );
+    }
+    return result(
+      true,
+      'safe',
+      `已滚动匹配控件所在的容器 ${delta}px。`,
+      undefined,
+      undefined,
+      true,
+      'container_scrolled',
+    );
+  }
+  // path 遍历：'shadow' 表示从 shadow host 进入其 open shadow root。
+  let container: Element | ShadowRoot = document.documentElement;
+  let element: Element = document.documentElement;
+  let pathBroken = false;
+  for (const index of locator.path) {
+    if (index === 'shadow') {
+      if (!(container instanceof Element) || !container.shadowRoot) {
+        pathBroken = true;
+        break;
+      }
+      container = container.shadowRoot;
+      continue;
+    }
+    const child = container.children.item(index);
+    if (!child) {
+      pathBroken = true;
+      break;
+    }
+    container = child;
     element = child;
   }
   const clipText = (value: string, max = 160) => {
@@ -1420,9 +2008,14 @@ export function performPageInteraction(params: {
         .map((label) => label.textContent ?? '')
         .join(' ');
     }
-    const text = ['button', 'a', 'summary'].includes(target.tagName.toLowerCase())
-      ? ((target as HTMLElement).innerText ?? target.textContent ?? '')
-      : '';
+    const textRole = (target.getAttribute('role') ?? '').trim().toLowerCase();
+    const text =
+      ['button', 'a', 'summary'].includes(target.tagName.toLowerCase()) ||
+      ['button', 'link', 'menuitem', 'tab', 'option', 'checkbox', 'radio', 'switch'].includes(
+        textRole,
+      )
+        ? ((target as HTMLElement).innerText ?? target.textContent ?? '')
+        : '';
     const fallback =
       target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
         ? target instanceof HTMLInputElement &&
@@ -1442,6 +2035,77 @@ export function performPageInteraction(params: {
         '',
     );
   };
+  // 过期引用恢复：path 失效（越界或偏移导致身份不匹配）后，按 locator 身份
+  // （tag+role+name）在 DOM 中重新定位。命中 0 个视为元素已消失；命中多个触发
+  // 歧义门禁，绝不猜测。
+  const pathIdentityMatches =
+    !pathBroken &&
+    element.tagName.toLowerCase() === locator.tag &&
+    roleOf(element) === locator.role &&
+    nameOf(element) === locator.name;
+  if (!pathIdentityMatches) {
+    const matches: Element[] = [];
+    // 恢复遍历同样穿透 open shadow root。
+    const traversal: (Element | ShadowRoot)[] = [document.documentElement];
+    while (traversal.length > 0 && matches.length <= 1) {
+      const candidate = traversal.pop()!;
+      const candidateChildren = candidate.children;
+      for (let i = candidateChildren.length - 1; i >= 0; i--) {
+        const child = candidateChildren[i];
+        if (child) traversal.push(child);
+      }
+      if (!(candidate instanceof Element)) continue;
+      if (candidate.shadowRoot) traversal.push(candidate.shadowRoot);
+      if (
+        candidate instanceof Element &&
+        candidate.tagName.toLowerCase() === locator.tag &&
+        roleOf(candidate) === locator.role &&
+        nameOf(candidate) === locator.name
+      ) {
+        const candidateStyle = getComputedStyle(candidate);
+        const candidateRect = candidate.getBoundingClientRect();
+        let hidden = false;
+        for (let parent = candidate.parentElement; parent; parent = parent.parentElement) {
+          const parentStyle = getComputedStyle(parent);
+          if (
+            parentStyle.display === 'none' ||
+            parentStyle.visibility === 'hidden' ||
+            Number.parseFloat(parentStyle.opacity || '1') <= 0.05
+          ) {
+            hidden = true;
+            break;
+          }
+        }
+        if (
+          !hidden &&
+          candidateStyle.display !== 'none' &&
+          candidateStyle.visibility !== 'hidden' &&
+          candidateRect.width >= 4 &&
+          candidateRect.height >= 4
+        ) {
+          matches.push(candidate);
+        }
+      }
+    }
+    if (matches.length === 0) {
+      return result(
+        false,
+        'safe',
+        '页面结构已经变化，且无法按名称/角色找回目标元素，请重新观察。',
+        'STALE_ELEMENT_REFERENCE',
+      );
+    }
+    if (matches.length > 1) {
+      return result(
+        false,
+        'safe',
+        `页面结构已经变化，按名称/角色找到 ${matches.length} 个相似元素，为安全起见不猜测目标，请重新观察或询问用户。`,
+        'AMBIGUOUS_TARGET',
+      );
+    }
+    element = matches[0] as Element;
+    recovered = true;
+  }
   const currentRole = roleOf(element);
   const currentName = nameOf(element);
   if (
@@ -1454,6 +2118,44 @@ export function performPageInteraction(params: {
       'safe',
       '元素身份已经变化，拒绝把旧引用用于新控件。',
       'STALE_ELEMENT_REFERENCE',
+    );
+  }
+  if (params.action === 'scroll') {
+    // 容器滚动：优先滚动目标元素最近的滚动容器；没有则回退页面滚动。
+    for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+      const parentStyle = getComputedStyle(parent);
+      const overflowY = parentStyle.overflowY;
+      if (
+        (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') &&
+        parent.scrollHeight > parent.clientHeight + 4 &&
+        parent !== document.body &&
+        parent !== document.documentElement
+      ) {
+        const before = parent.scrollTop;
+        parent.scrollBy({ top: delta, left: 0, behavior: 'instant' });
+        const changed = Math.abs(parent.scrollTop - before) >= 1;
+        return result(
+          true,
+          'safe',
+          `已滚动${currentName ? `“${currentName}”` : '目标控件'}所在容器 ${delta}px。`,
+          undefined,
+          undefined,
+          changed,
+          changed ? 'container_scrolled' : undefined,
+        );
+      }
+    }
+    const beforeScrollY = window.scrollY;
+    window.scrollBy({ top: delta, left: 0, behavior: 'instant' });
+    const changed = Math.abs(window.scrollY - beforeScrollY) >= 1;
+    return result(
+      true,
+      'safe',
+      `目标控件不在滚动容器内，已滚动页面 ${delta}px。`,
+      undefined,
+      undefined,
+      changed,
+      changed ? 'viewport_changed' : undefined,
     );
   }
   const style = getComputedStyle(element);
@@ -1568,6 +2270,136 @@ export function performPageInteraction(params: {
       matches ? 'input_value_matches' : undefined,
     );
   }
+  if (params.action === 'clear') {
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      const prototype =
+        element instanceof HTMLTextAreaElement
+          ? HTMLTextAreaElement.prototype
+          : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+      if (!setter)
+        return result(false, risk, '输入控件不支持安全清空。', 'ELEMENT_NOT_INTERACTABLE');
+      setter.call(element, '');
+    } else if (
+      (element as HTMLElement).isContentEditable ||
+      ['', 'true', 'plaintext-only'].includes(element.getAttribute('contenteditable') ?? 'missing')
+    ) {
+      element.textContent = '';
+    } else {
+      return result(false, risk, '目标不是可清空控件。', 'ELEMENT_NOT_INTERACTABLE');
+    }
+    element.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: '' }));
+    element.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    const cleared =
+      element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+        ? element.value === ''
+        : element.textContent === '';
+    return result(
+      true,
+      risk,
+      `已清空${currentName ? `“${currentName}”` : '输入控件'}。`,
+      undefined,
+      undefined,
+      cleared,
+      cleared ? 'input_value_cleared' : undefined,
+    );
+  }
+  if (params.action === 'focus') {
+    (element as HTMLElement).focus();
+    const focused = document.activeElement === element;
+    return result(
+      true,
+      risk,
+      `已聚焦${currentName ? `“${currentName}”` : '目标控件'}。`,
+      undefined,
+      undefined,
+      focused,
+      focused ? 'element_focused' : undefined,
+    );
+  }
+  if (params.action === 'keypress') {
+    const key = (params.key ?? '').slice(0, 40);
+    if (!key) {
+      return result(false, risk, '缺少要按下的键。', 'INVALID_PAGE_INTERACTION');
+    }
+    const modifiers = params.modifiers ?? [];
+    const modInit = () => ({
+      ctrlKey: modifiers.includes('ctrl'),
+      shiftKey: modifiers.includes('shift'),
+      altKey: modifiers.includes('alt'),
+      metaKey: modifiers.includes('meta'),
+    });
+    const keyCodeFor = (k: string): number => {
+      const named: Record<string, number> = {
+        Backspace: 8,
+        Tab: 9,
+        Enter: 13,
+        Shift: 16,
+        Control: 17,
+        Alt: 18,
+        Escape: 27,
+        Space: 32,
+        ArrowLeft: 37,
+        ArrowUp: 38,
+        ArrowRight: 39,
+        ArrowDown: 40,
+        Delete: 46,
+      };
+      if (k in named) return named[k]!;
+      if (k.length === 1) {
+        const c = k.charCodeAt(0);
+        if (c >= 0x61 && c <= 0x7a) return c - 32;
+        return c;
+      }
+      return 0;
+    };
+    const domCodeFor = (k: string): string => {
+      const named: Record<string, string> = {
+        Backspace: 'Backspace',
+        Tab: 'Tab',
+        Enter: 'Enter',
+        Shift: 'ShiftLeft',
+        Control: 'ControlLeft',
+        Alt: 'AltLeft',
+        Escape: 'Escape',
+        Space: 'Space',
+        ArrowLeft: 'ArrowLeft',
+        ArrowUp: 'ArrowUp',
+        ArrowRight: 'ArrowRight',
+        ArrowDown: 'ArrowDown',
+        Delete: 'Delete',
+      };
+      if (k in named) return named[k]!;
+      if (k.length === 1) return `Key${k.toUpperCase()}`;
+      return k;
+    };
+    const code = keyCodeFor(key);
+    const init: KeyboardEventInit = {
+      key,
+      code: domCodeFor(key),
+      keyCode: code,
+      which: code,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      ...modInit(),
+    };
+    (element as HTMLElement).focus();
+    element.dispatchEvent(new KeyboardEvent('keydown', init));
+    if (key.length === 1 || key === 'Enter') {
+      element.dispatchEvent(new KeyboardEvent('keypress', init));
+    }
+    element.dispatchEvent(new KeyboardEvent('keyup', init));
+    return result(
+      true,
+      risk,
+      `已按下${modifiers.length > 0 ? `${modifiers.join('+')}+` : ''}${key}。`,
+      undefined,
+      undefined,
+      true,
+      'keypress_dispatched',
+    );
+  }
   if (params.action === 'select') {
     if (!(element instanceof HTMLSelectElement)) {
       return result(false, risk, '目标不是原生下拉选择框。', 'ELEMENT_NOT_INTERACTABLE');
@@ -1628,7 +2460,7 @@ export function performPageInteraction(params: {
 
 /** 自包含延迟复核函数；只返回是否匹配，不把表单值带回后台或模型。 */
 export function verifyPageElementState(params: {
-  action: 'fill' | 'select' | 'check';
+  action: 'fill' | 'clear' | 'focus' | 'select' | 'check';
   locator: PageInteractiveElementCandidate;
   value?: string;
   checked?: boolean;
@@ -1660,13 +2492,109 @@ export function verifyPageElementState(params: {
   if (navigationKey(window.location.href) !== navigationKey(params.expectedUrl)) {
     return result(false, '复核时页面地址已经变化。', undefined, 'STALE_ELEMENT_REFERENCE');
   }
+  // path 遍历：'shadow' 表示从 shadow host 进入其 open shadow root。
+  let container: Element | ShadowRoot = document.documentElement;
   let element: Element = document.documentElement;
+  let pathBroken = false;
   for (const index of params.locator.path) {
-    const child = element.children.item(index);
-    if (!child) {
-      return result(false, '复核时元素路径已经失效。', undefined, 'STALE_ELEMENT_REFERENCE');
+    if (index === 'shadow') {
+      if (!(container instanceof Element) || !container.shadowRoot) {
+        pathBroken = true;
+        break;
+      }
+      container = container.shadowRoot;
+      continue;
     }
+    const child = container.children.item(index);
+    if (!child) {
+      pathBroken = true;
+      break;
+    }
+    container = child;
     element = child;
+  }
+  const pathResolved = !pathBroken && element.tagName.toLowerCase() === params.locator.tag;
+  if (!pathResolved) {
+    // 复核时的过期引用恢复：path 失效或偏移后，与动作脚本一致，按身份重新定位，多候选不猜测。
+    const simplifiedNameOf = (target: Element): string => {
+      const clip = (value: string) => {
+        const normalized = value.replaceAll('\u0000', '').replace(/\s+/gu, ' ').trim();
+        return normalized.length > 160 ? normalized.slice(0, 160) : normalized;
+      };
+      const labelledBy = (target.getAttribute('aria-labelledby') ?? '')
+        .split(/\s+/u)
+        .filter(Boolean)
+        .map((id) => document.getElementById(id)?.textContent ?? '')
+        .join(' ');
+      const aria = target.getAttribute('aria-label') ?? '';
+      let nativeLabel = '';
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement
+      ) {
+        nativeLabel = Array.from(target.labels ?? [])
+          .map((label) => label.textContent ?? '')
+          .join(' ');
+      }
+      const text = ['button', 'a', 'summary'].includes(target.tagName.toLowerCase())
+        ? ((target as HTMLElement).innerText ?? target.textContent ?? '')
+        : '';
+      const inputFallback =
+        target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
+          ? target instanceof HTMLInputElement &&
+            ['button', 'submit', 'reset'].includes(target.type.toLowerCase())
+            ? target.value
+            : target.placeholder
+          : '';
+      return clip(
+        labelledBy ||
+          aria ||
+          nativeLabel ||
+          target.getAttribute('alt') ||
+          text ||
+          target.getAttribute('title') ||
+          inputFallback ||
+          target.getAttribute('name') ||
+          '',
+      );
+    };
+    const matches: Element[] = [];
+    // 恢复遍历同样穿透 open shadow root。
+    const traversal: (Element | ShadowRoot)[] = [document.documentElement];
+    while (traversal.length > 0 && matches.length <= 1) {
+      const candidate = traversal.pop()!;
+      const candidateChildren = candidate.children;
+      for (let i = candidateChildren.length - 1; i >= 0; i--) {
+        const child = candidateChildren[i];
+        if (child) traversal.push(child);
+      }
+      if (!(candidate instanceof Element)) continue;
+      if (candidate.shadowRoot) traversal.push(candidate.shadowRoot);
+      if (
+        candidate.tagName.toLowerCase() === params.locator.tag &&
+        simplifiedNameOf(candidate) === params.locator.name
+      ) {
+        matches.push(candidate);
+      }
+    }
+    if (matches.length === 0) {
+      return result(
+        false,
+        '复核时元素路径已失效且无法按名称找回。',
+        undefined,
+        'STALE_ELEMENT_REFERENCE',
+      );
+    }
+    if (matches.length > 1) {
+      return result(
+        false,
+        '复核时元素路径已失效，且按名称找到多个相似元素，不猜测目标。',
+        undefined,
+        'AMBIGUOUS_TARGET',
+      );
+    }
+    element = matches[0] as Element;
   }
   if (element.tagName.toLowerCase() !== params.locator.tag) {
     return result(false, '复核时元素身份已经变化。', undefined, 'STALE_ELEMENT_REFERENCE');
@@ -1687,6 +2615,36 @@ export function verifyPageElementState(params: {
       : result(
           false,
           '输入控件没有保持目标值，可能被页面脚本回滚。',
+          undefined,
+          'VERIFICATION_FAILED',
+        );
+  }
+  if (params.action === 'clear') {
+    const actual =
+      element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+        ? element.value
+        : (element as HTMLElement).isContentEditable ||
+            ['', 'true', 'plaintext-only'].includes(
+              element.getAttribute('contenteditable') ?? 'missing',
+            )
+          ? (element.textContent ?? '')
+          : null;
+    return actual === ''
+      ? result(true, '输入控件在延迟复核后仍保持已清空状态。', 'input_value_cleared')
+      : result(
+          false,
+          '输入控件没有保持已清空状态，可能被页面脚本重新填充。',
+          undefined,
+          'VERIFICATION_FAILED',
+        );
+  }
+  if (params.action === 'focus') {
+    const focused = document.activeElement === element;
+    return focused
+      ? result(true, '目标控件在延迟复核后仍保持焦点。', 'element_focused')
+      : result(
+          false,
+          '目标控件没有保持焦点，可能被页面脚本或用户操作抢走。',
           undefined,
           'VERIFICATION_FAILED',
         );
@@ -1720,19 +2678,30 @@ function parseInteractionRequest(value: Record<string, unknown>): InteractionReq
   const rawValue =
     typeof value.value === 'string' ? value.value.replaceAll('\u0000', '') : undefined;
   if (rawValue && rawValue.length > MAX_VALUE_CHARS) return null;
+  const rawKey = normalizeInline(value.key, 40);
+  const rawModifiers = Array.isArray(value.modifiers)
+    ? value.modifiers
+        .filter((item): item is string => typeof item === 'string')
+        .filter((item) => ['ctrl', 'shift', 'alt', 'meta'].includes(item))
+        .slice(0, 4)
+    : undefined;
   const deltaY = boundedOptionalNumber(value.deltaY, -1_500, 1_500);
   if (value.action === 'scroll_until' && deltaY !== undefined && deltaY < 100) return null;
   const waitMs = boundedOptionalNumber(value.waitMs, 100, 5_000);
   const query = normalizeInline(value.query, MAX_QUERY_CHARS);
+  const containerQuery = normalizeInline(value.containerQuery, MAX_QUERY_CHARS);
   const maxSteps = boundedOptionalNumber(value.maxSteps, 1, MAX_SCROLL_UNTIL_STEPS);
   return {
     action: value.action,
     ...(observationId ? { observationId } : {}),
     ...(ref ? { ref } : {}),
     ...(rawValue !== undefined ? { value: rawValue } : {}),
+    ...(rawKey ? { key: rawKey } : {}),
+    ...(rawModifiers && rawModifiers.length > 0 ? { modifiers: rawModifiers } : {}),
     ...(typeof value.checked === 'boolean' ? { checked: value.checked } : {}),
     ...(deltaY !== undefined ? { deltaY } : {}),
     ...(query ? { query } : {}),
+    ...(containerQuery ? { containerQuery } : {}),
     ...(maxSteps !== undefined ? { maxSteps } : {}),
     ...(waitMs !== undefined ? { waitMs } : {}),
   };
@@ -1742,11 +2711,16 @@ function isPageAction(value: unknown): value is PageAction {
   return (
     value === 'click' ||
     value === 'fill' ||
+    value === 'clear' ||
+    value === 'focus' ||
+    value === 'keypress' ||
     value === 'select' ||
     value === 'check' ||
     value === 'scroll' ||
     value === 'scroll_until' ||
     value === 'wait' ||
+    value === 'wait_hidden' ||
+    value === 'wait_navigation' ||
     value === 'back' ||
     value === 'forward'
   );
@@ -1776,6 +2750,8 @@ function parseObservationResult(value: unknown): PageInteractionObservationResul
     ),
     viewport: value.viewport,
     truncated: value.truncated,
+    ...(value.ambiguous === true ? { ambiguous: true } : {}),
+    ...(value.modalOpen === true ? { modalOpen: true } : {}),
   };
 }
 
@@ -1802,17 +2778,45 @@ function parseCandidate(value: unknown): PageInteractiveElementCandidate | null 
     !isRecord(value) ||
     !Array.isArray(value.path) ||
     value.path.length > 64 ||
-    !value.path.every((item) => Number.isInteger(item) && Number(item) >= 0) ||
+    !value.path.every(
+      (item) => item === 'shadow' || (Number.isInteger(item) && Number(item) >= 0),
+    ) ||
     typeof value.tag !== 'string' ||
     typeof value.role !== 'string' ||
     typeof value.name !== 'string' ||
     typeof value.type !== 'string' ||
     typeof value.disabled !== 'boolean' ||
+    (value.inViewport !== undefined && typeof value.inViewport !== 'boolean') ||
+    (value.frameId !== undefined &&
+      (typeof value.frameId !== 'number' ||
+        !Number.isInteger(value.frameId) ||
+        value.frameId < 0)) ||
     !isRisk(value.risk)
   ) {
     return null;
   }
   return value as unknown as PageInteractiveElementCandidate;
+}
+
+function normalizeInspectRole(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const normalized = value.replaceAll('\u0000', '').replace(/\s+/gu, '').toLowerCase();
+  return [
+    'button',
+    'link',
+    'textbox',
+    'searchbox',
+    'combobox',
+    'checkbox',
+    'radio',
+    'switch',
+    'tab',
+    'menuitem',
+    'option',
+    'slider',
+  ].includes(normalized)
+    ? normalized
+    : '';
 }
 
 function isViewport(value: unknown): value is PageInteractionObservationResult['viewport'] {
@@ -1828,6 +2832,9 @@ function isElementScriptAction(value: unknown): value is PageInteractionScriptRe
   return (
     value === 'click' ||
     value === 'fill' ||
+    value === 'clear' ||
+    value === 'focus' ||
+    value === 'keypress' ||
     value === 'select' ||
     value === 'check' ||
     value === 'scroll'
@@ -1842,8 +2849,12 @@ function isVerificationEvidence(value: unknown): value is PageInteractionVerific
   return (
     value === 'click_dispatched' ||
     value === 'input_value_matches' ||
+    value === 'input_value_cleared' ||
     value === 'selected_option_matches' ||
     value === 'checked_state_matches' ||
+    value === 'element_focused' ||
+    value === 'keypress_dispatched' ||
+    value === 'container_scrolled' ||
     value === 'viewport_changed'
   );
 }
@@ -1968,6 +2979,75 @@ async function waitForSettledTab(
   return lastTab;
 }
 
+/**
+ * 条件等待：轮询页面观察结果，直到 query 匹配的可见控件出现（expectHidden=false）
+ * 或全部消失（expectHidden=true）。只做探测，不返回元素数据。
+ */
+async function waitForQueryCondition(
+  tabId: number,
+  query: string,
+  expectHidden: boolean,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const deadline = Date.now() + Math.max(100, Math.min(5_000, timeoutMs));
+  const needle = query.replaceAll('\u0000', '').replace(/\s+/gu, ' ').trim().toLowerCase();
+  while (Date.now() <= deadline) {
+    signal.throwIfAborted();
+    try {
+      const injected = await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        func: captureInteractivePage,
+        args: [MAX_LIMIT, needle, 'document'],
+      });
+      // 任一 frame（含 iframe 内）匹配即视为出现。
+      const matched = injected.some((item) => {
+        const parsed = parseObservationResult(item.result);
+        if (!parsed) return false;
+        return parsed.elements.some(
+          (element) =>
+            element.name.toLowerCase().includes(needle) ||
+            element.role.toLowerCase().includes(needle),
+        );
+      });
+      if (expectHidden ? !matched : matched) return true;
+    } catch {
+      // 页面暂时不可注入（导航中）：隐藏型等待视为继续轮询，出现型等待视为未出现
+      if (expectHidden) return false;
+    }
+    await abortableDelay(250, signal);
+  }
+  return false;
+}
+
+/**
+ * 等待页面导航：若标签页处于 loading 则等待 complete；若已 complete 则等待
+ * URL 发生变化。超时返回 false。
+ */
+async function waitForNavigation(
+  tabId: number,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const deadline = Date.now() + Math.max(100, Math.min(5_000, timeoutMs));
+  const initial = await chrome.tabs.get(tabId);
+  const initialUrl = initial.url ?? '';
+  let sawLoading = initial.status === 'loading';
+  while (Date.now() <= deadline) {
+    signal.throwIfAborted();
+    const tab = await chrome.tabs.get(tabId);
+    if (sawLoading) {
+      if (tab.status === 'complete') return true;
+    } else {
+      const url = tab.url ?? '';
+      if (url && url !== initialUrl) return true;
+    }
+    if (tab.status === 'loading') sawLoading = true;
+    await abortableDelay(150, signal);
+  }
+  return false;
+}
+
 async function captureFingerprint(
   tabId: number,
   signal: AbortSignal,
@@ -1988,6 +3068,80 @@ async function captureFingerprint(
 async function listWindowTabIds(windowId: number): Promise<Set<number>> {
   const tabs = await chrome.tabs.query({ windowId });
   return new Set(tabs.flatMap((tab) => (typeof tab.id === 'number' ? [tab.id] : [])));
+}
+
+// 统一验证入口：按动作的策略声明执行验证，返回统一证据与动作后的标签页。
+async function verifyActionExecution(
+  input: ActionVerificationInput,
+): Promise<ActionVerificationOutput> {
+  const plan = ACTION_VERIFICATION_PLANS[input.action] ?? { kind: 'script_evidence' };
+  if (plan.kind === 'page_effect') {
+    const effect = await waitForPageEffect(
+      input.snapshot,
+      input.beforeFingerprint ?? null,
+      input.beforeTabIds ?? new Set(),
+      input.signal,
+    );
+    let nextTab = effect.tab;
+    if (effect.openedTabs.length === 1 && effect.openedTabs[0]?.id !== undefined) {
+      const opened = await waitForSettledTab(effect.openedTabs[0].id, input.signal);
+      await chrome.tabs.update(opened.id as number, { active: true });
+      nextTab = opened;
+    }
+    return {
+      verified: effect.verified,
+      evidence: effect.evidence,
+      nextTab,
+      openedTabs: effect.openedTabs,
+    };
+  }
+  if (plan.kind === 'navigation') {
+    const navigated =
+      input.nextSnapshot !== undefined &&
+      navigationKey(input.nextSnapshot.url) !== navigationKey(input.snapshot.url);
+    const nextTab = await chrome.tabs.get(input.snapshot.tabId);
+    return {
+      verified: navigated,
+      evidence: navigated ? '页面地址已变化' : '没有观察到页面地址变化',
+      nextTab,
+      openedTabs: [],
+    };
+  }
+  const nextTab = await chrome.tabs.get(input.snapshot.tabId);
+  if (plan.kind === 'element_state') {
+    if (!input.element || !input.documentId) {
+      return { verified: false, evidence: '缺少可复核的元素定位信息。', nextTab, openedTabs: [] };
+    }
+    const state = await verifyElementStateWithRetry(
+      input.snapshot.tabId,
+      input.documentId,
+      {
+        action: input.action as 'fill' | 'clear' | 'focus' | 'select' | 'check',
+        locator: input.element,
+        value: input.value,
+        checked: input.checked,
+        expectedUrl: input.snapshot.url,
+      },
+      input.signal,
+      input.frameId ?? 0,
+      input.frameDocumentId,
+    );
+    return { verified: state.ok, evidence: state.detail, nextTab, openedTabs: [] };
+  }
+  // script_evidence（缺省策略）：事件已消费无法事后复核，以脚本分发的证据为准。
+  const stateVerified = input.execution?.script?.stateVerified === true;
+  const evidence = stateVerified
+    ? input.action === 'scroll'
+      ? '页面视口已变化'
+      : input.action === 'keypress'
+        ? `已向目标控件分发 ${input.key ?? '键盘事件'} 键盘事件`
+        : '脚本已确认动作状态'
+    : input.action === 'scroll'
+      ? '页面视口没有发生变化'
+      : input.action === 'keypress'
+        ? '键盘事件分发状态未知'
+        : '脚本未确认动作状态';
+  return { verified: stateVerified, evidence, nextTab, openedTabs: [] };
 }
 
 async function waitForPageEffect(
@@ -2063,16 +3217,31 @@ async function verifyElementStateWithRetry(
   documentId: string,
   params: Parameters<typeof verifyPageElementState>[0],
   signal: AbortSignal,
+  frameId = 0,
+  frameDocumentId?: string,
 ): Promise<PageElementVerificationResult> {
   let lastResult: PageElementVerificationResult | null = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     await abortableDelay(attempt === 0 ? 250 : 500, signal);
     try {
       const injected = await chrome.scripting.executeScript({
-        target: { tabId, documentIds: [documentId] },
+        target: frameId > 0 ? { tabId, frameIds: [frameId] } : { tabId, documentIds: [documentId] },
         func: verifyPageElementState,
         args: [params],
       });
+      if (frameId > 0) {
+        const executedDocumentId = normalizeInline(injected[0]?.documentId, 128);
+        if (frameDocumentId && executedDocumentId !== frameDocumentId) {
+          return {
+            version: 1,
+            ok: false,
+            executionUrl: params.expectedUrl,
+            action: params.action,
+            detail: '复核时元素所在的内嵌页面已经刷新或被替换。',
+            error: 'STALE_ELEMENT_REFERENCE',
+          };
+        }
+      }
       lastResult = parseElementVerificationResult(injected[0]?.result);
     } catch {
       return {
@@ -2106,7 +3275,11 @@ function parseElementVerificationResult(value: unknown): PageElementVerification
     value.version !== 1 ||
     typeof value.ok !== 'boolean' ||
     typeof value.executionUrl !== 'string' ||
-    (value.action !== 'fill' && value.action !== 'select' && value.action !== 'check') ||
+    (value.action !== 'fill' &&
+      value.action !== 'clear' &&
+      value.action !== 'focus' &&
+      value.action !== 'select' &&
+      value.action !== 'check') ||
     typeof value.detail !== 'string' ||
     (value.evidence !== undefined && !isVerificationEvidence(value.evidence))
   ) {
@@ -2272,6 +3445,12 @@ function actionLabel(action: PageAction): string {
       return '点击页面控件';
     case 'fill':
       return '填写页面控件';
+    case 'clear':
+      return '清空页面控件';
+    case 'focus':
+      return '聚焦页面控件';
+    case 'keypress':
+      return '按下键盘按键';
     case 'select':
       return '选择页面选项';
     case 'check':
@@ -2282,6 +3461,10 @@ function actionLabel(action: PageAction): string {
       return '自动滚动页面';
     case 'wait':
       return '等待页面更新';
+    case 'wait_hidden':
+      return '等待控件消失';
+    case 'wait_navigation':
+      return '等待页面导航';
     case 'back':
       return '返回上一页';
     case 'forward':

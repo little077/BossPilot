@@ -3,6 +3,7 @@
 // 分析指引 + 任务概览 + 异常高亮 + 步骤时间线 + LLM 调用明细（含提示词/输出原文）
 // + 步骤详情附录（DOM outline 等超长内容）。数据在入库时已脱敏。
 
+import type { ToolCallLedgerEntry } from '@/lib/agent/tool-ledger';
 import type { DiagnosticPageStructureSnapshot } from '@/lib/domain/types';
 import { redact } from './redaction';
 import type { DiagnosticLlmCall, DiagnosticRun, DiagnosticStep } from './types';
@@ -11,6 +12,18 @@ const STATUS_LABEL: Record<DiagnosticRun['status'], string> = {
   completed: '✅ 完成',
   error: '❌ 出错',
   cancelled: '⏹️ 已取消',
+};
+
+const RISK_LABEL: Record<ToolCallLedgerEntry['risk'], string> = {
+  safe: '低',
+  confirm: '需确认',
+  blocked: '禁用',
+};
+
+const DECISION_LABEL: Record<ToolCallLedgerEntry['decision'], string> = {
+  allow: '放行',
+  confirm: '确认',
+  deny: '拒绝',
 };
 
 const SOURCE_LABEL: Record<DiagnosticRun['source'], string> = {
@@ -305,10 +318,37 @@ function renderPageStructure(snapshot: DiagnosticPageStructureSnapshot): string 
   return lines.join('\n');
 }
 
+function renderToolCalls(toolCalls: ToolCallLedgerEntry[]): string {
+  const lines = ['## 工具调用台账', ''];
+  if (toolCalls.length === 0) {
+    lines.push('_暂无工具调用记录。_');
+    return lines.join('\n');
+  }
+  lines.push('> 每次模型请求工具的决策链：策略放行/确认/拒绝、是否获用户批准、耗时与结果。');
+  lines.push('');
+  lines.push('| 时刻 | 会话 | 工具 | 风险 | 决策 | 批准 | 结果 | 耗时 | 参数摘要 |');
+  lines.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- |');
+  for (const call of toolCalls) {
+    const params = (call.paramsSummary ?? '')
+      .replace(/\n/g, ' ')
+      .replace(/\|/g, '\\|')
+      .slice(0, 80);
+    const statusText = (call.statusText ?? '').replace(/\|/g, '\\|');
+    lines.push(
+      `| ${fmtTime(call.createdAt)} | \`${call.conversationId.slice(0, 8)}…\` | \`${call.name}\` | ` +
+        `${RISK_LABEL[call.risk]} | ${DECISION_LABEL[call.decision]} | ${call.approved ? '✅' : '—'} | ` +
+        `${call.isError ? '❌' : '✅'} ${statusText} | ${call.costMs != null ? `${call.costMs}ms` : '—'} | ${params || '—'} |`,
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
 /** 生成完整诊断报告 Markdown；即使没有运行记录，也可以只导出当前页面结构。 */
 export function buildDiagnosticsReport(
   runs: DiagnosticRun[],
   pageStructure?: DiagnosticPageStructureSnapshot,
+  toolCalls?: ToolCallLedgerEntry[],
 ): string {
   const head: string[] = [];
   head.push('# BossPilot 执行日志');
@@ -338,11 +378,15 @@ export function buildDiagnosticsReport(
 
   if (runs.length === 0) {
     head.push('_本次没有执行记录，已仅导出当前页面结构诊断。_');
+    if (toolCalls) {
+      return `${head.join('\n')}\n${renderToolCalls(toolCalls)}`;
+    }
     return head.join('\n');
   }
 
   const body = runs.map((r, i) => renderRun(r, i)).join('\n---\n\n');
-  return `${head.join('\n')}\n${body}`;
+  const ledger = toolCalls ? `\n${renderToolCalls(toolCalls)}` : '';
+  return `${head.join('\n')}\n${body}${ledger}`;
 }
 
 /** 诊断日志文件名：bosspilot-diag-YYYYMMDD-HHmmss.md */
