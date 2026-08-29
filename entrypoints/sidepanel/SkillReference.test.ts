@@ -53,6 +53,20 @@ describe('SkillReference', () => {
     expect(editor.getText()).toBe('用 xhs-note-scout 技能：');
   });
 
+  it('defaults attributes to empty strings when HTML lacks them', () => {
+    editor = new Editor({ extensions: [StarterKit, SkillReference] });
+
+    editor.commands.setContent('<p><span data-type="skill-reference">/</span></p>');
+
+    expect(editor.getJSON()).toMatchObject({
+      content: [
+        {
+          content: [{ type: 'skillReference', attrs: { name: '', description: '' } }],
+        },
+      ],
+    });
+  });
+
   it('persists description attribute when provided', () => {
     editor = new Editor({ extensions: [StarterKit, SkillReference] });
 

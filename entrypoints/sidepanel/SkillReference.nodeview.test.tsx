@@ -91,6 +91,24 @@ describe('SkillReference NodeView', () => {
     expect(tooltip).toHaveClass('whitespace-normal', 'text-left');
   });
 
+  it('description 为空时不包 Tooltip，直接渲染 chip', () => {
+    const chain = {
+      focus: vi.fn().mockReturnThis(),
+      deleteRange: vi.fn().mockReturnThis(),
+      run: vi.fn(),
+    };
+    const editor = { chain: vi.fn(() => chain) } as unknown as Editor;
+    // attrs 缺省（undefined）：name/description 兜底为空串，无描述时不渲染 Tooltip
+    const node = { attrs: {}, nodeSize: 3 } as never;
+    render(
+      <TooltipProvider delayDuration={0}>
+        <SkillReferenceView {...({ node, editor, getPos: () => 0 } as unknown as NodeViewProps)} />
+      </TooltipProvider>,
+    );
+    expect(document.querySelector('[data-type="skill-reference"]')).not.toBeNull();
+    expect(screen.queryByRole('tooltip')).toBeNull();
+  });
+
   it('getPos 异常（undefined）时不执行删除', () => {
     const chain = {
       focus: vi.fn().mockReturnThis(),

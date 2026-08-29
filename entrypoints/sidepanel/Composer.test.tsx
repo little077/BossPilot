@@ -4,6 +4,7 @@ import { createRef } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SkillCatalogEntry } from '@/lib/skills/types';
 import { Composer, type ComposerHandle } from './Composer';
+import { TooltipProvider } from './ui/Tooltip';
 
 const SKILLS: SkillCatalogEntry[] = [
   {
@@ -50,7 +51,11 @@ beforeEach(() => {
 
 describe('Composer 技能引用', () => {
   it('已有输入时选择技能：内容保留，技能节点插入光标处', async () => {
-    render(<Composer onSend={vi.fn().mockResolvedValue(true)} />);
+    render(
+      <TooltipProvider>
+        <Composer onSend={vi.fn().mockResolvedValue(true)} />
+      </TooltipProvider>,
+    );
     const editor = await screen.findByRole('textbox');
     // 等待技能列表加载完成（斜杠检测依赖 slashSkillsRef 已填充）
     await waitFor(() => expect(sendSkillCommandMock).toHaveBeenCalled());
@@ -69,7 +74,11 @@ describe('Composer 技能引用', () => {
 
   it('斜杠触发选择技能：斜杠词被替换为节点，不残留游离文本', async () => {
     const ref = createRef<ComposerHandle>();
-    render(<Composer ref={ref} onSend={vi.fn().mockResolvedValue(true)} />);
+    render(
+      <TooltipProvider>
+        <Composer ref={ref} onSend={vi.fn().mockResolvedValue(true)} />
+      </TooltipProvider>,
+    );
     const editor = await screen.findByRole('textbox');
     await waitFor(() => expect(sendSkillCommandMock).toHaveBeenCalled());
     // 全量测试负载下 userEvent.type 逐字符输入会丢事件（编辑器只能收到部分字符），
