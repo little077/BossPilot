@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PageTurnSnapshot } from '@/lib/domain/types';
-import { executeTab, TAB_TOOL } from './tab';
+import { executeTab, TAB_TOOL, tabExecutionMode } from './tab';
 
 const SNAPSHOT: PageTurnSnapshot = {
   tabId: 7,
@@ -22,9 +22,26 @@ const create = vi.fn();
 const reload = vi.fn();
 const remove = vi.fn();
 const updateWindow = vi.fn();
+const executeScript = vi.fn();
 
 function call(argumentsValue: Record<string, unknown>) {
   return { id: 'call-1', name: 'tab', arguments: argumentsValue };
+}
+
+function deferred<T>() {
+  let resolve: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error('condition was not met');
 }
 
 beforeEach(() => {
@@ -71,9 +88,11 @@ beforeEach(() => {
   reload.mockReset().mockResolvedValue(undefined);
   remove.mockReset().mockResolvedValue(undefined);
   updateWindow.mockReset().mockResolvedValue({});
+  executeScript.mockReset().mockResolvedValue([{ result: [] }]);
   vi.stubGlobal('chrome', {
     tabs: { query, get, update, create, reload, remove },
     windows: { update: updateWindow },
+    scripting: { executeScript },
   });
 });
 
@@ -93,8 +112,19 @@ describe('tab tool', () => {
 
     expect(result).toMatchObject({ isError: false, statusText: '已列出当前窗口标签页' });
     expect(result.content).toContain('"tabId":7');
+    expect(result.content).toContain('"loadStatus":"complete"');
+    expect(result.pageSnapshots).toEqual([expect.objectContaining({ tabId: 7 })]);
     expect(result.content).not.toContain('chrome://settings');
     expect(query).toHaveBeenCalledWith({ windowId: 3 });
+  });
+
+  it('only marks forced new-tab opens as parallel-safe', () => {
+    expect(tabExecutionMode(call({ action: 'open', destination: 'baidu', mode: 'new' }))).toBe(
+      'parallel',
+    );
+    expect(tabExecutionMode(call({ action: 'open', destination: 'baidu' }))).toBe('serial');
+    expect(tabExecutionMode(call({ action: 'list' }))).toBe('serial');
+    expect(tabExecutionMode(call({ action: 'switch', tabId: 7 }))).toBe('serial');
   });
 
   it('forces a new tab for a known destination and waits for readiness', async () => {
@@ -119,6 +149,56 @@ describe('tab tool', () => {
       windowId: 3,
     });
     expect(result).toMatchObject({ isError: false, nextPageSnapshot: { tabId: 9 } });
+  });
+
+  it('releases the focus lock before waiting so independent tabs load concurrently', async () => {
+    const firstReady = deferred<chrome.tabs.Tab>();
+    const secondReady = deferred<chrome.tabs.Tab>();
+    create
+      .mockResolvedValueOnce({ id: 9, windowId: 3, url: 'https://www.baidu.com/' })
+      .mockResolvedValueOnce({ id: 10, windowId: 3, url: 'https://www.bing.com/' });
+    get.mockImplementation((tabId: number) =>
+      tabId === 9 ? firstReady.promise : secondReady.promise,
+    );
+
+    const first = executeTab(
+      call({ action: 'open', destination: 'baidu', mode: 'new' }),
+      SNAPSHOT,
+      '',
+      new AbortController().signal,
+    );
+    const second = executeTab(
+      call({ action: 'open', destination: 'bing', mode: 'new' }),
+      SNAPSHOT,
+      '',
+      new AbortController().signal,
+    );
+
+    await waitFor(() => create.mock.calls.length === 2 && get.mock.calls.length === 2);
+    expect(create).toHaveBeenCalledTimes(2);
+    firstReady.resolve({
+      id: 9,
+      windowId: 3,
+      status: 'complete',
+      url: 'https://www.baidu.com/',
+    } as chrome.tabs.Tab);
+    secondReady.resolve({
+      id: 10,
+      windowId: 3,
+      status: 'complete',
+      url: 'https://www.bing.com/',
+    } as chrome.tabs.Tab);
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.objectContaining({
+        isError: false,
+        nextPageSnapshot: expect.objectContaining({ tabId: 9 }),
+      }),
+      expect.objectContaining({
+        isError: false,
+        nextPageSnapshot: expect.objectContaining({ tabId: 10 }),
+      }),
+    ]);
   });
 
   it('reports a newly created tab without an ID and tolerates focus rejection', async () => {
@@ -157,6 +237,72 @@ describe('tab tool', () => {
     await expect(
       executeTab(call({ action: 'switch', tabId: 12 }), SNAPSHOT, '', new AbortController().signal),
     ).resolves.toMatchObject({ isError: true, errorCode: 'TAB_NOT_FOUND' });
+  });
+
+  it('opens a URL that really exists in the current page links', async () => {
+    // 页面注入采集：详情链接真实存在于当前页（小红书式 SPA 详情 URL）
+    executeScript.mockResolvedValue([
+      { result: ['https://start.example/page', 'https://detail.example/note/5?xsec_token=t'] },
+    ]);
+    query.mockResolvedValueOnce([]);
+    create.mockResolvedValueOnce({
+      id: 9,
+      windowId: 3,
+      active: true,
+      status: 'complete',
+      title: '笔记详情',
+      url: 'https://detail.example/note/5?xsec_token=t',
+    });
+    get.mockResolvedValueOnce({
+      id: 9,
+      windowId: 3,
+      active: true,
+      status: 'complete',
+      title: '笔记详情',
+      url: 'https://detail.example/note/5?xsec_token=t',
+    });
+
+    const result = await executeTab(
+      call({ action: 'open', url: 'https://detail.example/note/5?xsec_token=t' }),
+      SNAPSHOT,
+      '',
+      new AbortController().signal,
+    );
+    expect(executeScript).toHaveBeenCalledWith({
+      target: { tabId: 7 },
+      func: expect.any(Function),
+    });
+    expect(create).toHaveBeenCalledWith({
+      url: 'https://detail.example/note/5?xsec_token=t',
+      active: true,
+      windowId: 3,
+    });
+    expect(result).toMatchObject({ isError: false, statusText: '已打开新标签页' });
+  });
+
+  it('still rejects a URL that is not present in the current page', async () => {
+    executeScript.mockResolvedValue([{ result: ['https://start.example/page'] }]);
+    await expect(
+      executeTab(
+        call({ action: 'open', url: 'https://detail.example/note/5' }),
+        SNAPSHOT,
+        '',
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ isError: true, errorCode: 'UNGROUNDED_URL' });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('keeps the grounded-URL failure when the page cannot be injected', async () => {
+    executeScript.mockRejectedValue(new Error('Cannot access contents of the page'));
+    await expect(
+      executeTab(
+        call({ action: 'open', url: 'https://detail.example/note/5' }),
+        SNAPSHOT,
+        '',
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ isError: true, errorCode: 'UNGROUNDED_URL' });
   });
 
   it('reloads a current tab and refuses pinned or last-tab closes', async () => {
@@ -339,5 +485,95 @@ describe('tab tool', () => {
     );
     expect(result).toMatchObject({ isError: false, statusText: '已关闭标签页' });
     expect(result).not.toHaveProperty('nextPageSnapshot');
+  });
+
+  it('open returns success with loading status instead of waiting 12s for a slow SPA', async () => {
+    vi.useFakeTimers();
+    query.mockResolvedValueOnce([]);
+    create.mockResolvedValueOnce({
+      id: 99,
+      windowId: 3,
+      active: true,
+      status: 'loading',
+      title: '小红书',
+      url: 'https://www.xiaohongshu.com/search_result?keyword=vibe',
+    });
+    get.mockReset().mockResolvedValue({
+      id: 99,
+      windowId: 3,
+      active: true,
+      status: 'loading',
+      title: '小红书',
+      url: 'https://www.xiaohongshu.com/search_result?keyword=vibe',
+    });
+    const pending = executeTab(
+      call({
+        action: 'open',
+        mode: 'new',
+        url: 'https://www.xiaohongshu.com/search_result?keyword=vibe',
+      }),
+      SNAPSHOT,
+      'https://www.xiaohongshu.com/search_result?keyword=vibe',
+      new AbortController().signal,
+    );
+    const pendingAssertion = expect(pending).resolves.toMatchObject({
+      isError: false,
+      statusText: expect.stringContaining('页面仍在加载'),
+      detail: expect.stringContaining('read_current_page'),
+    });
+    await vi.advanceTimersByTimeAsync(3_000);
+    await pendingAssertion;
+  });
+
+  it('warns after repeatedly opening the same URL within a short window', async () => {
+    const url = 'https://reopen.example/target';
+    const open = () =>
+      executeTab(
+        call({ action: 'open', mode: 'new', url }),
+        SNAPSHOT,
+        url,
+        new AbortController().signal,
+      );
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      query.mockReset().mockResolvedValueOnce([]);
+      create.mockReset().mockResolvedValueOnce({
+        id: 100 + attempt,
+        windowId: 3,
+        active: true,
+        status: 'complete',
+        title: 'Target',
+        url,
+      });
+      get.mockReset().mockResolvedValueOnce({
+        id: 100 + attempt,
+        windowId: 3,
+        active: true,
+        status: 'complete',
+        title: 'Target',
+        url,
+      });
+      await open();
+    }
+    query.mockReset().mockResolvedValueOnce([]);
+    create.mockReset().mockResolvedValueOnce({
+      id: 103,
+      windowId: 3,
+      active: true,
+      status: 'complete',
+      title: 'Target',
+      url,
+    });
+    get.mockReset().mockResolvedValueOnce({
+      id: 103,
+      windowId: 3,
+      active: true,
+      status: 'complete',
+      title: 'Target',
+      url,
+    });
+    const third = await open();
+    expect(third.isError).toBe(false);
+    expect(third.detail).toContain('已打开 3 次');
+    expect(third.detail).toContain('ask_user');
   });
 });

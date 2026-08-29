@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChatMessage } from '@/lib/domain/chat';
 import { ChatFlowStatus } from './ChatFlowStatus';
@@ -183,8 +183,7 @@ describe('ChatFlowStatus', () => {
     expect(screen.queryByText('询问用户')).not.toBeInTheDocument();
   });
 
-  it('shows an exact-origin permission card and forwards the user decision', async () => {
-    const resolvePermission = vi.fn().mockResolvedValue(true);
+  it('等待权限时只显示状态提示，确认面板在底部渲染', () => {
     render(
       <ChatFlowStatus
         message={{
@@ -201,80 +200,14 @@ describe('ChatFlowStatus', () => {
             permissionPattern: 'https://example.com/*',
           },
         }}
-        onResolvePagePermission={resolvePermission}
       />,
     );
 
-    expect(screen.getByRole('region', { name: '页面读取权限' })).toHaveTextContent(
-      'https://example.com',
-    );
-    fireEvent.click(screen.getByRole('button', { name: '允许读取' }));
-    await waitFor(() =>
-      expect(resolvePermission).toHaveBeenCalledWith('request-1', 'https://example.com/*', true),
-    );
-  });
-
-  it('shows a retryable connection error when a permission decision cannot be sent', async () => {
-    const resolvePermission = vi.fn().mockResolvedValue(false);
-    render(
-      <ChatFlowStatus
-        message={{
-          ...BASE_MESSAGE,
-          toolActivity: {
-            requestId: 'request-1',
-            callId: 'call-1',
-            name: 'read_current_page',
-            label: '读取当前页面',
-            status: 'waiting_permission',
-            statusText: '等待网站读取权限',
-            startedAt: 1_000,
-            permissionPattern: 'https://example.com/*',
-          },
-        }}
-        onResolvePagePermission={resolvePermission}
-      />,
-    );
-
-    expect(screen.getByText('当前网站')).toBeVisible();
-    fireEvent.click(screen.getByRole('button', { name: '不允许' }));
-    expect(await screen.findByText('侧边栏连接不可用，请稍后重试。')).toBeVisible();
-    expect(resolvePermission).toHaveBeenCalledWith('request-1', 'https://example.com/*', false);
-  });
-
-  it('distinguishes an interaction grant from a read-only page grant', async () => {
-    const resolvePermission = vi.fn().mockResolvedValue(true);
-    render(
-      <ChatFlowStatus
-        message={{
-          ...BASE_MESSAGE,
-          toolActivity: {
-            requestId: 'request-action',
-            callId: 'call-action',
-            name: 'browser_action',
-            label: '操作浏览器',
-            status: 'waiting_permission',
-            statusText: '等待网站操作权限',
-            startedAt: 1_000,
-            sourceOrigin: 'https://www.baidu.com',
-            permissionPattern: 'https://www.baidu.com/*',
-            permissionKind: 'interact',
-          },
-        }}
-        onResolvePagePermission={resolvePermission}
-      />,
-    );
-
-    expect(screen.getByRole('region', { name: '页面操作权限' })).toHaveTextContent(
-      '观察并操作这个网站当前页的可见控件',
-    );
-    fireEvent.click(screen.getByRole('button', { name: '允许操作' }));
-    await waitFor(() =>
-      expect(resolvePermission).toHaveBeenCalledWith(
-        'request-action',
-        'https://www.baidu.com/*',
-        true,
-      ),
-    );
+    expect(screen.getByText('读取当前页面')).toBeVisible();
+    expect(screen.getByText(/等待网站读取权限/)).toBeVisible();
+    expect(screen.getByText(/底部确认面板/)).toBeVisible();
+    // 确认按钮不再嵌入消息流，避免被上方历史消息淹没
+    expect(screen.queryByRole('button', { name: /允许读取/ })).not.toBeInTheDocument();
   });
 
   it('shows the successful page source without exposing page text', () => {

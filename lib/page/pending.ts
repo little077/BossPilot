@@ -210,7 +210,11 @@ function isSnapshot(value: unknown): value is PageTurnSnapshot {
 function isDeferred(value: unknown): value is DeferredGenerationTurn {
   return (
     isRecord(value) &&
-    (value.version === 1 || value.version === 2 || value.version === 3 || value.version === 4) &&
+    (value.version === 1 ||
+      value.version === 2 ||
+      value.version === 3 ||
+      value.version === 4 ||
+      value.version === 5) &&
     isShortString(value.requestId) &&
     isRecord(value.message) &&
     isRecord(value.toolCall) &&
@@ -283,6 +287,27 @@ function cloneDeferred(value: DeferredGenerationTurn): DeferredGenerationTurn {
     ...(value.toolCallSignatures ? { toolCallSignatures: [...value.toolCallSignatures] } : {}),
     ...(value.toolAttemptSignatures
       ? { toolAttemptSignatures: [...value.toolAttemptSignatures] }
+      : {}),
+    ...(value.toolCalls
+      ? {
+          toolCalls: value.toolCalls.map((call) => ({
+            ...call,
+            arguments: { ...call.arguments },
+          })),
+        }
+      : {}),
+    ...(value.completedToolExecutions
+      ? {
+          completedToolExecutions: value.completedToolExecutions.map((execution) => ({
+            ...execution,
+            ...(execution.nextPageSnapshot
+              ? { nextPageSnapshot: { ...execution.nextPageSnapshot } }
+              : {}),
+            ...(execution.pageSnapshots
+              ? { pageSnapshots: execution.pageSnapshots.map((item) => ({ ...item })) }
+              : {}),
+          })),
+        }
       : {}),
   };
 }

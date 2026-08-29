@@ -152,6 +152,45 @@ describe('pending page permission turns', () => {
     });
   });
 
+  it('restores version 5 deferred turns with a persisted tool batch', async () => {
+    const pending = createPendingAgentTurn(
+      {
+        ...DEFERRED,
+        version: 5,
+        systemPrompt: 'context snapshot',
+        toolCalls: [
+          { id: 'call-1', name: 'read_current_page', arguments: {} },
+          { id: 'call-2', name: 'inspect_page', arguments: { scope: 'viewport' } },
+        ],
+        toolCallIndex: 1,
+        completedToolExecutions: [
+          {
+            isError: false,
+            statusText: '读取完成',
+            detail: '正文',
+            content: '页面正文',
+          },
+        ],
+      },
+      null,
+      HISTORY,
+      'user_input',
+      1_000,
+    );
+    await savePendingPageTurn(pending);
+    await expect(loadPendingPageTurn(2_000)).resolves.toMatchObject({
+      generation: {
+        version: 5,
+        toolCallIndex: 1,
+        toolCalls: [
+          { id: 'call-1', name: 'read_current_page', arguments: {} },
+          { id: 'call-2', name: 'inspect_page', arguments: { scope: 'viewport' } },
+        ],
+        completedToolExecutions: [{ isError: false, statusText: '读取完成', content: '页面正文' }],
+      },
+    });
+  });
+
   it('defensively clones all optional generation snapshots before persistence', () => {
     const enriched: DeferredGenerationTurn = {
       ...DEFERRED,
@@ -231,6 +270,19 @@ describe('pending page permission turns', () => {
       ],
       toolCallSignatures: ['read_current_page:{}'],
       toolAttemptSignatures: ['attempt-1'],
+      toolCalls: [
+        { id: 'call-1', name: 'read_current_page', arguments: {} },
+        { id: 'call-2', name: 'inspect_page', arguments: { scope: 'viewport' } },
+      ],
+      toolCallIndex: 1,
+      completedToolExecutions: [
+        {
+          isError: false,
+          statusText: '读取完成',
+          content: '页面正文',
+          nextPageSnapshot: SNAPSHOT,
+        },
+      ],
     };
     const pending = createPendingPageTurn(enriched, SNAPSHOT, HISTORY);
     if (enriched.message.modelIdentity) enriched.message.modelIdentity.modelId = 'mutated';
@@ -241,6 +293,11 @@ describe('pending page permission turns', () => {
     enriched.loopMessages?.splice(0);
     enriched.toolCallSignatures?.push('mutated');
     enriched.toolAttemptSignatures?.push('mutated');
+    enriched.toolCalls?.splice(0);
+    enriched.toolCallIndex = 99;
+    if (enriched.completedToolExecutions) {
+      enriched.completedToolExecutions.splice(0);
+    }
     expect(pending.generation.message.modelIdentity?.modelId).toBe('gpt-test');
     expect(pending.generation.toolCall.arguments).toEqual({});
     expect(pending.generation.usage).toEqual(enriched.usage);
@@ -250,6 +307,19 @@ describe('pending page permission turns', () => {
     expect(pending.generation.loopMessages).toHaveLength(3);
     expect(pending.generation.toolCallSignatures).toEqual(['read_current_page:{}']);
     expect(pending.generation.toolAttemptSignatures).toEqual(['attempt-1']);
+    expect(pending.generation.toolCalls).toEqual([
+      { id: 'call-1', name: 'read_current_page', arguments: {} },
+      { id: 'call-2', name: 'inspect_page', arguments: { scope: 'viewport' } },
+    ]);
+    expect(pending.generation.toolCallIndex).toBe(1);
+    expect(pending.generation.completedToolExecutions).toEqual([
+      {
+        isError: false,
+        statusText: '读取完成',
+        content: '页面正文',
+        nextPageSnapshot: SNAPSHOT,
+      },
+    ]);
   });
 
   it('clears only the requested turn and matches exact history ids', async () => {

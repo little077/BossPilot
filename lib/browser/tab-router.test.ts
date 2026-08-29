@@ -7,6 +7,7 @@ import {
   openOrFocusTab,
   resolveBrowserTarget,
   waitForTabReady,
+  waitForTabReadyBounded,
 } from './tab-router';
 
 const query = vi.fn();
@@ -263,5 +264,39 @@ describe('tab readiness', () => {
       throwIfAborted: () => void 0,
     } as unknown as AbortSignal;
     await expect(waitForTabReady(4, signal, 100)).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('waitForTabReadyBounded returns ready=true once the page completes', async () => {
+    vi.useFakeTimers();
+    get
+      .mockResolvedValueOnce({ id: 4, windowId: 1, status: 'loading', url: 'https://example.com/' })
+      .mockResolvedValue({ id: 4, windowId: 1, status: 'complete', url: 'https://example.com/' });
+    const pending = waitForTabReadyBounded(4, new AbortController().signal, 500);
+    await vi.advanceTimersByTimeAsync(150);
+    await expect(pending).resolves.toMatchObject({ ready: true, tab: { status: 'complete' } });
+  });
+
+  it('waitForTabReadyBounded returns ready=false instead of throwing on timeout', async () => {
+    vi.useFakeTimers();
+    get.mockResolvedValue({
+      id: 4,
+      windowId: 1,
+      status: 'loading',
+      url: 'https://example.com/',
+    });
+    const pending = waitForTabReadyBounded(4, new AbortController().signal, 100);
+    const pendingAssertion = expect(pending).resolves.toMatchObject({
+      ready: false,
+      tab: { status: 'loading' },
+    });
+    await vi.advanceTimersByTimeAsync(150);
+    await pendingAssertion;
+  });
+
+  it('waitForTabReadyBounded still surfaces a closed tab as an error', async () => {
+    get.mockRejectedValue(new Error('No tab'));
+    await expect(waitForTabReadyBounded(4, new AbortController().signal)).rejects.toThrow(
+      'TAB_NOT_FOUND',
+    );
   });
 });

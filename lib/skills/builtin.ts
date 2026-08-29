@@ -30,7 +30,6 @@ const BOSS_SKILL_DEFINITION: SkillDefinition = {
   allowedTools: [
     'browser_action',
     'read_current_page',
-    'observe_page',
     'inspect_page',
     'observe_visual_page',
     'interact_page',
@@ -47,7 +46,7 @@ const BOSS_SKILL_DEFINITION: SkillDefinition = {
 const XHS_SKILL_DEFINITION: SkillDefinition = {
   name: 'xhs-note-scout',
   description:
-    '在小红书博主主页采集笔记列表，逐篇读取笔记详情与评论区，并汇总成内容调研报告。用户提到小红书、博主主页、笔记采集、评论分析、内容调研或竞品分析时使用。',
+    '在小红书博主主页（/user/profile/*）采集笔记列表，逐篇读取笔记详情与评论区，并汇总成内容调研报告。仅当目标是某个具体博主主页的笔记采集调研时使用；在小红书搜索、浏览信息流或打开帖子详情等普通浏览操作不使用本 Skill。',
   instructions: '',
   version: XHS_SKILL_VERSION,
   builtIn: true,

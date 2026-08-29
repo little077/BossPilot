@@ -25,14 +25,15 @@ const THINKING_OPTIONS: Array<{ value: ThinkingLevel; label: string; hint?: stri
 const IDENTITY_SEP = '::';
 
 /**
- * 工具行内联触发器样式：无边框、24px 高、透明背景，hover 柔和品牌色高亮，
- * 与附件按钮同一姿态，不破坏输入框底部的简洁感。
+ * 工具行内联触发器样式：浅蓝灰底常驻、24px 高，hover 与展开时品牌色柔和高亮，
+ * 与技能触发器、附件按钮同一姿态；展开态不描边，保持工具行整体感。
  */
 const TOOL_TRIGGER_CLASS =
-  'h-6 w-auto min-w-0 max-w-full justify-start gap-1 overflow-hidden rounded-[7px] border-transparent bg-transparent ' +
-  'px-[7px] py-0 text-[10px] text-ink-faint ' +
-  'hover:border-transparent hover:bg-brand-soft hover:text-brand ' +
-  'focus-visible:border-brand focus-visible:bg-surface focus-visible:ring-0 ' +
+  'h-6 w-auto min-w-0 max-w-full justify-start gap-1 overflow-hidden rounded-[7px] border-0 bg-surface-soft ' +
+  'px-[7px] py-0 text-[10px] text-ink-soft ' +
+  'hover:border-0 hover:bg-surface-mint hover:text-brand ' +
+  'focus-visible:border-0 focus-visible:bg-surface-mint focus-visible:text-brand focus-visible:ring-0 ' +
+  'aria-expanded:bg-surface-mint aria-expanded:text-brand ' +
   '[&_svg]:size-3 [&_svg]:text-current';
 
 export function ConversationRuntimeControls({ conversationId }: ConversationRuntimeControlsProps) {

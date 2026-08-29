@@ -1,5 +1,6 @@
 // ─── 会话执行状态 ───
-// 参考 RedScope 原型呈现安全思考摘要与多工具时间线；Ask User 固定在底部，不进入这里。
+// 参考 RedScope 原型呈现安全思考摘要与多工具时间线；
+// Ask User 与页面权限请求都固定在底部，不进入这里。
 
 import {
   Brain,
@@ -18,14 +19,9 @@ import { summarizeAgentRun } from '@/lib/evals/run-summary';
 
 interface ChatFlowStatusProps {
   message: ChatMessage;
-  onResolvePagePermission?: (
-    requestId: string,
-    permissionPattern: string,
-    allow: boolean,
-  ) => Promise<boolean>;
 }
 
-export function ChatFlowStatus({ message, onResolvePagePermission }: ChatFlowStatusProps) {
+export function ChatFlowStatus({ message }: ChatFlowStatusProps) {
   const activities = (
     message.toolActivities ?? (message.toolActivity ? [message.toolActivity] : [])
   ).filter(({ name }) => name !== 'ask_user');
@@ -36,7 +32,7 @@ export function ChatFlowStatus({ message, onResolvePagePermission }: ChatFlowSta
     <div className="chat-flow-status">
       {message.reasoningActivity ? <ReasoningStep activity={message.reasoningActivity} /> : null}
       {activities.map((activity) => (
-        <ToolStep key={activity.callId} activity={activity} onResolve={onResolvePagePermission} />
+        <ToolStep key={activity.callId} activity={activity} />
       ))}
       {run ? (
         <details className="agent-run-summary">
@@ -128,37 +124,12 @@ function ReasoningStep({ activity }: { activity: ReasoningActivity }) {
   );
 }
 
-function ToolStep({
-  activity,
-  onResolve,
-}: {
-  activity: ToolActivity;
-  onResolve?: ChatFlowStatusProps['onResolvePagePermission'];
-}) {
+function ToolStep({ activity }: { activity: ToolActivity }) {
   const [expanded, setExpanded] = useState(false);
-  const [permissionBusy, setPermissionBusy] = useState(false);
-  const [permissionError, setPermissionError] = useState('');
   const running = activity.status === 'running';
   const waitingPermission = activity.status === 'waiting_permission';
-  const interactionPermission = activity.permissionKind === 'interact';
   const elapsedMs = useElapsedMs(activity.startedAt, activity.finishedAt, running);
   const canExpand = Boolean(activity.detail);
-  const canResolvePermission = Boolean(
-    waitingPermission && activity.requestId && activity.permissionPattern && onResolve,
-  );
-
-  const resolvePermission = async (allow: boolean) => {
-    if (!canResolvePermission || !activity.requestId || !activity.permissionPattern || !onResolve) {
-      return;
-    }
-    setPermissionBusy(true);
-    setPermissionError('');
-    const sent = await onResolve(activity.requestId, activity.permissionPattern, allow);
-    if (!sent) {
-      setPermissionBusy(false);
-      setPermissionError('侧边栏连接不可用，请稍后重试。');
-    }
-  };
 
   return (
     <section className={`chat-tool-step is-${activity.status}`}>
@@ -184,49 +155,15 @@ function ToolStep({
             />
           ) : null}
         </button>
-        <div className="chat-tool-status" role={running ? 'status' : undefined}>
+        <div
+          className="chat-tool-status"
+          role={running || waitingPermission ? 'status' : undefined}
+        >
           {activity.statusText}
+          {waitingPermission ? ' · 请查看底部确认面板' : ''}
         </div>
         {expanded && activity.detail ? (
           <div className="chat-tool-detail">{activity.detail}</div>
-        ) : null}
-        {waitingPermission ? (
-          <section
-            className="chat-permission-card"
-            aria-label={interactionPermission ? '页面操作权限' : '页面读取权限'}
-          >
-            <div className="chat-permission-origin">
-              <LockKeyhole size={11} aria-hidden />
-              <span>{activity.sourceOrigin ?? '当前网站'}</span>
-            </div>
-            <p>
-              {interactionPermission
-                ? '允许后可观察并操作这个网站当前页的可见控件；提交、发送、投递、删除或支付等动作仍会单独确认，密码和文件始终不能代操作。可随时在设置中撤销。'
-                : '允许后可读取这个网站的可见纯文本，并把回答所需内容发送给你当前选择的模型供应商；不会点击、输入或操作页面。可随时在设置中撤销。'}
-            </p>
-            <div className="chat-permission-actions">
-              <button
-                type="button"
-                className="chat-permission-deny"
-                disabled={!canResolvePermission || permissionBusy}
-                onClick={() => void resolvePermission(false)}
-              >
-                不允许
-              </button>
-              <button
-                type="button"
-                className="chat-permission-allow"
-                disabled={!canResolvePermission || permissionBusy}
-                onClick={() => void resolvePermission(true)}
-              >
-                {permissionBusy ? <Loader2 size={10} className="animate-spin" /> : null}
-                {interactionPermission ? '允许操作' : '允许读取'}
-              </button>
-            </div>
-            {permissionError ? (
-              <div className="chat-permission-error">{permissionError}</div>
-            ) : null}
-          </section>
         ) : null}
         {activity.status === 'succeeded' && activity.sourceOrigin ? (
           <div className="chat-page-source" title={activity.sourceUrl}>

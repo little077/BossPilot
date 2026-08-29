@@ -1,10 +1,11 @@
 // ─── 对话生成会话管理器 ───
-// 职责：固定单轮模型、串行执行有界 Agent 循环、保存可恢复快照，并统一收口取消与错误终态。
+// 职责：固定单轮模型、执行有界 Agent 循环、保存可恢复快照，并统一收口取消与错误终态。
 
 import type { ChatMessage, GenerationUsage, ThinkingLevel } from '@/lib/domain/chat';
 import type { ModelIdentity } from '@/lib/domain/types';
 import { estimateGenerationTokens } from '@/lib/generation/compaction';
 import { GenerationError, isAbortError, sanitizeGenerationError } from '@/lib/generation/errors';
+import type { ToolResultCache } from '@/lib/generation/tool-result-cache';
 import type {
   GenerationAdapter,
   GenerationEvent,
@@ -12,6 +13,7 @@ import type {
   GenerationToolCall,
   GenerationToolDeferredResult,
   GenerationToolDefinition,
+  GenerationToolExecutionMode,
   GenerationToolExecutionOutcome,
   GenerationToolExecutionResult,
   GenerationToolExecutor,
@@ -31,7 +33,7 @@ export type ChatGenerationListener = (event: ChatGenerationEvent) => void;
 
 /** 等待真实用户手势时可安全持久化的最小生成状态，不包含 API Key 或页面正文。 */
 export interface DeferredGenerationTurn {
-  version: 1 | 2 | 3 | 4;
+  version: 1 | 2 | 3 | 4 | 5;
   requestId: string;
   message: ChatMessage;
   rawContent: string;
@@ -54,6 +56,12 @@ export interface DeferredGenerationTurn {
   systemPrompt?: string;
   /** v4：本轮固定的工具目录，暂停恢复后不因设置变化而换掉工具。 */
   tools?: GenerationToolDefinition[];
+  /** v5：同一模型回合声明的完整工具批次。旧快照缺失时退化为单工具。 */
+  toolCalls?: GenerationToolCall[];
+  /** v5：当前等待恢复的工具在批次中的位置。 */
+  toolCallIndex?: number;
+  /** v5：暂停前已经完成的批次结果；截图会在持久化前移除。 */
+  completedToolExecutions?: GenerationToolExecutionResult[];
 }
 
 export type GenerationTargetResolver = () =>
@@ -95,13 +103,23 @@ export interface ChatGenerationManagerOptions {
   /** 全量流快照的最小广播间隔；终态不受该间隔影响。 */
   streamUpdateIntervalMs?: number;
   temperature?: number;
-  /** 当前里程碑开放的高层有界工具；同一个模型回合仍只接受一次工具调用。 */
+  /** 当前里程碑开放的高层有界工具；同一模型回合可声明一个有序工具批次。 */
   tools?:
     | GenerationToolDefinition[]
     | (() => GenerationToolDefinition[] | Promise<GenerationToolDefinition[]>);
   executeTool?: GenerationToolExecutor;
+  /** 未声明时一律串行；调用方只应把不会暂停、彼此独立的低风险工具标为 parallel。 */
+  resolveToolExecutionMode?: (
+    call: GenerationToolCall,
+  ) => GenerationToolExecutionMode | Promise<GenerationToolExecutionMode>;
+  /** M5.1：只读工具结果缓存层；同一页面短时间重复侦察直接命中，不重复执行。 */
+  toolResultCache?: ToolResultCache;
   /** 包含最终回答在内的模型回合硬上限；默认 200，只作为失控保险丝。 */
   maxAgentTurns?: number;
+  /** 单个模型回合允许声明的工具调用上限；默认 16，限制失控 fan-out。 */
+  maxToolCallsPerRound?: number;
+  /** 同一并行波次的执行上限；默认 5。 */
+  maxParallelToolCalls?: number;
   /** 相同工具、参数和可观察结果最多连续出现几次；默认 3，防止无进展空转。 */
   maxConsecutiveIdenticalToolCalls?: number;
   /** 模型上下文估算上限；达到阈值后在下一次模型边界压缩。 */
@@ -132,7 +150,7 @@ interface ActiveTurn {
   terminalEmitted: boolean;
   updatePending: boolean;
   updateTimer?: ReturnType<typeof setTimeout>;
-  pendingToolCall?: GenerationToolCall;
+  pendingToolCalls: GenerationToolCall[];
   usage?: GenerationUsage;
   modelTurns: number;
   lengthContinuations: number;
@@ -149,10 +167,12 @@ const DEFAULT_STREAM_UPDATE_INTERVAL_MS = 50;
 const MAX_LENGTH_CONTINUATIONS = 1;
 const DEFAULT_OUTPUT_RESERVE_TOKENS = 8_192;
 export const DEFAULT_MAX_AGENT_TURNS = 200;
+export const DEFAULT_MAX_TOOL_CALLS_PER_ROUND = 16;
+export const DEFAULT_MAX_PARALLEL_TOOL_CALLS = 5;
 export const DEFAULT_MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS = 3;
 
 type StreamOutcome =
-  | { kind: 'tool'; toolCall: GenerationToolCall }
+  | { kind: 'tool'; toolCalls: GenerationToolCall[] }
   | { kind: 'steer' }
   | { kind: 'length' }
   | { kind: 'terminal'; message: ChatMessage };
@@ -164,6 +184,8 @@ export class ChatGenerationManager {
   private readonly maxOutputChars: number;
   private readonly streamUpdateIntervalMs: number;
   private readonly maxAgentTurns: number;
+  private readonly maxToolCallsPerRound: number;
+  private readonly maxParallelToolCalls: number;
   private readonly maxConsecutiveIdenticalToolCalls: number;
   private readonly contextWindowTokens: number;
   private readonly compactionThreshold: number;
@@ -177,6 +199,14 @@ export class ChatGenerationManager {
     this.streamUpdateIntervalMs =
       options.streamUpdateIntervalMs ?? DEFAULT_STREAM_UPDATE_INTERVAL_MS;
     this.maxAgentTurns = positiveInteger(options.maxAgentTurns, DEFAULT_MAX_AGENT_TURNS);
+    this.maxToolCallsPerRound = positiveInteger(
+      options.maxToolCallsPerRound,
+      DEFAULT_MAX_TOOL_CALLS_PER_ROUND,
+    );
+    this.maxParallelToolCalls = positiveInteger(
+      options.maxParallelToolCalls,
+      DEFAULT_MAX_PARALLEL_TOOL_CALLS,
+    );
     this.maxConsecutiveIdenticalToolCalls = positiveInteger(
       options.maxConsecutiveIdenticalToolCalls,
       DEFAULT_MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS,
@@ -216,6 +246,7 @@ export class ChatGenerationManager {
       toolAttemptSignatures: [],
       systemPrompt: '',
       tools: [],
+      pendingToolCalls: [],
       pendingSteering: [],
     };
     this.active = turn;
@@ -261,7 +292,7 @@ export class ChatGenerationManager {
     }
   }
 
-  /** 从持久化权限卡恢复同一个 tool call；第一阶段模型不会被重复调用。 */
+  /** 从持久化权限卡恢复原工具批次；已经完成的批次成员不会被重复执行。 */
   async resumeDeferred(
     state: DeferredGenerationTurn,
     history: ChatMessage[],
@@ -295,8 +326,18 @@ export class ChatGenerationManager {
       turn.tools =
         state.tools?.map(cloneToolDefinition) ?? (await resolveTools(this.options.tools));
       const message = requireMessage(turn);
-      const activity = currentToolActivity(message);
-      if (!activity || activity.callId !== state.toolCall.id) {
+      const toolCalls = state.toolCalls?.map(cloneToolCall) ?? [cloneToolCall(state.toolCall)];
+      const toolCallIndex = state.toolCallIndex ?? 0;
+      const deferredCall = toolCalls[toolCallIndex];
+      const completedToolExecutions =
+        state.completedToolExecutions?.map(cloneToolExecutionResult) ?? [];
+      const activity = findToolActivity(message, state.toolCall.id);
+      if (
+        !activity ||
+        !deferredCall ||
+        deferredCall.id !== state.toolCall.id ||
+        completedToolExecutions.length !== toolCallIndex
+      ) {
         return this.finishError(
           turn,
           new GenerationError('INVALID_RESPONSE', '等待授权的工具状态不完整，请重新发送问题。'),
@@ -310,15 +351,17 @@ export class ChatGenerationManager {
       syncLegacyToolActivity(message, activity);
       this.publish(turn, 'update');
 
-      return await this.executeAndContinueTool(
+      return await this.executeAndContinueTools(
         turn,
         target,
         state.loopMessages
           ? cloneGenerationInputMessages(state.loopMessages)
           : toGenerationInputMessages(history),
-        state.toolCall,
-        false,
+        toolCalls,
+        toolCallIndex,
+        completedToolExecutions,
         executionOverride,
+        false,
       );
     } catch (error) {
       if (turn.controller.signal.aborted || isAbortError(error)) {
@@ -345,8 +388,8 @@ export class ChatGenerationManager {
   }
 
   /**
-   * 每个模型回合最多接受一个工具调用，但工具结果会继续交还模型，直到自然回答、暂停或触发保险丝。
-   * 浏览器工具保持串行，避免多个页面动作互相争用活动标签页。
+   * 一个模型回合可以声明多个工具调用。Manager 先整体校验，再形成有界并行波次与串行屏障，
+   * 最后一次性把完整结果批次交还模型，直到自然回答、暂停或触发保险丝。
    */
   private async runAgentLoop(
     turn: ActiveTurn,
@@ -501,35 +544,70 @@ export class ChatGenerationManager {
       return await this.runAgentLoop(turn, target, continuedMessages);
     }
 
-    const toolDefinition = turn.tools.find((candidate) => candidate.name === outcome.toolCall.name);
-    if (!toolDefinition || !this.options.executeTool) {
+    if (!this.options.executeTool) {
+      return this.finishError(
+        turn,
+        new GenerationError('INVALID_RESPONSE', '当前没有可执行的浏览器工具。', false),
+      );
+    }
+
+    if (outcome.toolCalls.length > this.maxToolCallsPerRound) {
       return this.finishError(
         turn,
         new GenerationError(
           'INVALID_RESPONSE',
-          `模型请求了未开放的工具：${outcome.toolCall.name}`,
+          `模型在单个回合请求了 ${outcome.toolCalls.length} 个工具调用，超过 ${this.maxToolCallsPerRound} 个安全上限。`,
           false,
         ),
       );
     }
 
-    this.beginToolActivity(turn, outcome.toolCall, toolDefinition);
-    return await this.executeAndContinueTool(
+    const seenCallIds = new Set<string>();
+    for (const toolCall of outcome.toolCalls) {
+      if (!toolCall.id || seenCallIds.has(toolCall.id)) {
+        return this.finishError(
+          turn,
+          new GenerationError(
+            'INVALID_RESPONSE',
+            `模型返回了重复或无效的工具调用 ID：${toolCall.id || '(empty)'}`,
+            false,
+          ),
+        );
+      }
+      seenCallIds.add(toolCall.id);
+      if (!turn.tools.some((candidate) => candidate.name === toolCall.name)) {
+        return this.finishError(
+          turn,
+          new GenerationError(
+            'INVALID_RESPONSE',
+            `模型请求了未开放的工具：${toolCall.name}`,
+            false,
+          ),
+        );
+      }
+    }
+
+    return await this.executeAndContinueTools(
       turn,
       target,
       preparedMessages,
-      outcome.toolCall,
+      outcome.toolCalls,
+      0,
+      [],
+      undefined,
       true,
     );
   }
 
-  private async executeAndContinueTool(
+  private async executeAndContinueTools(
     turn: ActiveTurn,
     target: ResolvedGenerationTarget,
     inputMessages: GenerationInputMessage[],
-    toolCall: GenerationToolCall,
-    allowDeferred: boolean,
+    toolCalls: GenerationToolCall[],
+    startIndex: number,
+    completedExecutions: GenerationToolExecutionResult[],
     executionOverride?: GenerationToolExecutionResult,
+    allowCurrentDeferred = true,
   ): Promise<ChatMessage> {
     if (!this.options.executeTool) {
       return this.finishError(
@@ -538,37 +616,228 @@ export class ChatGenerationManager {
       );
     }
 
-    const outcome =
-      executionOverride ??
-      (await promiseOrAbort(
+    const executions = completedExecutions.map(cloneToolExecutionResult);
+    let index = startIndex;
+    while (index < toolCalls.length) {
+      const toolCall = toolCalls[index];
+      if (!toolCall) {
+        return this.finishError(
+          turn,
+          new GenerationError('INVALID_RESPONSE', '工具批次索引无效，请重新发送问题。'),
+        );
+      }
+      const toolDefinition = turn.tools.find((candidate) => candidate.name === toolCall.name);
+      if (!toolDefinition) {
+        return this.finishError(
+          turn,
+          new GenerationError('INVALID_RESPONSE', `模型请求了未开放的工具：${toolCall.name}`),
+        );
+      }
+
+      const executionMode = await (this.options.resolveToolExecutionMode?.(toolCall) ?? 'serial');
+      const canRunParallel =
+        executionMode === 'parallel' && !(index === startIndex && executionOverride);
+      if (canRunParallel) {
+        let groupEnd = index + 1;
+        while (groupEnd < toolCalls.length) {
+          const groupedCall = toolCalls[groupEnd];
+          if (!groupedCall) {
+            break;
+          }
+          const groupedMode = await (this.options.resolveToolExecutionMode?.(groupedCall) ??
+            'serial');
+          if (groupedMode !== 'parallel') break;
+          groupEnd += 1;
+        }
+        const waveEnd = Math.min(groupEnd, index + this.maxParallelToolCalls);
+        const wave = toolCalls.slice(index, waveEnd);
+        for (const call of wave) {
+          const definition = turn.tools.find((candidate) => candidate.name === call.name);
+          if (!definition) {
+            return this.finishError(
+              turn,
+              new GenerationError('INVALID_RESPONSE', `模型请求了未开放的工具：${call.name}`),
+            );
+          }
+          if (!findToolActivity(requireMessage(turn), call.id)) {
+            this.beginToolActivity(turn, call, definition);
+          }
+        }
+        const outcomes = await Promise.all(
+          wave.map((_, offset) => this.executeToolCall(turn, target, toolCalls, index + offset)),
+        );
+        if (outcomes.some((outcome) => outcome === ABORTED)) {
+          return this.finishCancelled(turn);
+        }
+        const deferredOffset = outcomes.findIndex(
+          (outcome) => outcome !== ABORTED && isDeferredToolExecution(outcome),
+        );
+        if (deferredOffset >= 0) {
+          for (let offset = 0; offset < outcomes.length; offset += 1) {
+            const call = wave[offset];
+            const outcome = outcomes[offset];
+            if (call && outcome && outcome !== ABORTED && !isDeferredToolExecution(outcome)) {
+              this.finishToolActivity(turn, call.id, outcome);
+            }
+          }
+          const deferredCall = wave[deferredOffset];
+          return this.finishError(
+            turn,
+            new GenerationError(
+              'INVALID_RESPONSE',
+              `工具 ${deferredCall?.name ?? '(unknown)'} 被声明为可并行，但执行时请求了用户确认。请将该工具改为串行调度。`,
+              false,
+            ),
+          );
+        }
+        for (let offset = 0; offset < outcomes.length; offset += 1) {
+          const call = wave[offset];
+          const outcome = outcomes[offset];
+          if (!call || !outcome || outcome === ABORTED) return this.finishCancelled(turn);
+          if (isDeferredToolExecution(outcome)) continue;
+          const terminal = this.acceptToolExecution(turn, call, outcome, executions);
+          if (terminal) return terminal;
+        }
+        index = waveEnd;
+        continue;
+      }
+
+      if (!findToolActivity(requireMessage(turn), toolCall.id)) {
+        this.beginToolActivity(turn, toolCall, toolDefinition);
+      }
+      const outcome = await this.executeToolCall(
+        turn,
+        target,
+        toolCalls,
+        index,
+        index === startIndex ? executionOverride : undefined,
+      );
+      if (outcome === ABORTED) return this.finishCancelled(turn);
+      const execution = isDeferredToolExecution(outcome)
+        ? allowCurrentDeferred || index > startIndex
+          ? await this.deferTool(turn, target, inputMessages, toolCalls, index, executions, outcome)
+          : deferredStillMissing(outcome)
+        : outcome;
+      if (execution === null) return cloneMessage(requireMessage(turn));
+      const terminal = this.acceptToolExecution(turn, toolCall, execution, executions);
+      if (terminal) return terminal;
+      index += 1;
+    }
+
+    const toolResultMessages: GenerationInputMessage[] = [];
+    for (let index = 0; index < toolCalls.length; index += 1) {
+      const toolCall = toolCalls[index];
+      const execution = executions[index];
+      if (!toolCall || !execution) {
+        return this.finishError(
+          turn,
+          new GenerationError('INVALID_RESPONSE', '工具批次结果不完整，请重新发送问题。'),
+        );
+      }
+      toolResultMessages.push({
+        role: 'toolResult',
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        content: execution.hint
+          ? `${execution.content}\n\n[hint] ${execution.hint}`
+          : execution.content,
+        ...(execution.images ? { images: execution.images.map((image) => ({ ...image })) } : {}),
+        isError: execution.isError,
+        createdAt: this.now(),
+      });
+    }
+
+    const toolMessages: GenerationInputMessage[] = [
+      ...inputMessages,
+      {
+        role: 'assistant',
+        content: turn.rawContent,
+        createdAt: requireMessage(turn).createdAt,
+        finishReason: 'tool',
+        toolCalls: toolCalls.map(cloneToolCall),
+      },
+      ...toolResultMessages,
+    ];
+
+    // 工具前的过程说明既属于模型上下文，也应持续展示给用户；移入已提交正文后再开下一回合。
+    commitRoundContent(turn);
+    return await this.runAgentLoop(turn, target, toolMessages);
+  }
+
+  private async executeToolCall(
+    turn: ActiveTurn,
+    target: ResolvedGenerationTarget,
+    toolCalls: GenerationToolCall[],
+    index: number,
+    executionOverride?: GenerationToolExecutionResult,
+  ): Promise<GenerationToolExecutionOutcome | typeof ABORTED> {
+    const toolCall = toolCalls[index];
+    if (!toolCall || !this.options.executeTool) {
+      throw new GenerationError('INVALID_RESPONSE', '工具批次索引无效，请重新发送问题。');
+    }
+    const toolDefinition = turn.tools.find((candidate) => candidate.name === toolCall.name);
+    if (!toolDefinition) {
+      throw new GenerationError('INVALID_RESPONSE', `模型请求了未开放的工具：${toolCall.name}`);
+    }
+    if (executionOverride) return executionOverride;
+
+    const cached = this.options.toolResultCache?.lookup(toolCall);
+    if (cached) return cached;
+
+    try {
+      const execution = await promiseOrAbort(
         this.options.executeTool(
           toolCall,
           turn.controller.signal,
           turn.requestId,
-          (statusText, detail) => this.updateToolActivity(turn, statusText, detail),
+          (statusText, detail) => this.updateToolActivity(turn, toolCall.id, statusText, detail),
           {
             model: {
               providerLabel: target.providerLabel,
               modelName: target.modelName,
               supportsImageInput: target.supportsImageInput === true,
             },
+            batch: {
+              id: `${turn.requestId}:${turn.modelTurns}`,
+              index,
+              size: toolCalls.length,
+            },
           },
         ),
         turn.controller.signal,
-      ));
-    if (outcome === ABORTED) return this.finishCancelled(turn);
+      );
+      if (execution === ABORTED) return ABORTED;
+      if (
+        this.options.toolResultCache &&
+        !isDeferredToolExecution(execution) &&
+        !execution.isError
+      ) {
+        this.options.toolResultCache.store(toolCall, execution);
+      }
+      return execution;
+    } catch (error) {
+      if (turn.controller.signal.aborted || isAbortError(error)) return ABORTED;
+      const safeError = sanitizeGenerationError(error, turn.secret);
+      return {
+        isError: true,
+        statusText: `${toolDefinition.label}失败`,
+        detail: safeError.message,
+        content: `工具 ${toolCall.name} 执行失败：${safeError.message}`,
+      };
+    }
+  }
 
-    const execution = isDeferredToolExecution(outcome)
-      ? allowDeferred
-        ? await this.deferTool(turn, target, inputMessages, toolCall, outcome)
-        : deferredStillMissing(outcome)
-      : outcome;
-    if (execution === null) return cloneMessage(requireMessage(turn));
+  private acceptToolExecution(
+    turn: ActiveTurn,
+    toolCall: GenerationToolCall,
+    execution: GenerationToolExecutionResult,
+    executions: GenerationToolExecutionResult[],
+  ): ChatMessage | null {
     if (execution.errorCode === 'CANCELLED' || execution.errorCode === 'cancelled') {
       return this.finishCancelled(turn);
     }
-
-    this.finishToolActivity(turn, execution);
+    this.finishToolActivity(turn, toolCall.id, execution);
+    executions.push(cloneToolExecutionResult(execution));
     const attemptSignature = toolAttemptSignature(toolCall, execution);
     turn.toolAttemptSignatures.push(attemptSignature);
     if (
@@ -584,36 +853,16 @@ export class ChatGenerationManager {
         ),
       );
     }
-    const toolMessages: GenerationInputMessage[] = [
-      ...inputMessages,
-      {
-        role: 'assistant',
-        content: turn.rawContent,
-        createdAt: requireMessage(turn).createdAt,
-        finishReason: 'tool',
-        toolCalls: [toolCall],
-      },
-      {
-        role: 'toolResult',
-        toolCallId: toolCall.id,
-        toolName: toolCall.name,
-        content: execution.content,
-        ...(execution.images ? { images: execution.images.map((image) => ({ ...image })) } : {}),
-        isError: execution.isError,
-        createdAt: this.now(),
-      },
-    ];
-
-    // 工具前的过程说明既属于模型上下文，也应持续展示给用户；移入已提交正文后再开下一回合。
-    commitRoundContent(turn);
-    return await this.runAgentLoop(turn, target, toolMessages);
+    return null;
   }
 
   private async deferTool(
     turn: ActiveTurn,
     target: ResolvedGenerationTarget,
     loopMessages: GenerationInputMessage[],
-    toolCall: GenerationToolCall,
+    toolCalls: GenerationToolCall[],
+    toolCallIndex: number,
+    completedToolExecutions: GenerationToolExecutionResult[],
     result: GenerationToolDeferredResult,
   ): Promise<null> {
     if (!this.options.onToolDeferred) {
@@ -625,7 +874,11 @@ export class ChatGenerationManager {
     }
 
     const message = requireMessage(turn);
-    const activity = currentToolActivity(message);
+    const toolCall = toolCalls[toolCallIndex];
+    if (!toolCall) {
+      throw new GenerationError('INVALID_RESPONSE', '工具批次恢复索引无效，请重新发送问题。');
+    }
+    const activity = findToolActivity(message, toolCall.id);
     if (!activity) {
       throw new GenerationError('INVALID_RESPONSE', 'Agent 工具没有可恢复的活动状态。');
     }
@@ -650,7 +903,7 @@ export class ChatGenerationManager {
     syncLegacyToolActivity(message, activity);
 
     const deferred: DeferredGenerationTurn = {
-      version: 4,
+      version: 5,
       requestId: turn.requestId,
       message: cloneMessage(message),
       rawContent: turn.rawContent,
@@ -666,6 +919,9 @@ export class ChatGenerationManager {
       toolAttemptSignatures: [...turn.toolAttemptSignatures],
       systemPrompt: turn.systemPrompt,
       tools: turn.tools.map(cloneToolDefinition),
+      toolCalls: toolCalls.map(cloneToolCall),
+      toolCallIndex,
+      completedToolExecutions: completedToolExecutions.map(clonePersistedToolExecutionResult),
     };
     await this.options.onToolDeferred(deferred, result);
     this.publish(turn, 'update');
@@ -684,7 +940,7 @@ export class ChatGenerationManager {
       contextWindowTokens?: number;
     } = {},
   ): Promise<StreamOutcome> {
-    turn.pendingToolCall = undefined;
+    turn.pendingToolCalls = [];
     // 上一模型回合的文字已经进入 inputMessages，并保存在 committedContent 供 UI 持续展示。
     // 当前回合必须从空文本开始，否则每次工具调用都会把全部历史再次嵌套回上下文。
     turn.rawContent = '';
@@ -827,20 +1083,7 @@ export class ChatGenerationManager {
         }
         return undefined;
       case 'tool-call':
-        if (turn.pendingToolCall) {
-          return {
-            kind: 'terminal',
-            message: this.finishError(
-              turn,
-              new GenerationError(
-                'INVALID_RESPONSE',
-                '模型在同一轮请求了多个工具，已停止执行。',
-                false,
-              ),
-            ),
-          };
-        }
-        turn.pendingToolCall = { ...event.toolCall, arguments: { ...event.toolCall.arguments } };
+        turn.pendingToolCalls.push(cloneToolCall(event.toolCall));
         this.completeReasoning(turn, '已判断需要使用浏览器工具');
         return undefined;
       case 'finish':
@@ -849,7 +1092,7 @@ export class ChatGenerationManager {
           return { kind: 'terminal', message: this.finishCancelled(turn, turn.usage) };
         }
         if (event.reason === 'tool') {
-          if (!turn.pendingToolCall) {
+          if (turn.pendingToolCalls.length === 0) {
             return {
               kind: 'terminal',
               message: this.finishError(
@@ -862,9 +1105,9 @@ export class ChatGenerationManager {
               ),
             };
           }
-          return { kind: 'tool', toolCall: turn.pendingToolCall };
+          return { kind: 'tool', toolCalls: turn.pendingToolCalls.map(cloneToolCall) };
         }
-        if (turn.pendingToolCall) {
+        if (turn.pendingToolCalls.length > 0) {
           return {
             kind: 'terminal',
             message: this.finishError(
@@ -915,14 +1158,22 @@ export class ChatGenerationManager {
     this.publish(turn, 'update');
   }
 
-  private finishToolActivity(turn: ActiveTurn, execution: GenerationToolExecutionResult): void {
+  private finishToolActivity(
+    turn: ActiveTurn,
+    callId: string,
+    execution: GenerationToolExecutionResult,
+  ): void {
     const message = requireMessage(turn);
-    const activity = currentToolActivity(message);
+    const activity = findToolActivity(message, callId);
     if (!activity) return;
     activity.status = execution.isError ? 'failed' : 'succeeded';
     activity.statusText = execution.statusText;
     activity.finishedAt = this.now();
     if (execution.detail) activity.detail = execution.detail;
+    // M5.3：执行器建议进入台账（detail），供评测报告统计 hintSuggestions。
+    if (execution.hint) {
+      activity.detail = [activity.detail, `[hint] ${execution.hint}`].filter(Boolean).join('\n');
+    }
     if (execution.errorCode) activity.errorCode = execution.errorCode;
     if (execution.sourceOrigin) activity.sourceOrigin = execution.sourceOrigin;
     if (execution.sourceTitle) activity.sourceTitle = execution.sourceTitle;
@@ -941,9 +1192,14 @@ export class ChatGenerationManager {
     this.publish(turn, 'update');
   }
 
-  private updateToolActivity(turn: ActiveTurn, statusText: string, detail?: string): void {
+  private updateToolActivity(
+    turn: ActiveTurn,
+    callId: string,
+    statusText: string,
+    detail?: string,
+  ): void {
     const message = requireMessage(turn);
-    const activity = currentToolActivity(message);
+    const activity = findToolActivity(message, callId);
     if (activity?.status !== 'running' || turn.controller.signal.aborted) return;
     activity.statusText = statusText;
     if (detail) activity.detail = detail;
@@ -972,17 +1228,15 @@ export class ChatGenerationManager {
       message.reasoningActivity.summary = '已停止问题分析';
       message.reasoningActivity.finishedAt = this.now();
     }
-    const toolActivity = currentToolActivity(message);
-    if (
-      toolActivity?.status === 'running' ||
-      toolActivity?.status === 'waiting_permission' ||
-      toolActivity?.status === 'waiting_user'
-    ) {
+    for (const toolActivity of activeToolActivities(message)) {
       toolActivity.status = 'cancelled';
       toolActivity.statusText = `已停止${toolActivity.label}`;
       toolActivity.errorCode = 'CANCELLED';
       toolActivity.finishedAt = this.now();
-      syncLegacyToolActivity(message, toolActivity);
+    }
+    const latestToolActivity = currentToolActivity(message);
+    if (latestToolActivity) {
+      syncLegacyToolActivity(message, latestToolActivity);
     }
     message.pendingUserQuestion = undefined;
     message.content = publicTurnContent(turn, true);
@@ -1000,16 +1254,14 @@ export class ChatGenerationManager {
       message.reasoningActivity.summary = '问题分析未完成';
       message.reasoningActivity.finishedAt = this.now();
     }
-    const toolActivity = currentToolActivity(message);
-    if (
-      toolActivity?.status === 'running' ||
-      toolActivity?.status === 'waiting_permission' ||
-      toolActivity?.status === 'waiting_user'
-    ) {
+    for (const toolActivity of activeToolActivities(message)) {
       toolActivity.status = 'failed';
       toolActivity.statusText = `${toolActivity.label}时发生错误`;
       toolActivity.finishedAt = this.now();
-      syncLegacyToolActivity(message, toolActivity);
+    }
+    const latestToolActivity = currentToolActivity(message);
+    if (latestToolActivity) {
+      syncLegacyToolActivity(message, latestToolActivity);
     }
     message.pendingUserQuestion = undefined;
     message.content = publicTurnContent(turn, true);
@@ -1156,7 +1408,7 @@ function activeTurnFromDeferred(state: DeferredGenerationTurn): ActiveTurn {
     secret: '',
     terminalEmitted: false,
     updatePending: false,
-    pendingToolCall: cloneToolCall(state.toolCall),
+    pendingToolCalls: state.toolCalls?.map(cloneToolCall) ?? [cloneToolCall(state.toolCall)],
     modelTurns: state.modelTurns ?? 1,
     lengthContinuations: state.lengthContinuations ?? 0,
     toolAttemptSignatures: [...(state.toolAttemptSignatures ?? [])],
@@ -1199,6 +1451,32 @@ function cloneToolCall(call: GenerationToolCall): GenerationToolCall {
   return { ...call, arguments: { ...call.arguments } };
 }
 
+function cloneToolExecutionResult(
+  execution: GenerationToolExecutionResult,
+): GenerationToolExecutionResult {
+  return {
+    ...execution,
+    ...(execution.images ? { images: execution.images.map((image) => ({ ...image })) } : {}),
+    ...(execution.nextPageSnapshot
+      ? { nextPageSnapshot: structuredClone(execution.nextPageSnapshot) }
+      : {}),
+    ...(execution.pageSnapshots
+      ? { pageSnapshots: execution.pageSnapshots.map((snapshot) => structuredClone(snapshot)) }
+      : {}),
+  };
+}
+
+function clonePersistedToolExecutionResult(
+  execution: GenerationToolExecutionResult,
+): GenerationToolExecutionResult {
+  const { images, ...persisted } = cloneToolExecutionResult(execution);
+  if (!images) return persisted;
+  return {
+    ...persisted,
+    content: `${persisted.content}\n[视觉截图未持久化；如仍需要视觉信息，请重新观察页面。]`,
+  };
+}
+
 function sameModelIdentity(current: ModelIdentity, expected: ModelIdentity): boolean {
   return current.providerId === expected.providerId && current.modelId === expected.modelId;
 }
@@ -1233,6 +1511,28 @@ function currentToolActivity(
   message: ChatMessage,
 ): NonNullable<ChatMessage['toolActivity']> | null {
   return message.toolActivities?.at(-1) ?? message.toolActivity ?? null;
+}
+
+function activeToolActivities(
+  message: ChatMessage,
+): Array<NonNullable<ChatMessage['toolActivity']>> {
+  const activities = message.toolActivities ?? (message.toolActivity ? [message.toolActivity] : []);
+  return activities.filter(
+    (activity) =>
+      activity.status === 'running' ||
+      activity.status === 'waiting_permission' ||
+      activity.status === 'waiting_user',
+  );
+}
+
+function findToolActivity(
+  message: ChatMessage,
+  callId: string,
+): NonNullable<ChatMessage['toolActivity']> | null {
+  return (
+    message.toolActivities?.find((activity) => activity.callId === callId) ??
+    (message.toolActivity?.callId === callId ? message.toolActivity : null)
+  );
 }
 
 function syncLegacyToolActivity(
@@ -1291,7 +1591,7 @@ function trailingIdenticalCount(signatures: string[], target: string): number {
 }
 
 function pendingToolName(turn: ActiveTurn): string | undefined {
-  return (turn.pendingToolCall as GenerationToolCall | undefined)?.name;
+  return turn.pendingToolCalls[0]?.name;
 }
 
 function cloneGenerationInputMessages(

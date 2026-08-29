@@ -6,8 +6,11 @@ import {
   ChatGenerationManager,
   type ChatGenerationManagerOptions,
   DEFAULT_MAX_AGENT_TURNS,
+  DEFAULT_MAX_PARALLEL_TOOL_CALLS,
+  DEFAULT_MAX_TOOL_CALLS_PER_ROUND,
   type DeferredGenerationTurn,
 } from '@/lib/generation/manager';
+import { createToolResultCache } from '@/lib/generation/tool-result-cache';
 import type {
   GenerationAdapter,
   GenerationEvent,
@@ -105,6 +108,9 @@ function createManager(
       | (() => GenerationToolDefinition[] | Promise<GenerationToolDefinition[]>);
     executeTool?: GenerationToolExecutor;
     maxAgentTurns?: number;
+    maxToolCallsPerRound?: number;
+    maxParallelToolCalls?: number;
+    resolveToolExecutionMode?: ChatGenerationManagerOptions['resolveToolExecutionMode'];
     maxConsecutiveIdenticalToolCalls?: number;
     onToolDeferred?: (
       turn: DeferredGenerationTurn,
@@ -115,6 +121,7 @@ function createManager(
     compactionThreshold?: number;
     compactMessages?: ChatGenerationManagerOptions['compactMessages'];
     generationSettings?: ChatGenerationManagerOptions['generationSettings'];
+    toolResultCache?: ChatGenerationManagerOptions['toolResultCache'];
   } = {},
 ) {
   return new ChatGenerationManager({
@@ -143,7 +150,7 @@ function deferred<T>() {
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
     if (predicate()) return;
     await Promise.resolve();
   }
@@ -529,6 +536,7 @@ describe('ChatGenerationManager', () => {
         modelName: 'gpt-test',
         supportsImageInput: true,
       },
+      batch: { id: 'request-visual:1', index: 0, size: 1 },
     });
     expect(executionContext).not.toHaveProperty('apiKey');
     expect(manager.getSnapshot()?.message).not.toHaveProperty('images');
@@ -708,6 +716,480 @@ describe('ChatGenerationManager', () => {
     expect(executeTool).toHaveBeenCalledTimes(2);
     expect(requests[2]?.messages).toContainEqual(
       expect.objectContaining({ role: 'toolResult', toolCallId: 'call-2' }),
+    );
+  });
+
+  it('executes every tool in one model batch and returns all results in one continuation', async () => {
+    const requests: GenerationRequest[] = [];
+    const executeTool = vi.fn<GenerationToolExecutor>().mockImplementation(async (call) => ({
+      isError: false,
+      statusText: `已完成 ${call.id}`,
+      content: `result:${call.id}`,
+    }));
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        requests.push(request);
+        if (requests.length === 1) {
+          yield {
+            type: 'tool-call',
+            toolCall: { id: 'batch-1', name: 'read_current_job', arguments: { item: 1 } },
+          };
+          yield {
+            type: 'tool-call',
+            toolCall: { id: 'batch-2', name: 'read_current_job', arguments: { item: 2 } },
+          };
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'text-delta', delta: '批次已完成。' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool,
+    });
+
+    await expect(manager.start('request-batch', HISTORY)).resolves.toMatchObject({
+      status: 'completed',
+      content: '批次已完成。',
+      toolActivities: [
+        { callId: 'batch-1', status: 'succeeded' },
+        { callId: 'batch-2', status: 'succeeded' },
+      ],
+    });
+    expect(requests).toHaveLength(2);
+    expect(executeTool.mock.calls.map(([call]) => call.id)).toEqual(['batch-1', 'batch-2']);
+    expect(executeTool.mock.calls.map((args) => args[4].batch)).toEqual([
+      { id: 'request-batch:1', index: 0, size: 2 },
+      { id: 'request-batch:1', index: 1, size: 2 },
+    ]);
+    expect(requests[1]?.messages).toContainEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        toolCalls: [
+          expect.objectContaining({ id: 'batch-1' }),
+          expect.objectContaining({ id: 'batch-2' }),
+        ],
+      }),
+    );
+    expect(requests[1]?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: 'toolResult', toolCallId: 'batch-1', isError: false }),
+        expect.objectContaining({ role: 'toolResult', toolCallId: 'batch-2', isError: false }),
+      ]),
+    );
+  });
+
+  it('runs declared parallel tools concurrently with a bounded default fan-out', async () => {
+    expect(DEFAULT_MAX_PARALLEL_TOOL_CALLS).toBe(5);
+    const gates = new Map([
+      ['parallel-1', deferred<void>()],
+      ['parallel-2', deferred<void>()],
+      ['parallel-3', deferred<void>()],
+    ]);
+    const started: string[] = [];
+    const executeTool = vi.fn<GenerationToolExecutor>().mockImplementation(async (call) => {
+      started.push(call.id);
+      await gates.get(call.id)?.promise;
+      return { isError: false, statusText: `完成 ${call.id}`, content: call.id };
+    });
+    let round = 0;
+    const adapter: GenerationAdapter = {
+      async *stream() {
+        round += 1;
+        if (round === 1) {
+          for (const id of gates.keys()) {
+            yield {
+              type: 'tool-call',
+              toolCall: { id, name: 'read_current_job', arguments: {} },
+            } as const;
+          }
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'text-delta', delta: 'parallel done' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool,
+      resolveToolExecutionMode: async () => 'parallel' as const,
+    });
+
+    const pending = manager.start('request-parallel', HISTORY);
+    await waitFor(() => started.length === 3);
+    expect(started).toEqual(['parallel-1', 'parallel-2', 'parallel-3']);
+    for (const gate of gates.values()) gate.resolve();
+
+    await expect(pending).resolves.toMatchObject({
+      status: 'completed',
+      content: 'parallel done',
+    });
+  });
+
+  it('uses serial calls as barriers between parallel waves', async () => {
+    const parallelGate = deferred<void>();
+    const serialGate = deferred<void>();
+    const started: string[] = [];
+    const executeTool = vi.fn<GenerationToolExecutor>().mockImplementation(async (call) => {
+      started.push(call.id);
+      if (call.id === 'parallel-1' || call.id === 'parallel-2') await parallelGate.promise;
+      if (call.id === 'serial') await serialGate.promise;
+      return { isError: false, statusText: `完成 ${call.id}`, content: call.id };
+    });
+    let round = 0;
+    const adapter: GenerationAdapter = {
+      async *stream() {
+        round += 1;
+        if (round === 1) {
+          for (const id of ['parallel-1', 'parallel-2', 'serial', 'parallel-3']) {
+            yield {
+              type: 'tool-call',
+              toolCall: { id, name: 'read_current_job', arguments: {} },
+            } as const;
+          }
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool,
+      resolveToolExecutionMode: (call) => (call.id === 'serial' ? 'serial' : 'parallel'),
+    });
+
+    const pending = manager.start('request-barrier', HISTORY);
+    await waitFor(() => started.length === 2);
+    expect(started).toEqual(['parallel-1', 'parallel-2']);
+    parallelGate.resolve();
+    await waitFor(() => started.includes('serial'));
+    expect(started).not.toContain('parallel-3');
+    serialGate.resolve();
+
+    await expect(pending).resolves.toMatchObject({ status: 'completed' });
+    expect(started).toEqual(['parallel-1', 'parallel-2', 'serial', 'parallel-3']);
+  });
+
+  it('M5.1: serves a repeated identical read call from the tool result cache', async () => {
+    const executeTool = vi.fn<GenerationToolExecutor>().mockImplementation(async (call) => ({
+      isError: false,
+      statusText: `已读取 ${call.id}`,
+      content: `内容-${call.id}`,
+    }));
+    const requests: GenerationRequest[] = [];
+    let round = 0;
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        requests.push(request);
+        round += 1;
+        if (round === 1) {
+          yield {
+            type: 'tool-call',
+            toolCall: { id: 'read-1', name: 'read_current_job', arguments: {} },
+          } as const;
+          yield {
+            type: 'tool-call',
+            toolCall: { id: 'read-2', name: 'read_current_job', arguments: {} },
+          } as const;
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'text-delta', delta: 'done' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const toolResultCache = createToolResultCache({
+      resolvePageKey: () => ({ tabId: 7, urlKey: 'https://example.com/page' }),
+      cacheable: () => true,
+    });
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool,
+      resolveToolExecutionMode: async () => 'serial' as const,
+      toolResultCache,
+    });
+
+    await expect(manager.start('request-cache', HISTORY)).resolves.toMatchObject({
+      status: 'completed',
+    });
+    expect(executeTool).toHaveBeenCalledTimes(1); // 第二次同键调用直接命中缓存
+    expect(toolResultCache.stats()).toMatchObject({ hits: 1, writes: 1 });
+    const toolResults = requests[1]?.messages.filter((message) => message.role === 'toolResult');
+    expect(toolResults?.[0]?.content).toContain('内容-read-1');
+    expect(toolResults?.[1]?.content).toContain('（cached）');
+  });
+
+  it('M5.3: appends the executor hint to the model-visible tool result', async () => {
+    const executeTool = vi.fn<GenerationToolExecutor>().mockImplementation(async (call) => ({
+      isError: false,
+      statusText: '已打开新标签页',
+      content: 'tab opened',
+      hint: `下一步建议：用 read_current_page(tabId=${call.id}) 读取内容`,
+    }));
+    const requests: GenerationRequest[] = [];
+    let round = 0;
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        requests.push(request);
+        round += 1;
+        if (round === 1) {
+          yield {
+            type: 'tool-call',
+            toolCall: {
+              id: 'read-hint',
+              name: 'read_current_job',
+              arguments: {},
+            },
+          } as const;
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool,
+    });
+
+    await expect(manager.start('request-hint', HISTORY)).resolves.toMatchObject({
+      status: 'completed',
+    });
+    const toolResult = requests[1]?.messages.find((message) => message.role === 'toolResult');
+    expect(toolResult?.content).toContain('[hint]');
+    expect(toolResult?.content).toContain('read_current_page(tabId=read-hint)');
+  });
+
+  it('fails closed when a tool marked parallel unexpectedly requests user confirmation', async () => {
+    const onToolDeferred = vi.fn();
+    const executeTool = vi.fn<GenerationToolExecutor>().mockImplementation(async (call) => {
+      if (call.id === 'unexpected-deferred') {
+        return {
+          deferred: true,
+          kind: 'user_input',
+          statusText: '等待用户确认',
+          question: '继续吗？',
+          options: [{ id: 'yes', label: '继续' }],
+          allowCustom: false,
+        };
+      }
+      return { isError: false, statusText: '另一项完成', content: 'ok' };
+    });
+    const adapter = adapterFrom(async function* () {
+      yield {
+        type: 'tool-call',
+        toolCall: { id: 'unexpected-deferred', name: 'read_current_job', arguments: {} },
+      };
+      yield {
+        type: 'tool-call',
+        toolCall: { id: 'parallel-ok', name: 'read_current_job', arguments: {} },
+      };
+      yield { type: 'finish', reason: 'tool', usage: USAGE };
+    });
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool,
+      resolveToolExecutionMode: () => 'parallel',
+      onToolDeferred,
+    });
+
+    await expect(manager.start('request-parallel-deferred', HISTORY)).resolves.toMatchObject({
+      status: 'error',
+      errorCode: 'INVALID_RESPONSE',
+      errorMessage: expect.stringContaining('改为串行调度'),
+      toolActivities: [
+        { callId: 'unexpected-deferred', status: 'failed' },
+        { callId: 'parallel-ok', status: 'succeeded' },
+      ],
+    });
+    expect(onToolDeferred).not.toHaveBeenCalled();
+  });
+
+  it('limits each parallel wave and cancels every in-flight activity together', async () => {
+    const firstWaveGate = deferred<void>();
+    const started: string[] = [];
+    const executeTool = vi.fn<GenerationToolExecutor>().mockImplementation(async (call, signal) => {
+      started.push(call.id);
+      if (call.id !== 'parallel-3') {
+        await firstWaveGate.promise;
+      } else {
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      }
+      if (signal.aborted) throw signal.reason;
+      return { isError: false, statusText: `完成 ${call.id}`, content: call.id };
+    });
+    const adapter = adapterFrom(async function* () {
+      for (const id of ['parallel-1', 'parallel-2', 'parallel-3']) {
+        yield {
+          type: 'tool-call',
+          toolCall: { id, name: 'read_current_job', arguments: {} },
+        } as const;
+      }
+      yield { type: 'finish', reason: 'tool', usage: USAGE };
+    });
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool,
+      resolveToolExecutionMode: () => 'parallel',
+      maxParallelToolCalls: 2,
+    });
+
+    const pending = manager.start('request-parallel-limit', HISTORY);
+    await waitFor(() => started.length === 2);
+    expect(started).toEqual(['parallel-1', 'parallel-2']);
+    firstWaveGate.resolve();
+    await waitFor(() => started.length === 3);
+    expect(manager.stop('request-parallel-limit')).toBe(true);
+
+    await expect(pending).resolves.toMatchObject({
+      status: 'cancelled',
+      toolActivities: [
+        { callId: 'parallel-1', status: 'succeeded' },
+        { callId: 'parallel-2', status: 'succeeded' },
+        { callId: 'parallel-3', status: 'cancelled' },
+      ],
+    });
+  });
+
+  it('isolates a thrown tool failure and continues the remaining batch', async () => {
+    const requests: GenerationRequest[] = [];
+    const executeTool = vi.fn<GenerationToolExecutor>().mockImplementation(async (call) => {
+      if (call.id === 'batch-failed') throw new Error('executor failed apiKey=private-value');
+      return { isError: false, statusText: '第二项完成', content: 'second-result' };
+    });
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        requests.push(request);
+        if (requests.length === 1) {
+          yield {
+            type: 'tool-call',
+            toolCall: { id: 'batch-failed', name: 'read_current_job', arguments: {} },
+          };
+          yield {
+            type: 'tool-call',
+            toolCall: { id: 'batch-ok', name: 'read_current_job', arguments: {} },
+          };
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'text-delta', delta: '已根据可用结果继续。' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target('openai', 'gpt-test', 'private-value'), {
+      tools: [READ_JOB_TOOL],
+      executeTool,
+    });
+
+    await expect(manager.start('request-partial-batch', HISTORY)).resolves.toMatchObject({
+      status: 'completed',
+      toolActivities: [
+        { callId: 'batch-failed', status: 'failed' },
+        { callId: 'batch-ok', status: 'succeeded' },
+      ],
+    });
+    expect(executeTool).toHaveBeenCalledTimes(2);
+    const results = requests[1]?.messages.filter((message) => message.role === 'toolResult');
+    expect(results).toEqual([
+      expect.objectContaining({ toolCallId: 'batch-failed', isError: true }),
+      expect.objectContaining({ toolCallId: 'batch-ok', isError: false }),
+    ]);
+    expect(JSON.stringify(results)).not.toContain('private-value');
+  });
+
+  it('resumes a deferred batch from its exact tool index without replaying completed work', async () => {
+    const requests: GenerationRequest[] = [];
+    let deferredTurn: DeferredGenerationTurn | undefined;
+    const executeTool = vi.fn<GenerationToolExecutor>().mockImplementation(async (call) => {
+      if (call.id === 'batch-1') {
+        return { isError: false, statusText: '第一项完成', content: 'first-result' };
+      }
+      if (call.id === 'batch-2') {
+        return {
+          deferred: true,
+          kind: 'page_permission',
+          statusText: '等待页面权限',
+          detail: '需要页面权限',
+          permissionPattern: 'https://example.com/*',
+          sourceOrigin: 'https://example.com',
+          sourceTitle: 'Example',
+        };
+      }
+      return { isError: false, statusText: '第三项完成', content: 'third-result' };
+    });
+    const adapter: GenerationAdapter = {
+      async *stream(_target, request) {
+        requests.push(request);
+        if (requests.length === 1) {
+          for (const id of ['batch-1', 'batch-2', 'batch-3']) {
+            yield {
+              type: 'tool-call',
+              toolCall: { id, name: 'read_current_job', arguments: { id } },
+            } as const;
+          }
+          yield { type: 'finish', reason: 'tool', usage: USAGE };
+          return;
+        }
+        yield { type: 'text-delta', delta: '恢复后的批次已完成。' };
+        yield { type: 'finish', reason: 'stop', usage: USAGE };
+      },
+    };
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool,
+      onToolDeferred: (turn) => {
+        deferredTurn = turn;
+      },
+    });
+
+    await expect(manager.start('request-deferred-batch', HISTORY)).resolves.toMatchObject({
+      status: 'streaming',
+      toolActivities: [
+        { callId: 'batch-1', status: 'succeeded' },
+        { callId: 'batch-2', status: 'waiting_permission' },
+      ],
+    });
+    expect(deferredTurn).toMatchObject({
+      version: 5,
+      toolCallIndex: 1,
+      toolCall: { id: 'batch-2' },
+      toolCalls: [{ id: 'batch-1' }, { id: 'batch-2' }, { id: 'batch-3' }],
+      completedToolExecutions: [{ content: 'first-result' }],
+    });
+    if (!deferredTurn) throw new Error('deferred batch was not persisted');
+
+    await expect(
+      manager.resumeDeferred(deferredTurn, HISTORY, {
+        isError: false,
+        statusText: '第二项已授权完成',
+        content: 'second-result',
+      }),
+    ).resolves.toMatchObject({
+      status: 'completed',
+      content: '恢复后的批次已完成。',
+      toolActivities: [
+        { callId: 'batch-1', status: 'succeeded' },
+        { callId: 'batch-2', status: 'succeeded' },
+        { callId: 'batch-3', status: 'succeeded' },
+      ],
+    });
+    expect(executeTool.mock.calls.map(([call]) => call.id)).toEqual([
+      'batch-1',
+      'batch-2',
+      'batch-3',
+    ]);
+    expect(requests[1]?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: 'toolResult', toolCallId: 'batch-1' }),
+        expect.objectContaining({ role: 'toolResult', toolCallId: 'batch-2' }),
+        expect.objectContaining({ role: 'toolResult', toolCallId: 'batch-3' }),
+      ]),
     );
   });
 
@@ -955,7 +1437,7 @@ describe('ChatGenerationManager', () => {
     });
   });
 
-  it('rejects unknown or repeated tool calls without executing them', async () => {
+  it('rejects unknown tools and duplicate call IDs before executing a batch', async () => {
     const executeTool = vi.fn<GenerationToolExecutor>();
     const unknown = adapterFrom(async function* () {
       yield {
@@ -973,23 +1455,50 @@ describe('ChatGenerationManager', () => {
       errorCode: 'INVALID_RESPONSE',
     });
 
-    const repeated = adapterFrom(async function* () {
+    const duplicateIds = adapterFrom(async function* () {
       yield {
         type: 'tool-call',
         toolCall: { id: 'call-1', name: 'read_current_job', arguments: {} },
       };
       yield {
         type: 'tool-call',
-        toolCall: { id: 'call-2', name: 'read_current_job', arguments: {} },
+        toolCall: { id: 'call-1', name: 'read_current_job', arguments: {} },
       };
+      yield { type: 'finish', reason: 'tool', usage: USAGE };
     });
-    const repeatedManager = createManager(repeated, () => target(), {
+    const duplicateIdsManager = createManager(duplicateIds, () => target(), {
       tools: [READ_JOB_TOOL],
       executeTool,
     });
-    await expect(repeatedManager.start('request-repeat', HISTORY)).resolves.toMatchObject({
+    await expect(duplicateIdsManager.start('request-duplicate', HISTORY)).resolves.toMatchObject({
       status: 'error',
       errorCode: 'INVALID_RESPONSE',
+    });
+    expect(executeTool).not.toHaveBeenCalled();
+  });
+
+  it('bounds tool fan-out before any batch member executes', async () => {
+    expect(DEFAULT_MAX_TOOL_CALLS_PER_ROUND).toBe(16);
+    const executeTool = vi.fn<GenerationToolExecutor>();
+    const adapter = adapterFrom(async function* () {
+      for (const id of ['call-1', 'call-2', 'call-3']) {
+        yield {
+          type: 'tool-call',
+          toolCall: { id, name: 'read_current_job', arguments: {} },
+        } as const;
+      }
+      yield { type: 'finish', reason: 'tool', usage: USAGE };
+    });
+    const manager = createManager(adapter, () => target(), {
+      tools: [READ_JOB_TOOL],
+      executeTool,
+      maxToolCallsPerRound: 2,
+    });
+
+    await expect(manager.start('request-fan-out', HISTORY)).resolves.toMatchObject({
+      status: 'error',
+      errorCode: 'INVALID_RESPONSE',
+      errorMessage: expect.stringContaining('超过 2 个安全上限'),
     });
     expect(executeTool).not.toHaveBeenCalled();
   });
@@ -1429,7 +1938,7 @@ describe('ChatGenerationManager', () => {
       toolActivity: { name: 'ask_user', status: 'waiting_user' },
     });
     expect(deferredTurn).toMatchObject({
-      version: 4,
+      version: 5,
       modelTurns: 1,
       systemPrompt: 'system',
       tools: [ASK_USER_TOOL],
@@ -1621,7 +2130,7 @@ describe('ChatGenerationManager', () => {
     expect(prompts).toEqual(['dynamic-1', 'dynamic-1']);
   });
 
-  it('resolves a dynamic tool catalog once and persists it in version 4 pauses', async () => {
+  it('resolves a dynamic tool catalog once and persists it in version 5 pauses', async () => {
     let deferredTurn: DeferredGenerationTurn | undefined;
     const resolver = vi.fn(async () => [ASK_USER_TOOL]);
     const adapter = adapterFrom(async function* () {
@@ -1644,7 +2153,7 @@ describe('ChatGenerationManager', () => {
     });
     await manager.start('dynamic-tools', HISTORY);
     expect(resolver).toHaveBeenCalledTimes(1);
-    expect(deferredTurn).toMatchObject({ version: 4, tools: [ASK_USER_TOOL] });
+    expect(deferredTurn).toMatchObject({ version: 5, tools: [ASK_USER_TOOL] });
   });
 
   it('restores the persisted system prompt when a deferred turn resumes', async () => {

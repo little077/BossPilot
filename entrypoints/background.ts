@@ -3,7 +3,7 @@ import { ConversationAgent } from '@/lib/agent/conversation-agent';
 import { PolicyEngine, policyConfirm, policyDenied } from '@/lib/agent/policy-engine';
 import { TaskStateMachine, terminalPhaseForEvent } from '@/lib/agent/task-state-machine';
 import { type CatalogToolExecutor, ToolCatalog, type ToolRisk } from '@/lib/agent/tool-catalog';
-import { toolContextManager } from '@/lib/agent/tool-context';
+import { ToolBatchPageContext, toolContextManager } from '@/lib/agent/tool-context';
 import { ToolLedger } from '@/lib/agent/tool-ledger';
 import { captureCurrentPageStructure } from '@/lib/diagnostics/page-structure';
 import { recorder } from '@/lib/diagnostics/recorder';
@@ -17,8 +17,11 @@ import { type ChatGenerationEvent, ChatGenerationManager } from '@/lib/generatio
 import { createPiGenerationAdapter } from '@/lib/generation/pi-adapter';
 import { AgentRunRegistry, createChromeRunRegistryStore } from '@/lib/generation/registry';
 import { resolveActiveGenerationTarget, resolveGenerationTarget } from '@/lib/generation/resolve';
+import { createToolResultCache } from '@/lib/generation/tool-result-cache';
 import type {
+  GenerationToolCall,
   GenerationToolDefinition,
+  GenerationToolExecutionMode,
   GenerationToolExecutionOutcome,
   GenerationToolExecutionResult,
 } from '@/lib/generation/types';
@@ -40,7 +43,8 @@ import { CHAT_SYSTEM } from '@/lib/llm/prompts';
 import { isMcpToolName, McpService } from '@/lib/mcp/service';
 import { buildAgentContextPrompt } from '@/lib/memory/prompt';
 import { MemoryStore } from '@/lib/memory/store';
-import { hasExactPageOriginAccess } from '@/lib/page/access';
+import { hasExactPageOriginAccess, pageOriginPattern } from '@/lib/page/access';
+import { attachPageContext } from '@/lib/page/context';
 import {
   claimPendingPageTurn,
   clearPendingPageTurn,
@@ -50,7 +54,7 @@ import {
   loadPendingPageTurn,
   savePendingPageTurn,
 } from '@/lib/page/pending';
-import { capturePageTurnSnapshot, pageContextHistory } from '@/lib/page/snapshot';
+import { capturePageTurnSnapshot, navigationKey, pageContextHistory } from '@/lib/page/snapshot';
 import { orchestrator } from '@/lib/pipeline/orchestrator';
 import { ProviderService } from '@/lib/providers/service';
 import { skillAppliesToUrl } from '@/lib/skills/origin';
@@ -76,13 +80,18 @@ import { MemoryToolCoordinator, SAVE_MEMORY_TOOL, SEARCH_MEMORY_TOOL } from '@/l
 import {
   INSPECT_PAGE_TOOL,
   INTERACT_PAGE_TOOL,
-  OBSERVE_PAGE_TOOL,
+  inspectPageExecutionMode,
   OBSERVE_VISUAL_PAGE_TOOL,
   PageInteractionCoordinator,
 } from '@/lib/tools/page-interaction';
-import { READ_CURRENT_PAGE_TOOL, readCurrentPage } from '@/lib/tools/read-current-page';
+import {
+  READ_CURRENT_PAGE_TOOL,
+  readCurrentPage,
+  readCurrentPageExecutionMode,
+  resolveReadCurrentPageTarget,
+} from '@/lib/tools/read-current-page';
 import { RUN_SKILL_TOOL, SkillRunCoordinator } from '@/lib/tools/run-skill';
-import { executeTab, TAB_TOOL } from '@/lib/tools/tab';
+import { executeTab, TAB_TOOL, tabExecutionMode } from '@/lib/tools/tab';
 import { WORKSPACE_TOOLS, WorkspaceToolCoordinator } from '@/lib/tools/workspace';
 
 function base64ToBuffer(value: string): ArrayBuffer {
@@ -118,6 +127,12 @@ export default defineBackground({
     const pageInteraction = new PageInteractionCoordinator();
     const titleControllers = new Map<string, { controller: AbortController; requestId: string }>();
 
+    // ─── M5.2 页面变化感知 ───
+    // 记录「每个标签页最近一次成功读取的页面键」，start 注入时据此计算
+    // page_changed_since_last_read；导航类工具执行后删除记录（强制视为已变化）。
+    const lastReadPageByTab = new Map<number, { urlKey: string; at: number }>();
+    const PAGE_CHANGE_SINCE_READ_WINDOW_MS = 10_000;
+
     // ─── 工具目录与策略引擎 ───
     // 工具定义、风险声明与执行器集中注册，Policy Engine 在入口统一门禁。
     const toolCatalog = new ToolCatalog();
@@ -125,7 +140,10 @@ export default defineBackground({
       definition: GenerationToolDefinition,
       risk: ToolRisk,
       execute: CatalogToolExecutor,
-    ) => toolCatalog.register({ definition, risk, execute });
+      scheduling?:
+        | GenerationToolExecutionMode
+        | ((call: GenerationToolCall) => GenerationToolExecutionMode),
+    ) => toolCatalog.register({ definition, risk, execute, ...(scheduling ? { scheduling } : {}) });
     const workspaceWriteNames = new Set([
       'workspace_create',
       'workspace_mkdir',
@@ -134,8 +152,17 @@ export default defineBackground({
       'workspace_delete',
       'workspace_save_url',
     ]);
-    registerTool(READ_CURRENT_PAGE_TOOL, 'safe', async (ctx) =>
-      readCurrentPage(ctx.toolContext.getPageSnapshot(), ctx.signal),
+    registerTool(
+      READ_CURRENT_PAGE_TOOL,
+      'safe',
+      async (ctx) => {
+        const target = resolveReadCurrentPageTarget(ctx.call, (tabId) =>
+          ctx.toolContext.getPageSnapshot(tabId),
+        );
+        if (!target.ok) return target.result;
+        return readCurrentPage(target.snapshot, ctx.signal);
+      },
+      readCurrentPageExecutionMode,
     );
     registerTool(BROWSER_ACTION_TOOL, 'safe', async (ctx) => {
       const result = await executeBrowserAction(
@@ -152,32 +179,31 @@ export default defineBackground({
       }
       return result;
     });
-    registerTool(TAB_TOOL, 'safe', async (ctx) =>
-      executeTab(
-        ctx.call,
-        ctx.toolContext.getPageSnapshot(),
-        ctx.toolContext.getLatestUserText(),
-        ctx.signal,
-        ctx.reportProgress,
-      ),
+    registerTool(
+      TAB_TOOL,
+      'safe',
+      async (ctx) =>
+        executeTab(
+          ctx.call,
+          ctx.toolContext.getPageSnapshot(),
+          ctx.toolContext.getLatestUserText(),
+          ctx.signal,
+          ctx.reportProgress,
+        ),
+      tabExecutionMode,
     );
-    registerTool(OBSERVE_PAGE_TOOL, 'safe', async (ctx) =>
-      pageInteraction.observe(
-        ctx.call,
-        ctx.toolContext.getPageSnapshot(),
-        ctx.signal,
-        ctx.requestId,
-        ctx.conversationId,
-      ),
-    );
-    registerTool(INSPECT_PAGE_TOOL, 'safe', async (ctx) =>
-      pageInteraction.inspect(
-        ctx.call,
-        ctx.toolContext.getPageSnapshot(),
-        ctx.signal,
-        ctx.requestId,
-        ctx.conversationId,
-      ),
+    registerTool(
+      INSPECT_PAGE_TOOL,
+      'safe',
+      async (ctx) =>
+        pageInteraction.inspect(
+          ctx.call,
+          ctx.toolContext.getPageSnapshot(),
+          ctx.signal,
+          ctx.requestId,
+          ctx.conversationId,
+        ),
+      inspectPageExecutionMode,
     );
     registerTool(OBSERVE_VISUAL_PAGE_TOOL, 'safe', async (ctx) =>
       pageInteraction.observeVisual(
@@ -249,6 +275,19 @@ export default defineBackground({
       (conversationId, publish) => {
         // 每个会话独立的工具上下文
         const toolContext = toolContextManager.getOrCreate(conversationId);
+        // 同一模型工具批次必须从相同页面起点解析；否则第一个导航会污染后续独立调用。
+        const toolBatchPageContext = new ToolBatchPageContext();
+        // M5.1：只读工具结果缓存（read_current_page / inspect_page），键含页面指纹。
+        const toolResultCache = createToolResultCache({
+          resolvePageKey: (call) => {
+            const target =
+              call.name === READ_CURRENT_PAGE_TOOL.name
+                ? resolveReadCurrentPageTarget(call, (tabId) => toolContext.getPageSnapshot(tabId))
+                : { ok: true as const, snapshot: toolContext.getPageSnapshot() };
+            if (!target.ok || !target.snapshot) return null;
+            return { tabId: target.snapshot.tabId, urlKey: navigationKey(target.snapshot.url) };
+          },
+        });
 
         const generationManager = new ChatGenerationManager({
           adapter: generationAdapter,
@@ -275,8 +314,25 @@ export default defineBackground({
             ...toolCatalog.definitions(),
             ...(await mcpService.generationTools()),
           ],
+          toolResultCache,
           executeTool: async (call, signal, requestId, reportProgress, context) => {
             const toolStartedAt = Date.now();
+            const batch = context.batch ?? { id: `${requestId}:${call.id}`, index: 0, size: 1 };
+            if (batch.size > 1) {
+              toolContext.setPageSnapshot(
+                toolBatchPageContext.bind(batch, toolContext.getPageSnapshot()),
+              );
+            }
+            const completeToolBatch = (
+              nextSnapshot?: GenerationToolExecutionResult['nextPageSnapshot'],
+            ) => {
+              if (batch.size <= 1) {
+                if (nextSnapshot) toolContext.setPageSnapshot(nextSnapshot);
+                return;
+              }
+              const completion = toolBatchPageContext.complete(batch, nextSnapshot);
+              if (completion.done) toolContext.setPageSnapshot(completion.pageSnapshot);
+            };
             recorder.step(
               'chat',
               'tool',
@@ -310,6 +366,7 @@ export default defineBackground({
                 statusText: denied.statusText,
                 costMs: Date.now() - toolStartedAt,
               });
+              completeToolBatch();
               return denied;
             }
             const approved = toolContext.revokeToolCallApproval(call.id);
@@ -321,6 +378,7 @@ export default defineBackground({
                 statusText: '等待确认',
                 costMs: Date.now() - toolStartedAt,
               });
+              completeToolBatch();
               return policyConfirm(call, decision, policyEngine.confirmQuestion(call, decision));
             }
             let result: GenerationToolExecutionOutcome;
@@ -349,9 +407,42 @@ export default defineBackground({
               statusText: result.statusText,
               costMs: Date.now() - toolStartedAt,
             });
-            if ('deferred' in result) return result;
+            if ('deferred' in result) {
+              completeToolBatch();
+              return result;
+            }
+            for (const pageSnapshot of result.pageSnapshots ?? []) {
+              toolContext.rememberPageSnapshot(pageSnapshot);
+            }
             if (result.nextPageSnapshot) {
-              toolContext.setPageSnapshot(result.nextPageSnapshot);
+              toolContext.rememberPageSnapshot(result.nextPageSnapshot);
+            }
+            if (
+              !result.isError &&
+              call.name === TAB_TOOL.name &&
+              call.arguments.action === 'close' &&
+              Number.isInteger(call.arguments.tabId)
+            ) {
+              toolContext.forgetPageSnapshot(Number(call.arguments.tabId));
+            }
+            completeToolBatch(result.nextPageSnapshot);
+            // M5.1/M5.2：只读工具成功 → 记录「该页已读取」；导航类工具 → 失效缓存与读取记录。
+            if (call.name === READ_CURRENT_PAGE_TOOL.name || call.name === INSPECT_PAGE_TOOL.name) {
+              if (!result.isError) {
+                const readPage = result.nextPageSnapshot ?? toolContext.getPageSnapshot();
+                if (readPage) {
+                  lastReadPageByTab.set(readPage.tabId, {
+                    urlKey: navigationKey(readPage.url),
+                    at: Date.now(),
+                  });
+                }
+              }
+            } else if (call.name === TAB_TOOL.name || call.name === BROWSER_ACTION_TOOL.name) {
+              const navPage = result.nextPageSnapshot ?? toolContext.getPageSnapshot();
+              if (navPage) {
+                lastReadPageByTab.delete(navPage.tabId);
+                toolResultCache.invalidatePage(navPage.tabId);
+              }
             }
             const toolCostMs = Date.now() - toolStartedAt;
             recorder.step(
@@ -362,6 +453,23 @@ export default defineBackground({
               conversationId,
             );
             return result;
+          },
+          resolveToolExecutionMode: async (call) => {
+            const declared = toolCatalog.executionMode(call);
+            if (declared !== 'parallel' || call.name !== READ_CURRENT_PAGE_TOOL.name) {
+              return declared;
+            }
+            const target = resolveReadCurrentPageTarget(call, (tabId) =>
+              toolContext.getPageSnapshot(tabId),
+            );
+            if (!target.ok || !target.snapshot?.origin) return 'serial';
+            const pattern = pageOriginPattern(target.snapshot.origin);
+            if (!pattern) return 'serial';
+            try {
+              return (await hasExactPageOriginAccess(pattern)) ? 'parallel' : 'serial';
+            } catch {
+              return 'serial';
+            }
           },
           onToolDeferred: async (generation, deferred) => {
             const snapshot = toolContext.getPageSnapshot();
@@ -975,7 +1083,17 @@ export default defineBackground({
       });
 
       try {
-        await agentManager.startTask(conversationId, requestId, history, snapshot);
+        // 正常发送路径注入页面上下文（活动页 + 全部标签页 + 变化感知），
+        // 模型首轮即知 tabId/URL，无需先侦察；恢复路径复用 pageContextHistory。
+        const changedSinceLastRead = (() => {
+          if (!snapshot) return true;
+          const lastRead = lastReadPageByTab.get(snapshot.tabId);
+          if (!lastRead) return true;
+          if (lastRead.urlKey !== navigationKey(snapshot.url)) return true;
+          return Date.now() - lastRead.at > PAGE_CHANGE_SINCE_READ_WINDOW_MS;
+        })();
+        const contextualHistory = await attachPageContext(history, snapshot, changedSinceLastRead);
+        await agentManager.startTask(conversationId, requestId, contextualHistory, snapshot);
       } catch (error) {
         toolContext.deleteDiagnostic(requestId);
         void taskStateMachine.transition(conversationId, 'interrupted', {

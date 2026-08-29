@@ -6,9 +6,66 @@ import type { ChatMessage } from '@/lib/domain/chat';
 import type { PageTurnSnapshot } from '@/lib/domain/types';
 import type { SkillRunApproval } from '@/lib/tools/run-skill';
 
+export interface ToolBatchScope {
+  id: string;
+  index: number;
+  size: number;
+}
+
+interface ToolBatchPageState {
+  baseline: PageTurnSnapshot | null;
+  completed: Set<number>;
+  nextSnapshots: Map<number, PageTurnSnapshot>;
+}
+
+export type ToolBatchPageCompletion =
+  | { done: false }
+  | { done: true; pageSnapshot: PageTurnSnapshot | null };
+
+/** 为同一模型回合的独立工具绑定不可变页面起点，避免前一个导航污染后一个调用。 */
+export class ToolBatchPageContext {
+  private readonly batches = new Map<string, ToolBatchPageState>();
+
+  bind(scope: ToolBatchScope, current: PageTurnSnapshot | null): PageTurnSnapshot | null {
+    if (scope.size <= 1) return clonePageSnapshot(current);
+    if (!this.batches.has(scope.id)) {
+      this.batches.set(scope.id, {
+        baseline: clonePageSnapshot(current),
+        completed: new Set(),
+        nextSnapshots: new Map(),
+      });
+    }
+    return clonePageSnapshot(this.batches.get(scope.id)?.baseline ?? null);
+  }
+
+  complete(scope: ToolBatchScope, nextSnapshot?: PageTurnSnapshot): ToolBatchPageCompletion {
+    if (scope.size <= 1) {
+      return { done: true, pageSnapshot: clonePageSnapshot(nextSnapshot ?? null) };
+    }
+    const state = this.batches.get(scope.id);
+    if (!state) return { done: false };
+    state.completed.add(scope.index);
+    if (nextSnapshot) state.nextSnapshots.set(scope.index, structuredClone(nextSnapshot));
+    if (state.completed.size < scope.size) return { done: false };
+
+    let pageSnapshot = state.baseline;
+    for (let index = scope.size - 1; index >= 0; index -= 1) {
+      const candidate = state.nextSnapshots.get(index);
+      if (candidate) {
+        pageSnapshot = candidate;
+        break;
+      }
+    }
+    this.batches.delete(scope.id);
+    return { done: true, pageSnapshot: clonePageSnapshot(pageSnapshot) };
+  }
+}
+
 export interface ToolContextState {
   /** 当前页面快照（随浏览器导航更新） */
   pageSnapshot: PageTurnSnapshot | null;
+  /** 本会话由 tab.open/list 或页面工具实际返回过的可信标签页句柄。 */
+  pageSnapshotsByTabId: Map<number, PageTurnSnapshot>;
   /** 当前会话的完整对话历史 */
   chatHistory: ChatMessage[];
   /** 最后一条用户输入（用于诊断和工具上下文） */
@@ -46,6 +103,7 @@ export class ToolContext {
   private createInitialState(): ToolContextState {
     return {
       pageSnapshot: null,
+      pageSnapshotsByTabId: new Map(),
       chatHistory: [],
       latestUserText: '',
       approvedToolCalls: new Set(),
@@ -56,12 +114,30 @@ export class ToolContext {
 
   // ─── 页面快照 ───
 
-  getPageSnapshot(): PageTurnSnapshot | null {
-    return this.state.pageSnapshot;
+  getPageSnapshot(tabId?: number): PageTurnSnapshot | null {
+    const snapshot =
+      tabId === undefined ? this.state.pageSnapshot : this.state.pageSnapshotsByTabId.get(tabId);
+    return snapshot ? structuredClone(snapshot) : null;
   }
 
   setPageSnapshot(snapshot: PageTurnSnapshot | null): void {
-    this.state.pageSnapshot = snapshot;
+    this.state.pageSnapshot = snapshot ? structuredClone(snapshot) : null;
+    if (snapshot) this.rememberPageSnapshot(snapshot);
+  }
+
+  rememberPageSnapshot(snapshot: PageTurnSnapshot): void {
+    this.state.pageSnapshotsByTabId.set(snapshot.tabId, structuredClone(snapshot));
+  }
+
+  forgetPageSnapshot(tabId: number): boolean {
+    if (this.state.pageSnapshot?.tabId === tabId) this.state.pageSnapshot = null;
+    return this.state.pageSnapshotsByTabId.delete(tabId);
+  }
+
+  getPageSnapshots(): PageTurnSnapshot[] {
+    return [...this.state.pageSnapshotsByTabId.values()].map((snapshot) =>
+      structuredClone(snapshot),
+    );
   }
 
   // ─── 对话历史 ───
@@ -154,6 +230,7 @@ export class ToolContext {
    */
   resetForNewTask(): void {
     this.state.pageSnapshot = null;
+    this.state.pageSnapshotsByTabId.clear();
     this.state.chatHistory = [];
     this.state.latestUserText = '';
     this.diagnostics.clear();
@@ -226,3 +303,7 @@ export class ToolContextManager {
 
 // 全局单例
 export const toolContextManager = new ToolContextManager();
+
+function clonePageSnapshot(snapshot: PageTurnSnapshot | null): PageTurnSnapshot | null {
+  return snapshot ? structuredClone(snapshot) : null;
+}

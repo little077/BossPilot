@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { extractJobDetail, extractJobList } from '@/lib/adapter/zhipin';
 import type { PageScriptExtraction, PageTurnSnapshot } from '@/lib/domain/types';
-import { READ_CURRENT_PAGE_TOOL, readCurrentPage } from './read-current-page';
+import {
+  READ_CURRENT_PAGE_TOOL,
+  readCurrentPage,
+  readCurrentPageExecutionMode,
+  resolveReadCurrentPageTarget,
+} from './read-current-page';
 
 const tabsGet = vi.fn();
 const contains = vi.fn();
@@ -35,6 +40,7 @@ function extraction(overrides: Partial<PageScriptExtraction> = {}): PageScriptEx
       controls: { total: 2, byRole: [{ role: 'link', count: 2 }] },
       truncated: false,
     },
+    pageLinks: [],
     originalChars: 16,
     returnedChars: 16,
     truncated: false,
@@ -42,6 +48,22 @@ function extraction(overrides: Partial<PageScriptExtraction> = {}): PageScriptEx
     untrusted: true,
     ...overrides,
   };
+}
+
+function deferred<T>() {
+  let resolve: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error('condition was not met');
 }
 
 beforeEach(() => {
@@ -65,12 +87,97 @@ afterEach(() => {
 });
 
 describe('readCurrentPage', () => {
-  it('publishes a no-argument, read-only model tool definition', () => {
+  it('publishes an optional stable-tab handle and remains read-only', () => {
     expect(READ_CURRENT_PAGE_TOOL).toMatchObject({
       name: 'read_current_page',
-      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      parameters: {
+        type: 'object',
+        properties: { tabId: { type: 'number', minimum: 0 } },
+        additionalProperties: false,
+      },
     });
     expect(READ_CURRENT_PAGE_TOOL.description).toContain('不点击');
+  });
+
+  it('resolves only current or registered handles and never guesses an explicit tabId', () => {
+    const second = {
+      ...SNAPSHOT,
+      tabId: 8,
+      url: 'https://example.com/second',
+      safeUrl: 'https://example.com/second',
+    };
+    const getSnapshot = (tabId?: number) =>
+      tabId === undefined ? SNAPSHOT : tabId === second.tabId ? second : null;
+
+    expect(
+      resolveReadCurrentPageTarget(
+        { id: 'current', name: 'read_current_page', arguments: {} },
+        getSnapshot,
+      ),
+    ).toEqual({ ok: true, snapshot: SNAPSHOT });
+    expect(
+      resolveReadCurrentPageTarget(
+        { id: 'second', name: 'read_current_page', arguments: { tabId: 8 } },
+        getSnapshot,
+      ),
+    ).toEqual({ ok: true, snapshot: second, tabId: 8 });
+    expect(
+      resolveReadCurrentPageTarget(
+        { id: 'missing', name: 'read_current_page', arguments: { tabId: 99 } },
+        getSnapshot,
+      ),
+    ).toMatchObject({ ok: false, result: { errorCode: 'TAB_NOT_FOUND' } });
+    expect(
+      resolveReadCurrentPageTarget(
+        { id: 'invalid', name: 'read_current_page', arguments: { tabId: -1 } },
+        getSnapshot,
+      ),
+    ).toMatchObject({ ok: false, result: { errorCode: 'INVALID_BROWSER_ACTION' } });
+  });
+
+  it('marks only explicitly targeted reads as parallel candidates', () => {
+    expect(
+      readCurrentPageExecutionMode({ id: 'current', name: 'read_current_page', arguments: {} }),
+    ).toBe('serial');
+    expect(
+      readCurrentPageExecutionMode({
+        id: 'bound',
+        name: 'read_current_page',
+        arguments: { tabId: 8 },
+      }),
+    ).toBe('parallel');
+  });
+
+  it('reads different bound tabs concurrently without using the active tab', async () => {
+    const second = {
+      ...SNAPSHOT,
+      tabId: 8,
+      url: 'https://example.com/second',
+      safeUrl: 'https://example.com/second',
+      title: 'Second article',
+    };
+    tabsGet.mockImplementation(async (tabId: number) => ({
+      id: tabId,
+      windowId: SNAPSHOT.windowId,
+      url: tabId === second.tabId ? second.url : SNAPSHOT.url,
+    }));
+    const firstGate = deferred<Array<{ result: unknown }>>();
+    const secondGate = deferred<Array<{ result: unknown }>>();
+    executeScript.mockImplementation((options: { target: { tabId: number } }) =>
+      options.target.tabId === second.tabId ? secondGate.promise : firstGate.promise,
+    );
+
+    const firstRead = readCurrentPage(SNAPSHOT, new AbortController().signal);
+    const secondRead = readCurrentPage(second, new AbortController().signal);
+    await waitFor(() => executeScript.mock.calls.length === 2);
+    expect(executeScript.mock.calls.map(([options]) => options.target.tabId)).toEqual([7, 8]);
+
+    firstGate.resolve([{ result: extraction() }]);
+    secondGate.resolve([{ result: extraction({ executionUrl: second.url }) }]);
+    await expect(Promise.all([firstRead, secondRead])).resolves.toEqual([
+      expect.objectContaining({ isError: false, sourceUrl: SNAPSHOT.safeUrl }),
+      expect.objectContaining({ isError: false, sourceUrl: second.safeUrl }),
+    ]);
   });
 
   it('reads pure text from the snapshotted page and exposes only a safe source URL', async () => {
@@ -112,6 +219,58 @@ describe('readCurrentPage', () => {
     contains.mockResolvedValue(false);
     await expect(readCurrentPage(SNAPSHOT, new AbortController().signal)).resolves.toMatchObject({
       isError: false,
+    });
+  });
+
+  it('exposes visible page links for grounded tab opens', async () => {
+    executeScript.mockResolvedValue([
+      {
+        result: extraction({
+          pageLinks: [
+            { text: '第一篇笔记', href: 'https://example.com/note/1?xsec_token=t#frag' },
+            { text: '第二篇笔记', href: 'https://example.com/note/2' },
+            { text: '', href: 'javascript:void(0)' },
+          ],
+        }),
+      },
+    ]);
+
+    const result = await readCurrentPage(SNAPSHOT, new AbortController().signal);
+    expect(result).toMatchObject({ isError: false });
+    if ('content' in result) {
+      expect(result.content).toContain('"pageLinks":[{"text":"第一篇笔记"');
+      expect(result.content).toContain('"href":"https://example.com/note/1?xsec_token=t#frag"');
+      // 非 http(s) 链接被过滤，不进入模型上下文
+      expect(result.content).not.toContain('javascript:');
+    }
+  });
+
+  it('tolerates SPA query changes but still rejects a different pathname', async () => {
+    // 小红书式滚动：query 变化不算页面跳转
+    tabsGet.mockResolvedValue({
+      id: SNAPSHOT.tabId,
+      windowId: SNAPSHOT.windowId,
+      url: 'https://example.com/article?xsec_token=newtoken#newhash',
+    });
+    executeScript.mockResolvedValue([
+      {
+        result: extraction({
+          executionUrl: 'https://example.com/article?xsec_token=newtoken#newhash',
+        }),
+      },
+    ]);
+    await expect(readCurrentPage(SNAPSHOT, new AbortController().signal)).resolves.toMatchObject({
+      isError: false,
+    });
+
+    // 跨页面（pathname 不同）仍然严格失败
+    tabsGet.mockResolvedValue({
+      id: SNAPSHOT.tabId,
+      windowId: SNAPSHOT.windowId,
+      url: 'https://example.com/other',
+    });
+    await expect(readCurrentPage(SNAPSHOT, new AbortController().signal)).resolves.toMatchObject({
+      errorCode: 'page_changed',
     });
   });
 

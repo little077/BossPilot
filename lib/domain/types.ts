@@ -193,6 +193,12 @@ export interface PageSemanticStructure {
   truncated: boolean;
 }
 
+/** 页面中可见的链接（供 tab open 等工具校验后打开，文本已截断）。 */
+export interface PageLink {
+  text: string;
+  href: string;
+}
+
 /** 固定页面脚本返回的纯文本结果；任何网页 HTML 都不得跨越该边界。 */
 export interface PageScriptExtraction {
   version: 1;
@@ -202,6 +208,7 @@ export interface PageScriptExtraction {
   mode: PageExtractionMode;
   text: string;
   structure: PageSemanticStructure;
+  pageLinks: PageLink[];
   originalChars: number;
   returnedChars: number;
   truncated: boolean;
@@ -411,7 +418,7 @@ export type DomainToolName =
   | 'read_current_page'
   | 'browser_action'
   | 'tab'
-  | 'observe_page'
+  | 'observe_page' // 已合并入 inspect_page（scope="viewport"），仅历史记录/台账兼容保留，不再注册
   | 'inspect_page'
   | 'observe_visual_page'
   | 'interact_page'

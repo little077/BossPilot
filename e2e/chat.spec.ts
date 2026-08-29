@@ -298,7 +298,6 @@ test('通用当前页工具读取 Boss 岗位并附加领域增强', async ({ co
     'read_current_page',
     'browser_action',
     'tab',
-    'observe_page',
     'inspect_page',
     'observe_visual_page',
     'interact_page',
@@ -863,7 +862,7 @@ test('页面 Agent 跟随点击打开的新标签页并继续执行', async ({ c
 
     let body: string;
     if (toolMessages.length === 0) {
-      body = openAiToolCallBody('observe_page', {}, 'call-observe-source');
+      body = openAiToolCallBody('inspect_page', {}, 'call-inspect-source');
     } else if (toolMessages.length === 1 && observationId) {
       body = openAiToolCallBody(
         'interact_page',

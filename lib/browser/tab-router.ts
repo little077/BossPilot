@@ -5,6 +5,8 @@ import type { BrowserDestination, PageTurnSnapshot } from '@/lib/domain/types';
 
 const LOAD_POLL_MS = 150;
 const DEFAULT_LOAD_TIMEOUT_MS = 12_000;
+/** tab open 的快速等待上限：SPA（如小红书）经常超时，快速返回让模型继续推进。 */
+const OPEN_READY_GRACE_MS = 2_500;
 
 export const KNOWN_BROWSER_DESTINATIONS: Readonly<
   Record<Exclude<BrowserDestination, 'current'>, string>
@@ -125,6 +127,31 @@ export async function waitForTabReady(
     await abortableDelay(LOAD_POLL_MS, signal);
   }
   throw new Error('TAB_LOAD_TIMEOUT: 页面在限定时间内没有加载完成。');
+}
+
+/**
+ * tab open 专用：有界快速等待。页面在宽限期内加载完成则 ready=true；
+ * 超时返回当前标签页与 ready=false（不抛错）——加载未完成不等于失败，
+ * 验证责任交给后续 read_current_page。消灭 SPA 页面反复吃满 12s 超时的问题。
+ */
+export async function waitForTabReadyBounded(
+  tabId: number,
+  signal: AbortSignal,
+  graceMs = OPEN_READY_GRACE_MS,
+): Promise<{ tab: chrome.tabs.Tab; ready: boolean }> {
+  const deadline = Date.now() + graceMs;
+  for (;;) {
+    signal.throwIfAborted();
+    let tab: chrome.tabs.Tab;
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch {
+      throw new Error('TAB_NOT_FOUND: 目标标签页已经关闭。');
+    }
+    if (tab.status === 'complete' && tab.url) return { tab, ready: true };
+    if (Date.now() > deadline) return { tab, ready: false };
+    await abortableDelay(LOAD_POLL_MS, signal);
+  }
 }
 
 export function isSameTarget(value: string, target: URL): boolean {

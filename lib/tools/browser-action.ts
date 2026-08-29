@@ -36,21 +36,21 @@ import {
 
 export const BROWSER_ACTION_TOOL: GenerationToolDefinition = {
   name: 'browser_action',
-  label: '操作浏览器',
+  label: '网页搜索',
   description:
-    '执行确定性的浏览器导航或网页搜索。action="open_or_focus" 会优先复用已打开的目标标签页，否则新建；action="search" 会在 current、baidu、bing、google 或 boss 页面中按可见性和无障碍语义寻找搜索框，输入 query、提交并验证页面变化。已知 destination 不需要猜网址；只有用户消息里明确出现的 HTTP(S) 地址才允许通过 url 打开。不要用它发送聊天、提交求职申请、登录、支付、删除或发布内容。',
+    '执行确定性的网页搜索：在 current、baidu、bing、google 或 boss 页面中按可见性和无障碍语义寻找搜索框，输入 query、提交并验证页面变化。搜索目标页面不存在时自动复用或新建标签页（打开/切换页面请优先用 tab 工具，open_or_focus 已并入 tab.open）。已知 destination 不需要猜网址；只有用户消息里明确出现的 HTTP(S) 地址才允许通过 url 打开。不要用它发送聊天、提交求职申请、登录、支付、删除或发布内容。',
   parameters: {
     type: 'object',
     properties: {
       action: {
         type: 'string',
-        enum: ['open_or_focus', 'search'],
-        description: '打开/切换页面，或执行页面搜索。',
+        enum: ['search'],
+        description: '在目标页面执行搜索。',
       },
       destination: {
         type: 'string',
         enum: ['current', 'baidu', 'bing', 'google', 'boss'],
-        description: 'search 默认 current；open_or_focus 必须选择已知网站或提供 url。',
+        description: '默认 current；搜索将在该网站执行，页面不存在时自动打开。',
       },
       url: {
         type: 'string',
@@ -58,7 +58,7 @@ export const BROWSER_ACTION_TOOL: GenerationToolDefinition = {
       },
       query: {
         type: 'string',
-        description: 'search 操作要输入的搜索词，最多 500 字。',
+        description: '搜索操作要输入的搜索词，最多 500 字。',
       },
     },
     required: ['action'],
@@ -67,7 +67,7 @@ export const BROWSER_ACTION_TOOL: GenerationToolDefinition = {
 };
 
 interface BrowserActionRequest {
-  action: 'open_or_focus' | 'search';
+  action: 'search';
   destination?: BrowserDestination;
   url?: string;
   query?: string;
@@ -103,57 +103,12 @@ export async function executeBrowserAction(
   if (signal.aborted) return cancelled();
 
   try {
-    return await browserResourceCoordinator.withFocus(signal, () => {
-      if (request.action === 'open_or_focus') {
-        return openTarget(request, snapshot, userText, signal, reportProgress);
-      }
-      return searchTarget(request, snapshot, userText, signal, reportProgress);
-    });
+    return await browserResourceCoordinator.withFocus(signal, () =>
+      searchTarget(request, snapshot, userText, signal, reportProgress),
+    );
   } catch (error) {
     if (signal.aborted) return cancelled();
     throw error;
-  }
-}
-
-async function openTarget(
-  request: BrowserActionRequest,
-  snapshot: PageTurnSnapshot | null,
-  userText: string,
-  signal: AbortSignal,
-  reportProgress: ReportProgress,
-): Promise<GenerationToolExecutionResult> {
-  const target = resolveBrowserTarget(request.destination, request.url, userText);
-  if (!target.ok) return failure(target.error, '没有打开目标页面', target.detail);
-
-  try {
-    reportProgress('正在检查已有标签页', '优先复用相同网站，避免重复打开。');
-    const routed = await openOrFocusTab(target.url, snapshot, signal);
-    if (routed.tab.id === undefined) {
-      return failure('TAB_NOT_FOUND', '目标标签页不可用', 'Chrome 没有返回目标标签页 ID。');
-    }
-    reportProgress(
-      routed.reused ? '已切换到已有标签页' : '已新建目标标签页',
-      '正在等待页面加载完成。',
-    );
-    const ready = await waitForTabReady(routed.tab.id, signal);
-    const url = ready.url ?? target.url;
-    return {
-      isError: false,
-      statusText: routed.reused ? '已切换到目标页面' : '已打开目标页面',
-      detail: `${routed.reused ? '复用' : '新建'}标签页 · ${safePageTitle(ready.title ?? '', url) || new URL(url).origin}`,
-      content: browserToolContent({
-        action: 'open_or_focus',
-        reused: routed.reused,
-        page: safePageMetadata(url, ready.title ?? ''),
-      }),
-      sourceOrigin: new URL(url).origin,
-      sourceTitle: safePageTitle(ready.title ?? '', url),
-      sourceUrl: safePageUrl(url),
-      nextPageSnapshot: snapshotFromTab(ready),
-    };
-  } catch (error) {
-    if (signal.aborted) return cancelled();
-    return failureFromError(error, '打开目标页面失败');
   }
 }
 
@@ -307,6 +262,7 @@ async function searchTarget(
     return {
       isError: false,
       statusText: '已完成并验证页面搜索',
+      hint: `下一步建议：用 read_current_page(tabId=${tabId}) 读取搜索结果页内容并整理结果。`,
       detail: [
         `1. ${reused ? '复用' : '新建'}目标标签页`,
         `2. 识别搜索框：${controlLabel(result)}`,
@@ -424,7 +380,7 @@ function fingerprintKey(value: BrowserPageFingerprint): string {
 }
 
 function parseRequest(value: Record<string, unknown>): BrowserActionRequest | null {
-  if (value.action !== 'open_or_focus' && value.action !== 'search') return null;
+  if (value.action !== 'search') return null;
   const destination = isDestination(value.destination) ? value.destination : undefined;
   const url = typeof value.url === 'string' ? value.url.slice(0, 8_192) : undefined;
   const query = typeof value.query === 'string' ? value.query : undefined;

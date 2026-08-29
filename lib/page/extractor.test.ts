@@ -165,4 +165,28 @@ describe('extractCurrentDocument', () => {
     expect(result.returnedChars).toBe(20_000);
     expect(result.truncated).toBe(true);
   });
+
+  it('collects visible http(s) links, deduplicated and bounded', () => {
+    document.body.innerHTML = `
+      <a id="l1" href="/note/1?xsec_token=t">第一篇笔记</a>
+      <a id="l2" href="https://www.xiaohongshu.com/note/2">第二篇笔记</a>
+      <a id="l3" href="/note/1?xsec_token=t">重复链接</a>
+      <a id="l4" href="javascript:void(0)">脚本链接</a>
+      <a id="l5" href="mailto:a@b.c">邮件</a>
+    `;
+    const links = document.querySelectorAll('a');
+    const rect = { bottom: 100, top: 10, width: 80, height: 20 } as DOMRect;
+    for (const link of links) {
+      vi.spyOn(link, 'getBoundingClientRect').mockReturnValue(rect);
+    }
+
+    const result = extractCurrentDocument();
+    expect(result.pageLinks).toHaveLength(2);
+    expect(result.pageLinks[0]).toMatchObject({ text: '第一篇笔记' });
+    expect(result.pageLinks[0]?.href).toMatch(/\/note\/1\?xsec_token=t$/u);
+    expect(result.pageLinks[1]).toEqual({
+      text: '第二篇笔记',
+      href: 'https://www.xiaohongshu.com/note/2',
+    });
+  });
 });

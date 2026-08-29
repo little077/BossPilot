@@ -117,31 +117,67 @@ export function HistoryView({
               <li className="history-row-shell" key={conversation.id}>
                 {isEditing ? (
                   <form
-                    className="history-row-editor"
+                    className="history-row history-row-editing"
                     onSubmit={(event) => {
                       event.preventDefault();
                       void saveTitle(conversation.id);
                     }}
                   >
-                    <label>
-                      <span className="sr-only">会话标题</span>
-                      <input
-                        ref={titleInputRef}
-                        maxLength={60}
-                        value={titleDraft}
-                        onChange={(event) => setTitleDraft(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Escape') cancelEditing();
-                        }}
-                      />
-                    </label>
-                    <button type="submit" aria-label="保存标题">
-                      <Check size={13} />
-                    </button>
-                    <button type="button" aria-label="取消编辑标题" onClick={cancelEditing}>
-                      <X size={13} />
-                    </button>
-                    {renameError ? <span role="alert">{renameError}</span> : null}
+                    <span className="history-row-icon" aria-hidden>
+                      <MessageCircle size={13} />
+                    </span>
+                    <span className="history-row-main">
+                      <span className="history-row-title">
+                        <label className="history-row-title-field">
+                          <span className="sr-only">会话标题</span>
+                          <input
+                            ref={titleInputRef}
+                            maxLength={60}
+                            value={titleDraft}
+                            onChange={(event) => setTitleDraft(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Escape') cancelEditing();
+                            }}
+                          />
+                        </label>
+                        {conversation.unread ? (
+                          <span className="history-unread-dot" aria-hidden />
+                        ) : null}
+                      </span>
+                      <span className="history-row-preview">
+                        {conversation.lastMessagePreview || '等待第一条消息'}
+                      </span>
+                      <span className="history-row-meta">
+                        <Clock3 size={9} />
+                        {formatConversationTime(conversation.updatedAt)}
+                        <span aria-hidden>·</span>
+                        {conversation.messageCount} 条消息
+                        {isRunning ? (
+                          <>
+                            <span aria-hidden>·</span>
+                            <span className="history-running-label">回复中</span>
+                          </>
+                        ) : isCurrent ? (
+                          <>
+                            <span aria-hidden>·</span>
+                            <span>当前会话</span>
+                          </>
+                        ) : null}
+                      </span>
+                    </span>
+                    <span className="history-row-editor-actions">
+                      <button type="submit" aria-label="保存标题">
+                        <Check size={13} />
+                      </button>
+                      <button type="button" aria-label="取消编辑标题" onClick={cancelEditing}>
+                        <X size={13} />
+                      </button>
+                    </span>
+                    {renameError ? (
+                      <span className="history-row-rename-error" role="alert">
+                        {renameError}
+                      </span>
+                    ) : null}
                   </form>
                 ) : (
                   <>

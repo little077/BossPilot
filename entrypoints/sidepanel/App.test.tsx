@@ -81,10 +81,7 @@ vi.mock('./Composer', async () => {
               onChange={(event) => setText(event.target.value)}
             />
           </label>
-          <div className="composer-tools">
-            <span>Enter 发送</span>
-            {tools}
-          </div>
+          <div className="composer-tools">{tools}</div>
           <button type="button" onClick={() => void onSend(text, [])}>
             触发发送
           </button>
@@ -576,14 +573,10 @@ describe('会话运行偏好（模型选择器）', () => {
     expect(controlsRow?.contains(thinkingSelect)).toBe(true);
     const composer = modelSelect.closest('[data-testid="composer"]');
     expect(composer).not.toBeNull();
-    // 选择器位于「Enter 发送」提示之后（同一工具行内，提示在前、选择器在后）
+    // 选择器渲染在输入框的工具行容器内（Enter 提示文案已移除）
     const toolsRow = modelSelect.closest('.composer-tools');
     expect(toolsRow).not.toBeNull();
-    const enterHint = toolsRow?.querySelector('span');
-    expect(enterHint?.textContent).toContain('Enter 发送');
-    expect(enterHint && controlsRow ? enterHint.compareDocumentPosition(controlsRow) : 0).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
-    );
+    expect(toolsRow?.contains(controlsRow)).toBe(true);
     // 输入框外部（dock 独立行）不应再有选择器容器
     expect(document.querySelector('.redscope-dock > .conversation-runtime-controls')).toBeNull();
   });

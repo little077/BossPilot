@@ -159,31 +159,31 @@ describe('browser_action tool', () => {
     expect(tabsQuery).not.toHaveBeenCalled();
   });
 
-  it('opens or focuses a known destination and reports safe metadata', async () => {
+  it('rejects the merged open_or_focus action since navigation lives in tab', async () => {
     const progress = vi.fn();
-    const result = await executeBrowserAction(
-      call({ action: 'open_or_focus', destination: 'baidu' }),
-      SNAPSHOT,
-      '打开百度',
-      new AbortController().signal,
-      progress,
-    );
-
-    expect(result).toMatchObject({
-      isError: false,
-      statusText: '已切换到目标页面',
-      sourceOrigin: 'https://www.baidu.com',
-      sourceUrl: 'https://www.baidu.com/',
-    });
-    expect(progress).toHaveBeenNthCalledWith(1, '正在检查已有标签页', expect.any(String));
-    expect(progress).toHaveBeenNthCalledWith(2, '已切换到已有标签页', expect.any(String));
-    if ('content' in result) {
-      expect(result.content).toContain('"reused":true');
-      expect(result.content).toContain('<untrusted_browser_action_result>');
-    }
+    await expect(
+      executeBrowserAction(
+        call({ action: 'open_or_focus', destination: 'baidu' }),
+        SNAPSHOT,
+        '打开百度',
+        new AbortController().signal,
+        progress,
+      ),
+    ).resolves.toMatchObject({ errorCode: 'INVALID_BROWSER_ACTION' });
+    expect(tabsQuery).not.toHaveBeenCalled();
   });
 
-  it('opens an explicit direct URL, but refuses a guessed URL', async () => {
+  it('refuses a guessed URL, but searches an explicit user-given URL', async () => {
+    const signal = new AbortController().signal;
+    await expect(
+      executeBrowserAction(
+        call({ action: 'search', url: 'https://guess.example/', query: 'AI' }),
+        SNAPSHOT,
+        '帮我搜索那个网站',
+        signal,
+      ),
+    ).resolves.toMatchObject({ errorCode: 'UNGROUNDED_URL' });
+
     tabsQuery.mockResolvedValue([]);
     tabsCreate.mockResolvedValue({
       id: 12,
@@ -199,30 +199,41 @@ describe('browser_action tool', () => {
       title: 'Docs',
       status: 'complete',
     });
-    const signal = new AbortController().signal;
-
-    const result = await executeBrowserAction(
-      call({ action: 'open_or_focus', url: 'https://docs.example.com/start?secret=1' }),
-      SNAPSHOT,
-      '打开 docs.example.com',
-      signal,
+    executeScript.mockImplementation((options: { args?: unknown[] }) =>
+      options.args
+        ? Promise.resolve([
+            {
+              result: searchResult({
+                executionUrl: 'https://docs.example.com/start',
+                fingerprint: { ...BEFORE, url: 'https://docs.example.com/start' },
+              }),
+            },
+          ])
+        : Promise.resolve([
+            {
+              result: {
+                ...BEFORE,
+                url: 'https://docs.example.com/start',
+                textHash: 'after',
+              },
+            },
+          ]),
     );
-    expect(result).toMatchObject({
-      isError: false,
-      statusText: '已打开目标页面',
-      sourceUrl: 'https://docs.example.com/start',
-    });
     await expect(
       executeBrowserAction(
-        call({ action: 'open_or_focus', url: 'https://guess.example/' }),
+        call({ action: 'search', url: 'https://docs.example.com/start?secret=1', query: 'AI' }),
         SNAPSHOT,
-        '帮我打开那个网站',
+        '在 docs.example.com 搜索 AI',
         signal,
       ),
-    ).resolves.toMatchObject({ errorCode: 'UNGROUNDED_URL' });
+    ).resolves.toMatchObject({
+      isError: false,
+      sourceOrigin: 'https://docs.example.com',
+      sourceUrl: 'https://docs.example.com/start',
+    });
   });
 
-  it('uses origin fallback metadata when a newly opened page has no title', async () => {
+  it('searches in a newly created known-site tab and uses origin fallback metadata without a title', async () => {
     tabsQuery.mockResolvedValue([]);
     tabsCreate.mockResolvedValue({ id: 13, windowId: 3, url: 'https://www.bing.com/' });
     tabsGet.mockResolvedValue({
@@ -231,17 +242,33 @@ describe('browser_action tool', () => {
       url: 'https://www.bing.com/',
       status: 'complete',
     });
+    executeScript.mockImplementation((options: { args?: unknown[] }) =>
+      options.args
+        ? Promise.resolve([
+            {
+              result: searchResult({
+                executionUrl: 'https://www.bing.com/',
+                fingerprint: { ...BEFORE, url: 'https://www.bing.com/' },
+              }),
+            },
+          ])
+        : Promise.resolve([
+            {
+              result: { ...BEFORE, url: 'https://www.bing.com/', textHash: 'after' },
+            },
+          ]),
+    );
     await expect(
       executeBrowserAction(
-        call({ action: 'open_or_focus', destination: 'bing' }),
+        call({ action: 'search', destination: 'bing', query: 'AI' }),
         SNAPSHOT,
-        '打开必应',
+        '在必应搜索 AI',
         new AbortController().signal,
       ),
     ).resolves.toMatchObject({
       isError: false,
-      detail: expect.stringContaining('https://www.bing.com'),
-      sourceTitle: '',
+      sourceUrl: expect.stringContaining('https://www.bing.com'),
+      sourceTitle: '必应',
     });
   });
 
@@ -250,7 +277,7 @@ describe('browser_action tool', () => {
     tabsCreate.mockResolvedValue({ windowId: 3, url: 'https://www.baidu.com/' });
     await expect(
       executeBrowserAction(
-        call({ action: 'open_or_focus', destination: 'baidu' }),
+        call({ action: 'search', destination: 'baidu', query: 'AI' }),
         SNAPSHOT,
         '',
         new AbortController().signal,
@@ -261,7 +288,7 @@ describe('browser_action tool', () => {
     tabsGet.mockRejectedValue(new Error('closed'));
     await expect(
       executeBrowserAction(
-        call({ action: 'open_or_focus', destination: 'baidu' }),
+        call({ action: 'search', destination: 'baidu', query: 'AI' }),
         SNAPSHOT,
         '',
         new AbortController().signal,
@@ -271,7 +298,7 @@ describe('browser_action tool', () => {
     tabsQuery.mockRejectedValue(new Error('chrome unavailable'));
     await expect(
       executeBrowserAction(
-        call({ action: 'open_or_focus', destination: 'baidu' }),
+        call({ action: 'search', destination: 'baidu', query: 'AI' }),
         SNAPSHOT,
         '',
         new AbortController().signal,
@@ -282,7 +309,7 @@ describe('browser_action tool', () => {
     controller.abort();
     await expect(
       executeBrowserAction(
-        call({ action: 'open_or_focus', destination: 'baidu' }),
+        call({ action: 'search', destination: 'baidu', query: 'AI' }),
         SNAPSHOT,
         '',
         controller.signal,
@@ -797,7 +824,7 @@ describe('browser_action tool', () => {
     tabsQuery.mockRejectedValue('browser unavailable');
     await expect(
       executeBrowserAction(
-        call({ action: 'open_or_focus', destination: 'baidu' }),
+        call({ action: 'search', destination: 'baidu', query: 'AI' }),
         SNAPSHOT,
         '',
         new AbortController().signal,

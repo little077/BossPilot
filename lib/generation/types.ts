@@ -113,6 +113,8 @@ export interface GenerationToolExecutionResult {
   isError: boolean;
   statusText: string;
   detail?: string;
+  /** M5.3：执行器给出的下一步决策建议（可信、结构化）；Manager 附加到模型可见结果尾部。 */
+  hint?: string;
   errorCode?:
     | 'NOT_ON_JOB_PAGE'
     | 'NO_JOB_SELECTED'
@@ -142,6 +144,11 @@ export interface GenerationToolExecutionResult {
    * Manager 不会把完整 URL 或标签页 ID 发给模型。
    */
   nextPageSnapshot?: PageTurnSnapshot;
+  /**
+   * 一次工具调用发现的全部可信页面句柄（例如 tab.list）。仅供会话级句柄表登记；
+   * 模型只能看到工具 content 中经过裁剪的公开字段。
+   */
+  pageSnapshots?: PageTurnSnapshot[];
 }
 
 /** 页面权限需要真实用户手势时暂停；不是错误结果，不能提前发给模型。 */
@@ -181,7 +188,16 @@ export interface GenerationToolExecutionContext {
     modelName: string;
     supportsImageInput: boolean;
   };
+  /** 同一模型回合声明的工具共享 batchId；执行器可据此绑定不可变的回合级资源上下文。 */
+  batch?: {
+    id: string;
+    index: number;
+    size: number;
+  };
 }
+
+/** serial 是安全默认值；parallel 只可用于已声明无相互依赖且不会请求确认的调用。 */
+export type GenerationToolExecutionMode = 'serial' | 'parallel';
 
 export type GenerationToolExecutor = (
   call: GenerationToolCall,

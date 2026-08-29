@@ -1,7 +1,45 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { ChatMessage } from '@/lib/domain/chat';
 import type { PageTurnSnapshot } from '@/lib/domain/types';
-import { ToolContext, ToolContextManager } from './tool-context';
+import { ToolBatchPageContext, ToolContext, ToolContextManager } from './tool-context';
+
+describe('ToolBatchPageContext', () => {
+  it('binds every member of one batch to the same immutable page baseline', () => {
+    const batchContext = new ToolBatchPageContext();
+    const searchPage = {
+      tabId: 7,
+      windowId: 3,
+      url: 'https://example.com/search',
+      title: 'Search',
+      isHttp: true,
+    } as PageTurnSnapshot;
+    const openedPost = { ...searchPage, tabId: 8, url: 'https://example.com/post/1' };
+
+    const first = batchContext.bind({ id: 'batch-1', index: 0, size: 2 }, searchPage);
+    const second = batchContext.bind({ id: 'batch-1', index: 1, size: 2 }, openedPost);
+
+    expect(first).toEqual(searchPage);
+    expect(second).toEqual(searchPage);
+    expect(second).not.toBe(searchPage);
+
+    expect(
+      batchContext.complete(
+        { id: 'batch-1', index: 1, size: 2 },
+        { ...searchPage, tabId: 9, url: 'https://example.com/post/2' },
+      ),
+    ).toEqual({ done: false });
+    expect(
+      batchContext.complete(
+        { id: 'batch-1', index: 0, size: 2 },
+        { ...searchPage, tabId: 8, url: 'https://example.com/post/1' },
+      ),
+    ).toEqual({
+      done: true,
+      pageSnapshot: expect.objectContaining({ tabId: 9, url: 'https://example.com/post/2' }),
+    });
+    expect(batchContext.bind({ id: 'batch-1', index: 0, size: 2 }, openedPost)).toEqual(openedPost);
+  });
+});
 
 describe('ToolContext', () => {
   let context: ToolContext;
@@ -27,6 +65,29 @@ describe('ToolContext', () => {
 
     const otherContext = new ToolContext('conv-2');
     expect(otherContext.getPageSnapshot()).toBeNull();
+  });
+
+  it('同时保存多个可信 tabId 句柄并返回防御性副本', () => {
+    const first = {
+      tabId: 7,
+      windowId: 3,
+      url: 'https://example.com/one',
+      title: 'One',
+    } as PageTurnSnapshot;
+    const second = { ...first, tabId: 8, url: 'https://example.com/two', title: 'Two' };
+    context.setPageSnapshot(first);
+    context.rememberPageSnapshot(second);
+
+    const fetched = context.getPageSnapshot(8);
+    expect(fetched).toEqual(second);
+    expect(context.getPageSnapshots()).toEqual([first, second]);
+    if (fetched) fetched.title = 'mutated';
+    expect(context.getPageSnapshot(8)?.title).toBe('Two');
+
+    expect(context.forgetPageSnapshot(8)).toBe(true);
+    expect(context.getPageSnapshot(8)).toBeNull();
+    context.resetForNewTask();
+    expect(context.getPageSnapshots()).toEqual([]);
   });
 
   it('对话历史独立存储', () => {

@@ -44,6 +44,38 @@ describe('ToolCatalog', () => {
     ).toThrow(/重复注册/);
   });
 
+  it('uses serial scheduling by default and only allows safe tools to opt into parallel mode', () => {
+    const catalog = new ToolCatalog();
+    catalog.register({ definition: tool('serial_safe'), risk: 'safe', execute: vi.fn() });
+    catalog.register({
+      definition: tool('parallel_safe'),
+      risk: 'safe',
+      scheduling: 'parallel',
+      execute: vi.fn(),
+    });
+    catalog.register({
+      definition: tool('confirm_tool'),
+      risk: 'confirm',
+      scheduling: 'parallel',
+      execute: vi.fn(),
+    });
+    catalog.register({
+      definition: tool('dynamic'),
+      risk: 'safe',
+      scheduling: (candidate) => (candidate.arguments.independent === true ? 'parallel' : 'serial'),
+      execute: vi.fn(),
+    });
+
+    expect(catalog.executionMode(call('serial_safe'))).toBe('serial');
+    expect(catalog.executionMode(call('parallel_safe'))).toBe('parallel');
+    expect(catalog.executionMode(call('confirm_tool'))).toBe('serial');
+    expect(catalog.executionMode({ ...call('dynamic'), arguments: { independent: true } })).toBe(
+      'parallel',
+    );
+    expect(catalog.executionMode(call('dynamic'))).toBe('serial');
+    expect(catalog.executionMode(call('missing'))).toBe('serial');
+  });
+
   it('按风险等级过滤定义列表（能力开放），且返回克隆不污染注册表', () => {
     const catalog = new ToolCatalog();
     catalog.register({ definition: tool('read_a'), risk: 'safe', execute: vi.fn() });
@@ -53,7 +85,9 @@ describe('ToolCatalog', () => {
     expect(confirmOnly.map((item) => item.name)).toEqual(['write_b']);
 
     const modified = catalog.definitions();
-    modified[0]!.label = '被外部修改';
+    const firstModified = modified[0];
+    if (!firstModified) throw new Error('tool catalog unexpectedly empty');
+    firstModified.label = '被外部修改';
     expect(catalog.get('read_a')?.definition.label).toBe('read_a');
     expect(modified).not.toBe(catalog.definitions());
   });

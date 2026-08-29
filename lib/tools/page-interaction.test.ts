@@ -9,7 +9,6 @@ import {
   captureInteractivePage,
   INSPECT_PAGE_TOOL,
   INTERACT_PAGE_TOOL,
-  OBSERVE_PAGE_TOOL,
   OBSERVE_VISUAL_PAGE_TOOL,
   PageInteractionCoordinator,
   performPageInteraction,
@@ -47,7 +46,7 @@ let sessionStorage: Record<string, unknown> = {};
 let currentTabUrl = PAGE_URL;
 
 function call(
-  name: 'observe_page' | 'inspect_page' | 'observe_visual_page' | 'interact_page',
+  name: 'inspect_page' | 'observe_visual_page' | 'interact_page',
   argumentsValue: Record<string, unknown>,
 ): GenerationToolCall {
   return { id: 'call-1', name, arguments: argumentsValue };
@@ -204,16 +203,13 @@ afterEach(() => {
 });
 
 describe('page interaction tool contracts', () => {
-  it('exposes separate observation and constrained action tools', () => {
-    expect(OBSERVE_PAGE_TOOL).toMatchObject({
-      name: 'observe_page',
-      parameters: { additionalProperties: false },
-    });
+  it('exposes one observation tool with viewport scope and a constrained action tool', () => {
     expect(INSPECT_PAGE_TOOL).toMatchObject({
       name: 'inspect_page',
       parameters: { additionalProperties: false },
     });
     expect(INSPECT_PAGE_TOOL.description).toContain('整个文档');
+    expect(INSPECT_PAGE_TOOL.description).toContain('scope="viewport"');
     expect(INTERACT_PAGE_TOOL).toMatchObject({
       name: 'interact_page',
       parameters: { required: ['action'], additionalProperties: false },
@@ -1348,12 +1344,12 @@ describe('verifyPageElementState', () => {
 });
 
 describe('PageInteractionCoordinator', () => {
-  it('observes, stores private locators, and exposes only temporary refs to the model', async () => {
+  it('inspects the viewport, stores private locators, and exposes only temporary refs to the model', async () => {
     setPage('<button>打开详情</button><label for="q">关键词</label><input id="q" />');
     const coordinator = new PageInteractionCoordinator();
 
-    const outcome = await coordinator.observe(
-      call('observe_page', {}),
+    const outcome = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'request-1',
@@ -1361,7 +1357,7 @@ describe('PageInteractionCoordinator', () => {
 
     expect(outcome).toMatchObject({
       isError: false,
-      statusText: '已观察当前页面控件',
+      statusText: '已检查页面元素',
       nextPageSnapshot: { tabId: 7, url: PAGE_URL },
     });
     if (!('deferred' in outcome)) {
@@ -1400,7 +1396,7 @@ describe('PageInteractionCoordinator', () => {
       expect(outcome.content).not.toContain('"path"');
     }
     expect(executeScript).toHaveBeenCalledWith(
-      expect.objectContaining({ args: [30, '下一页', 'document', 'link'] }),
+      expect.objectContaining({ args: [50, '下一页', 'document', 'link'] }),
     );
     expect(sessionValue).toMatchObject({
       conversationId: 'conversation-a',
@@ -1416,8 +1412,8 @@ describe('PageInteractionCoordinator', () => {
     executeScript.mockRejectedValue(new Error('Cannot access contents of the page'));
 
     await expect(
-      coordinator.observe(
-        call('observe_page', {}),
+      coordinator.inspect(
+        call('inspect_page', { scope: 'viewport' }),
         SNAPSHOT,
         new AbortController().signal,
         'request-1',
@@ -1432,8 +1428,8 @@ describe('PageInteractionCoordinator', () => {
     permissionsContains.mockResolvedValue(true);
     executeScript.mockResolvedValue([{ result: { version: 2 } }]);
     await expect(
-      coordinator.observe(
-        call('observe_page', {}),
+      coordinator.inspect(
+        call('inspect_page', { scope: 'viewport' }),
         SNAPSHOT,
         new AbortController().signal,
         'request-1',
@@ -1445,8 +1441,8 @@ describe('PageInteractionCoordinator', () => {
       { documentId: 'document-1', result: { ...malformedCandidate, elements: [{}] } },
     ]);
     await expect(
-      coordinator.observe(
-        call('observe_page', {}),
+      coordinator.inspect(
+        call('inspect_page', { scope: 'viewport' }),
         SNAPSHOT,
         new AbortController().signal,
         'request-1',
@@ -1481,8 +1477,8 @@ describe('PageInteractionCoordinator', () => {
       ),
     ).resolves.toMatchObject({ errorCode: 'INVALID_PAGE_INTERACTION' });
     await expect(
-      coordinator.observe(
-        call('observe_page', {}),
+      coordinator.inspect(
+        call('inspect_page', { scope: 'viewport' }),
         null,
         new AbortController().signal,
         'request-1',
@@ -1495,8 +1491,8 @@ describe('PageInteractionCoordinator', () => {
       status: 'complete',
     });
     await expect(
-      coordinator.observe(
-        call('observe_page', {}),
+      coordinator.inspect(
+        call('inspect_page', { scope: 'viewport' }),
         SNAPSHOT,
         new AbortController().signal,
         'request-1',
@@ -1533,8 +1529,8 @@ describe('PageInteractionCoordinator', () => {
   it('preserves another request observation and expires malformed or old observations', async () => {
     setPage('<button>按钮</button>');
     const coordinator = new PageInteractionCoordinator();
-    const observed = await coordinator.observe(
-      call('observe_page', {}),
+    const observed = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'request-current',
@@ -1577,15 +1573,15 @@ describe('PageInteractionCoordinator', () => {
   it('isolates observations by conversation, request and tab', async () => {
     setPage('<button>按钮</button>');
     const coordinator = new PageInteractionCoordinator();
-    await coordinator.observe(
-      call('observe_page', {}),
+    await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'shared-request',
       'conversation-a',
     );
-    await coordinator.observe(
-      call('observe_page', {}),
+    await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'shared-request',
@@ -1644,8 +1640,8 @@ describe('PageInteractionCoordinator', () => {
   it('rejects changed observations, missing refs and malformed action-script results', async () => {
     setPage('<button>按钮</button>');
     const coordinator = new PageInteractionCoordinator();
-    const observed = await coordinator.observe(
-      call('observe_page', {}),
+    const observed = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'request-1',
@@ -1663,8 +1659,8 @@ describe('PageInteractionCoordinator', () => {
       ),
     ).resolves.toMatchObject({ errorCode: 'STALE_ELEMENT_REFERENCE' });
 
-    await coordinator.observe(
-      call('observe_page', {}),
+    await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'request-1',
@@ -1718,8 +1714,8 @@ describe('PageInteractionCoordinator', () => {
     const clicked = vi.fn();
     document.querySelector('#open')?.addEventListener('click', clicked);
     const coordinator = new PageInteractionCoordinator();
-    const observed = await coordinator.observe(
-      call('observe_page', {}),
+    const observed = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'request-1',
@@ -1751,8 +1747,8 @@ describe('PageInteractionCoordinator', () => {
     const clicked = vi.fn();
     document.querySelector('#open')?.addEventListener('click', clicked);
     const coordinator = new PageInteractionCoordinator();
-    const observed = await coordinator.observe(
-      call('observe_page', {}),
+    const observed = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'request-1',
@@ -1790,8 +1786,8 @@ describe('PageInteractionCoordinator', () => {
       if (output) output.textContent = '已打开';
     });
     const coordinator = new PageInteractionCoordinator();
-    const observed = await coordinator.observe(
-      call('observe_page', {}),
+    const observed = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'request-1',
@@ -1871,8 +1867,8 @@ describe('PageInteractionCoordinator', () => {
     });
 
     const coordinator = new PageInteractionCoordinator();
-    const observed = await coordinator.observe(
-      call('observe_page', {}),
+    const observed = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'request-1',
@@ -1959,8 +1955,8 @@ describe('PageInteractionCoordinator', () => {
     document.querySelector('#noop')?.addEventListener('click', clicked);
     const progress = vi.fn();
     const coordinator = new PageInteractionCoordinator();
-    const observed = await coordinator.observe(
-      call('observe_page', {}),
+    const observed = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'request-1',
@@ -1996,8 +1992,8 @@ describe('PageInteractionCoordinator', () => {
     vi.useFakeTimers();
     setPage('<button id="open-tab">打开报告</button>');
     const coordinator = new PageInteractionCoordinator();
-    const observed = await coordinator.observe(
-      call('observe_page', {}),
+    const observed = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'request-1',
@@ -2062,8 +2058,8 @@ describe('PageInteractionCoordinator', () => {
     vi.useFakeTimers();
     setPage('<button>打开多个页面</button>');
     const coordinator = new PageInteractionCoordinator();
-    const observed = await coordinator.observe(
-      call('observe_page', {}),
+    const observed = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'request-1',
@@ -2107,8 +2103,8 @@ describe('PageInteractionCoordinator', () => {
       currentTabUrl = 'https://www.zhipin.com/detail';
     });
     const coordinator = new PageInteractionCoordinator();
-    const observed = await coordinator.observe(
-      call('observe_page', {}),
+    const observed = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'request-1',
@@ -2176,8 +2172,8 @@ describe('PageInteractionCoordinator', () => {
       }, 50);
     });
     const coordinator = new PageInteractionCoordinator();
-    const observed = await coordinator.observe(
-      call('observe_page', {}),
+    const observed = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'request-1',
@@ -2213,8 +2209,8 @@ describe('PageInteractionCoordinator', () => {
       if (output) output.textContent = '已提交';
     });
     const coordinator = new PageInteractionCoordinator();
-    const observed = await coordinator.observe(
-      call('observe_page', {}),
+    const observed = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'request-1',
@@ -2251,8 +2247,8 @@ describe('PageInteractionCoordinator', () => {
   it('validates fill/select/check arguments before injection', async () => {
     setPage('<label for="q">关键词</label><input id="q" />');
     const coordinator = new PageInteractionCoordinator();
-    const observed = await coordinator.observe(
-      call('observe_page', {}),
+    const observed = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
       SNAPSHOT,
       new AbortController().signal,
       'request-1',
@@ -2612,5 +2608,95 @@ describe('PageInteractionCoordinator', () => {
       errorCode: 'VERIFICATION_FAILED',
       content: expect.stringContaining('等待超时，页面没有发生导航'),
     });
+  });
+
+  it('executes a multi-step sequence with per-step verification and latest refs', async () => {
+    vi.useFakeTimers();
+    setPage('<label for="q">关键词</label><input id="q" />');
+    const coordinator = new PageInteractionCoordinator();
+    const observed = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-seq',
+    );
+    if ('deferred' in observed || observed.isError) throw new Error('Observation failed');
+    const observationId = /"observationId":"([^"]+)/u.exec(observed.content)?.[1];
+
+    const pending = coordinator.interact(
+      call('interact_page', {
+        sequence: [
+          { action: 'fill', observationId, ref: 'e1', value: 'AI Agent' },
+          { action: 'keypress', observationId, ref: 'e1', key: 'Enter' },
+        ],
+      }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-seq',
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    const outcome = await pending;
+
+    expect(outcome).toMatchObject({
+      isError: false,
+      statusText: '已按顺序完成 2 步动作',
+      detail: expect.stringContaining('填写页面控件'),
+    });
+    if (!('deferred' in outcome)) {
+      expect(outcome.content).toContain('"action":"sequence"');
+      expect(outcome.content).toContain('"action":"fill"');
+      expect(outcome.content).toContain('"action":"keypress"');
+    }
+    expect(document.querySelector<HTMLInputElement>('#q')?.value).toBe('AI Agent');
+  });
+
+  it('stops at the first failed step after earlier steps succeeded', async () => {
+    vi.useFakeTimers();
+    setPage('<label for="q">关键词</label><input id="q" />');
+    const coordinator = new PageInteractionCoordinator();
+    const observed = await coordinator.inspect(
+      call('inspect_page', { scope: 'viewport' }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-seq-stop-2',
+    );
+    if ('deferred' in observed || observed.isError) throw new Error('Observation failed');
+    const observationId = /"observationId":"([^"]+)/u.exec(observed.content)?.[1];
+
+    const pending = coordinator.interact(
+      call('interact_page', {
+        sequence: [
+          { action: 'fill', observationId, ref: 'e1', value: 'AI' },
+          { action: 'click', observationId: 'stale', ref: 'e9' },
+        ],
+      }),
+      SNAPSHOT,
+      new AbortController().signal,
+      'request-seq-stop-2',
+    );
+    await vi.advanceTimersByTimeAsync(8_000);
+    const outcome = await pending;
+
+    expect(outcome).toMatchObject({
+      isError: true,
+      errorCode: 'STALE_ELEMENT_REFERENCE',
+      statusText: expect.stringContaining('已执行 1 步'),
+    });
+    expect(document.querySelector<HTMLInputElement>('#q')?.value).toBe('AI');
+  });
+
+  it('rejects a sequence with an invalid step before executing anything', async () => {
+    setPage('<button>按钮</button>');
+    const coordinator = new PageInteractionCoordinator();
+    await expect(
+      coordinator.interact(
+        call('interact_page', {
+          sequence: [{ action: 'drag', observationId: 'obs-1', ref: 'e1' }],
+        }),
+        SNAPSHOT,
+        new AbortController().signal,
+        'request-seq-invalid',
+      ),
+    ).resolves.toMatchObject({ errorCode: 'INVALID_PAGE_INTERACTION' });
   });
 });

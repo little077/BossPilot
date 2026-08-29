@@ -10,9 +10,9 @@ import { ArrowUp, FileText, Image, Paperclip, Square, X } from 'lucide-react';
 import {
   type ReactNode,
   type Ref,
+  useCallback,
   useEffect,
   useImperativeHandle,
-  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -24,6 +24,7 @@ import {
 import type { ChatAttachment } from '@/lib/domain/chat';
 import { sendSkillCommand } from '@/lib/skills/client';
 import type { SkillCatalogEntry } from '@/lib/skills/types';
+import { SkillPicker } from './SkillPicker';
 import { SkillReference } from './SkillReference';
 
 export interface ComposerHandle {
@@ -84,31 +85,14 @@ export function Composer({
   const onDraftChangeRef = useRef(onDraftChange);
   onDraftChangeRef.current = onDraftChange;
 
-  // ─── 斜杠技能菜单 ───
-  // 输入 `/` 开头且不含空格的文本时弹出；列出已启用的 Skill，Enter/Tab 插入触发词。
+  // ─── 技能选择器 ───
+  // 触发器点击与输入 `/` 共用同一个 SkillPicker（open + initialQuery 受控）。
   // 状态经 ref 同步给 editor 只创建一次的闭包（与 submitRef 同一模式）。
   const [slashSkills, setSlashSkills] = useState<SkillCatalogEntry[]>([]);
   const [slashQuery, setSlashQuery] = useState('');
   const [slashOpen, setSlashOpen] = useState(false);
-  const [slashIndex, setSlashIndex] = useState(0);
   const slashOpenRef = useRef(false);
-  const slashIndexRef = useRef(0);
   const slashSkillsRef = useRef<SkillCatalogEntry[]>([]);
-  const slashFilteredRef = useRef<SkillCatalogEntry[]>([]);
-
-  const filteredSkills = useMemo(() => {
-    const query = slashQuery.trim().toLowerCase();
-    if (!query) return slashSkills;
-    return slashSkills.filter(
-      (skill) =>
-        skill.name.toLowerCase().includes(query) || skill.description.toLowerCase().includes(query),
-    );
-  }, [slashSkills, slashQuery]);
-
-  useEffect(() => {
-    slashFilteredRef.current = filteredSkills;
-    slashIndexRef.current = Math.min(slashIndexRef.current, Math.max(0, filteredSkills.length - 1));
-  }, [filteredSkills]);
 
   useEffect(() => {
     void sendSkillCommand({ type: 'skills:get' })
@@ -123,7 +107,8 @@ export function Composer({
       });
   }, []);
 
-  // 选择技能：把斜杠词替换为结构化 Skill 节点，用户接续输入具体需求。
+  // 选择技能：技能节点插入当前光标处，保留已有输入内容；
+  // 仅斜杠（/）触发时把斜杠词本身替换为结构化 Skill 节点。
   // 节点的 renderText 会保留「用 {name} 技能：」这一原有模型提示语义。
   const selectSkillRef = useRef<(skill: SkillCatalogEntry) => void>(() => {});
 
@@ -164,35 +149,7 @@ export function Composer({
     ],
     editorProps: {
       handleKeyDown: (_view, event) => {
-        if (slashOpenRef.current) {
-          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-            const total = slashFilteredRef.current.length;
-            if (total > 0) {
-              const delta = event.key === 'ArrowDown' ? 1 : -1;
-              slashIndexRef.current = (slashIndexRef.current + delta + total) % total;
-              setSlashIndex(slashIndexRef.current);
-            }
-            return true;
-          }
-          if (event.key === 'Escape') {
-            slashOpenRef.current = false;
-            setSlashOpen(false);
-            return true;
-          }
-          if (event.key === 'Enter' || event.key === 'Tab') {
-            // 中文输入法候选确认的回车不触发选择
-            if (event.key === 'Enter' && (event.isComposing || event.keyCode === 229)) {
-              return false;
-            }
-            const skill = slashFilteredRef.current[slashIndexRef.current];
-            if (skill) selectSkillRef.current(skill);
-            else {
-              slashOpenRef.current = false;
-              setSlashOpen(false);
-            }
-            return true;
-          }
-        }
+        // 技能菜单打开时焦点在菜单搜索框，键盘导航由 SkillPicker 处理。
         if (event.key === 'Enter' && !event.shiftKey) {
           // 中文输入法候选确认的回车不触发发送
           if (event.isComposing || event.keyCode === 229) return false;
@@ -208,16 +165,13 @@ export function Composer({
         content: e.getJSON(),
         attachments: attachmentsRef.current,
       });
+      // 输入 `/` 开头且不含空格的文本时打开技能选择器（带入过滤词）。
       const text = e.getText({ blockSeparator: '\n' });
       const match = /^\/[^\s/]*$/.exec(text);
       const shouldOpen = Boolean(match) && slashSkillsRef.current.length > 0;
       slashOpenRef.current = shouldOpen;
       setSlashOpen(shouldOpen);
       setSlashQuery(match ? text.slice(1) : '');
-      if (shouldOpen) {
-        slashIndexRef.current = 0;
-        setSlashIndex(0);
-      }
     },
     onCreate: ({ editor: e }) => setEmpty(e.isEmpty),
     autofocus: autoFocus ? 'end' : false,
@@ -225,23 +179,45 @@ export function Composer({
 
   // editor 创建后填充选择技能的实现。
   selectSkillRef.current = (skill: SkillCatalogEntry) => {
-    editor
-      .chain()
-      .clearContent()
+    if (!editor) return;
+    const { from } = editor.state.selection;
+    // 光标前若是 /技能词（斜杠触发），只删除该词本身，避免残留；
+    // 其余情况原样插入，已有输入内容不受影响。
+    const before = editor.state.doc.textBetween(0, from, '\n');
+    const slash = /\/[^\s/]*$/.exec(before);
+    const chain = editor.chain();
+    if (slash) {
+      chain.deleteRange({ from: from - slash[0].length, to: from });
+    }
+    chain
       .insertContent([
         { type: 'skillReference', attrs: { name: skill.name } },
         { type: 'text', text: ' ' },
       ])
-      .focus('end')
+      .focus()
       .run();
     slashOpenRef.current = false;
     setSlashOpen(false);
   };
 
-  // 失焦（例如点击编辑器外）关闭菜单。
+  // 菜单开合回调：Esc / 点击外部关闭后焦点回到编辑器。
+  const handlePickerOpenChange = useCallback(
+    (open: boolean) => {
+      slashOpenRef.current = open;
+      setSlashOpen(open);
+      if (!open) {
+        setSlashQuery('');
+        editor?.commands.focus('end');
+      }
+    },
+    [editor],
+  );
+
+  // 失焦（例如点击编辑器外）关闭菜单；菜单打开时失焦（焦点在搜索框）由菜单自身管理。
   useEffect(() => {
     if (!editor) return;
     const close = () => {
+      if (slashOpenRef.current) return;
       slashOpenRef.current = false;
       setSlashOpen(false);
     };
@@ -319,29 +295,6 @@ export function Composer({
         running ? 'border-brand/40' : ''
       } ${className}`}
     >
-      {slashOpen ? (
-        <div className="composer-slash-menu" role="listbox" aria-label="选择技能">
-          {filteredSkills.length === 0 ? (
-            <div className="composer-slash-empty">没有匹配的技能</div>
-          ) : (
-            filteredSkills.map((skill, index) => (
-              <button
-                key={skill.name}
-                type="button"
-                role="option"
-                aria-selected={index === slashIndex}
-                className={`composer-slash-item ${index === slashIndex ? 'composer-slash-item-active' : ''}`}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => selectSkillRef.current(skill)}
-                onMouseEnter={() => setSlashIndex(index)}
-              >
-                <span className="composer-slash-name">/{skill.name}</span>
-                <span className="composer-slash-desc">{skill.description}</span>
-              </button>
-            ))
-          )}
-        </div>
-      ) : null}
       <EditorContent editor={editor} className="composer-editor" />
       {attachments.length ? (
         <fieldset className="composer-attachments" aria-label="待发送附件">
@@ -388,11 +341,15 @@ export function Composer({
           >
             <Paperclip size={11} />
           </button>
-          <span
-            className={`min-w-0 flex-[0_1_auto] truncate text-[10px] ${waitingForAnswer ? 'text-warning' : 'text-ink-faint'}`}
-          >
-            {waitingForAnswer ? '回答后会从当前步骤继续' : 'Enter 发送'}
-          </span>
+          <SkillPicker
+            skills={slashSkills}
+            open={slashOpen}
+            initialQuery={slashQuery || undefined}
+            disabled={running || disabled || waitingForAnswer}
+            onOpenChange={handlePickerOpenChange}
+            onSelect={(skill) => selectSkillRef.current(skill)}
+            className="shrink-0"
+          />
           {tools}
         </div>
         {running ? (

@@ -8,6 +8,7 @@ import type {
   GenerationToolCall,
   GenerationToolDefinition,
   GenerationToolExecutionContext,
+  GenerationToolExecutionMode,
   GenerationToolExecutionOutcome,
 } from '@/lib/generation/types';
 
@@ -35,6 +36,10 @@ export type CatalogToolExecutor = (
 export interface CatalogToolEntry {
   definition: GenerationToolDefinition;
   risk: ToolRisk;
+  /** 默认 serial；confirm/blocked 工具即使误声明 parallel 也会被强制串行。 */
+  scheduling?:
+    | GenerationToolExecutionMode
+    | ((call: GenerationToolCall) => GenerationToolExecutionMode);
   execute: CatalogToolExecutor;
 }
 
@@ -76,6 +81,13 @@ export class ToolCatalog {
 
   names(): string[] {
     return [...this.exact.keys(), ...this.patterns.map((pattern) => `${pattern.prefix}*`)];
+  }
+
+  executionMode(call: GenerationToolCall): GenerationToolExecutionMode {
+    const entry = this.get(call.name);
+    if (entry?.risk !== 'safe') return 'serial';
+    const mode = typeof entry.scheduling === 'function' ? entry.scheduling(call) : entry.scheduling;
+    return mode === 'parallel' ? 'parallel' : 'serial';
   }
 
   /**

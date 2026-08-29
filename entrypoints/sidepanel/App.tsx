@@ -27,6 +27,7 @@ import { ChatFlowStatus } from './ChatFlowStatus';
 import { Composer, type ComposerDraft, type ComposerHandle } from './Composer';
 import { ConversationRuntimeControls } from './ConversationRuntimeControls';
 import { HistoryView } from './HistoryView';
+import { PagePermissionPanel } from './PagePermissionPanel';
 import { useAgentPort } from './usePort';
 import { WorkspaceView } from './WorkspaceView';
 
@@ -141,6 +142,13 @@ export default function App() {
       : undefined;
   const currentToolActivity =
     activeAssistant?.toolActivities?.at(-1) ?? activeAssistant?.toolActivity;
+  // 权限请求也固定呈现在底部输入区上方（与 Ask User 同一位置），
+  // 避免确认卡片埋在上方消息流里被忽略；Ask User 与权限请求不会同时暂停。
+  const waitingPermissionActivity =
+    currentConversationRunning && currentToolActivity?.status === 'waiting_permission'
+      ? currentToolActivity
+      : undefined;
+  const bottomPaused = pendingUserQuestion || waitingPermissionActivity;
   const chatStatusText = pendingUserQuestion
     ? '任务已暂停 · 等待你的回答'
     : currentRun?.status === 'queued'
@@ -529,7 +537,7 @@ export default function App() {
                         : 'border-line bg-surface text-ink'
                     }`}
                   >
-                    <ChatFlowStatus message={m} onResolvePagePermission={resolvePagePermission} />
+                    <ChatFlowStatus message={m} />
                     {streaming &&
                     !m.content &&
                     m.reasoningActivity?.status !== 'running' &&
@@ -604,7 +612,7 @@ export default function App() {
       {/* ── 会话底部输入区（仅对话页 · 已进入会话） ── */}
       {tab === 'chat' && started && (
         <div className="redscope-dock border-t border-line bg-app p-2.5">
-          <div className={pendingUserQuestion ? 'ask-user-shell' : ''}>
+          <div className={bottomPaused ? 'ask-user-shell' : ''}>
             {pendingUserQuestion ? (
               <AskUserPanel
                 key={pendingUserQuestion.callId}
@@ -612,19 +620,26 @@ export default function App() {
                 onContinue={(answer) => resolveAskUser(pendingUserQuestion.requestId, answer)}
                 onCancel={cancelChat}
               />
+            ) : waitingPermissionActivity ? (
+              <PagePermissionPanel
+                key={waitingPermissionActivity.callId}
+                activity={waitingPermissionActivity}
+                onResolve={resolvePagePermission}
+                onCancel={cancelChat}
+              />
             ) : null}
             <Composer
               key={composerDraftKey}
-              autoFocus={!pendingUserQuestion}
-              running={currentConversationRunning && !pendingUserQuestion}
-              allowSteering={currentRun?.status === 'running' && !pendingUserQuestion}
-              waitingForAnswer={Boolean(pendingUserQuestion)}
-              disabled={!connected || Boolean(pendingUserQuestion)}
+              autoFocus={!bottomPaused}
+              running={currentConversationRunning && !bottomPaused}
+              allowSteering={currentRun?.status === 'running' && !bottomPaused}
+              waitingForAnswer={Boolean(bottomPaused)}
+              disabled={!connected || Boolean(bottomPaused)}
               onSend={submit}
               draft={composerDrafts[composerDraftKey]}
               onDraftChange={(draft) => updateComposerDraft(composerDraftKey, draft)}
               onCancel={cancelChat}
-              className={pendingUserQuestion ? 'ask-user-composer' : ''}
+              className={bottomPaused ? 'ask-user-composer' : ''}
               tools={
                 activeConversationId ? (
                   <ConversationRuntimeControls conversationId={activeConversationId} />

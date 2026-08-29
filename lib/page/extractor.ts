@@ -4,6 +4,7 @@
 import { Readability } from '@mozilla/readability';
 import type {
   PageExtractionMode,
+  PageLink,
   PageScriptExtraction,
   PageSemanticStructure,
 } from '@/lib/domain/types';
@@ -17,6 +18,8 @@ const MIN_ARTICLE_CHARS = 120;
 const MAX_STRUCTURE_ELEMENTS = 10_000;
 const MAX_HEADINGS = 40;
 const MAX_LANDMARKS = 24;
+const MAX_LINKS = 30;
+const MAX_LINK_TEXT = 60;
 
 const EXCLUDED_TAGS = new Set([
   'SCRIPT',
@@ -41,9 +44,18 @@ export function extractCurrentDocument(doc: Document = document): PageScriptExtr
   const scannedElements = Math.min(elements.length, MAX_SCANNED_ELEMENTS);
   const selection = safeSelectedText(doc, view);
   const structure = extractSemanticStructure(doc, view, elements);
+  const pageLinks = collectVisibleLinks(doc, view);
 
   if (selection) {
-    return result(doc, 'selection', selection, selection.length, scannedElements, structure);
+    return result(
+      doc,
+      'selection',
+      selection,
+      selection.length,
+      scannedElements,
+      structure,
+      pageLinks,
+    );
   }
 
   let articleText = '';
@@ -65,10 +77,18 @@ export function extractCurrentDocument(doc: Document = document): PageScriptExtr
   }
 
   if (articleText.length >= MIN_ARTICLE_CHARS) {
-    return result(doc, 'article', articleText, articleText.length, scannedElements, structure);
+    return result(
+      doc,
+      'article',
+      articleText,
+      articleText.length,
+      scannedElements,
+      structure,
+      pageLinks,
+    );
   }
   if (mainText.length >= MIN_USEFUL_CHARS) {
-    return result(doc, 'main', mainText, mainText.length, scannedElements, structure);
+    return result(doc, 'main', mainText, mainText.length, scannedElements, structure, pageLinks);
   }
 
   const fallback = visibleBodyText(doc, view);
@@ -79,6 +99,7 @@ export function extractCurrentDocument(doc: Document = document): PageScriptExtr
     fallback.originalChars,
     scannedElements,
     structure,
+    pageLinks,
     elements.length > MAX_SCANNED_ELEMENTS || fallback.truncated,
   );
 }
@@ -447,6 +468,45 @@ function isVisibleForReading(
   return cache.get(start) ?? inherited;
 }
 
+/**
+ * 采集视口内可见的真实链接（去重、限量、文本截断）。
+ * 供模型挑选「打开详情」类目标 URL；tab open 会再次校验 URL 确实存在于页面。
+ */
+function collectVisibleLinks(doc: Document, view: Window | null): PageLink[] {
+  const body = doc.body;
+  if (!body || !view) return [];
+  const boundary = body;
+  const visibility = new WeakMap<Element, boolean>();
+  const seen = new Set<string>();
+  const links: PageLink[] = [];
+
+  for (const element of doc.querySelectorAll('a[href]')) {
+    if (links.length >= MAX_LINKS) break;
+    if (!isVisibleForReading(element, boundary, view, visibility)) continue;
+    const rect = element.getBoundingClientRect();
+    if (rect.bottom <= 0 || rect.top >= view.innerHeight || rect.width === 0 || rect.height === 0) {
+      continue;
+    }
+    let href = '';
+    try {
+      href = new URL(element.getAttribute('href') ?? '', doc.baseURI).href;
+    } catch {
+      continue;
+    }
+    if (!/^https?:/u.test(href) || seen.has(href)) continue;
+    seen.add(href);
+    const rawText =
+      normalizeInline(element.getAttribute('aria-label') ?? '') ||
+      normalizeInline(element.getAttribute('title') ?? '') ||
+      normalizeInline(element.textContent ?? '');
+    links.push({
+      text: clip(rawText || href, MAX_LINK_TEXT),
+      href: clip(href, 2_048),
+    });
+  }
+  return links;
+}
+
 function result(
   doc: Document,
   mode: PageExtractionMode,
@@ -454,6 +514,7 @@ function result(
   originalChars: number,
   scannedElements: number,
   structure: PageSemanticStructure,
+  pageLinks: PageLink[],
   forcedTruncated = false,
 ): PageScriptExtraction {
   const normalized = normalizeText(value);
@@ -466,6 +527,7 @@ function result(
     mode,
     text,
     structure,
+    pageLinks,
     originalChars: Math.max(originalChars, normalized.length),
     returnedChars: text.length,
     truncated: forcedTruncated || text.length < Math.max(originalChars, normalized.length),

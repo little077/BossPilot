@@ -23,6 +23,7 @@ import type {
   GenerationToolCall,
   GenerationToolDefinition,
   GenerationToolExecutionContext,
+  GenerationToolExecutionMode,
   GenerationToolExecutionOutcome,
   GenerationToolExecutionResult,
 } from '@/lib/generation/types';
@@ -38,34 +39,11 @@ import {
   validatePageTurnSnapshot,
 } from '@/lib/page/snapshot';
 
-export const OBSERVE_PAGE_TOOL: GenerationToolDefinition = {
-  name: 'observe_page',
-  label: '观察页面控件',
-  description:
-    '观察当前视口内可见的按钮、链接、输入框、复选框、下拉框等交互元素，返回 observationId 与 e1/e2 等临时引用。需要点击、填写或选择前必须先观察；页面变化后旧引用会失效。只返回角色、可访问名称和状态，不返回完整 DOM、CSS selector、密码值或隐藏内容。',
-  parameters: {
-    type: 'object',
-    properties: {
-      query: {
-        type: 'string',
-        description: '可选：只保留名称或角色包含该文本的当前可见元素，最多 120 字。',
-      },
-      limit: {
-        type: 'number',
-        minimum: 1,
-        maximum: 80,
-        description: '最多返回多少个元素，默认 50，最大 80。',
-      },
-    },
-    additionalProperties: false,
-  },
-};
-
 export const INSPECT_PAGE_TOOL: GenerationToolDefinition = {
   name: 'inspect_page',
   label: '查找页面元素',
   description:
-    '根据可访问名称、可见文字或角色查找当前页面的可交互元素，并返回可直接交给 interact_page 的 observationId/ref。默认检查整个文档，可发现当前视口外但仍可操作的元素；适合查找“登录”“搜索”“下一页”等明确目标。不会返回 CSS selector、输入值或隐藏元素。',
+    '根据可访问名称、可见文字或角色查找当前页面的可交互元素，并返回可直接交给 interact_page 的 observationId/ref。默认检查整个文档，可发现当前视口外但仍可操作的元素；需要浏览当前视口内可见控件（按钮、链接、输入框、复选框、下拉框等）时用 scope="viewport"。不会返回 CSS selector、输入值或隐藏元素。',
   parameters: {
     type: 'object',
     properties: {
@@ -99,8 +77,8 @@ export const INSPECT_PAGE_TOOL: GenerationToolDefinition = {
       limit: {
         type: 'number',
         minimum: 1,
-        maximum: 50,
-        description: '最多返回多少个元素，默认 30，最大 50。',
+        maximum: 80,
+        description: '最多返回多少个元素，默认 50，最大 80。',
       },
     },
     additionalProperties: false,
@@ -111,7 +89,7 @@ export const OBSERVE_VISUAL_PAGE_TOOL: GenerationToolDefinition = {
   name: 'observe_visual_page',
   label: '视觉观察当前页面',
   description:
-    '仅在 DOM 语义不足、页面包含 Canvas/图表/视频画面、需要判断遮挡布局，或用户明确要求查看页面外观时使用。截取当前可见区域，在图片上用 e1/e2 标记受约束控件，并遮盖已填写的输入内容。普通文本读取和控件查找优先使用 observe_page/read_current_page；截图不能替代操作后的结构化验证。',
+    '仅在 DOM 语义不足、页面包含 Canvas/图表/视频画面、需要判断遮挡布局，或用户明确要求查看页面外观时使用。截取当前可见区域，在图片上用 e1/e2 标记受约束控件，并遮盖已填写的输入内容。普通文本读取和控件查找优先使用 inspect_page/read_current_page；截图不能替代操作后的结构化验证。',
   parameters: {
     type: 'object',
     properties: {
@@ -139,7 +117,7 @@ export const INTERACT_PAGE_TOOL: GenerationToolDefinition = {
   name: 'interact_page',
   label: '操作页面控件',
   description:
-    '使用最近一次 observe_page 返回的 observationId 和元素 ref 执行一个受约束动作。支持 click、fill、clear、focus、keypress、select、check、scroll、scroll_until、wait、wait_hidden、wait_navigation、back、forward。scroll_until 会在严格步数与距离上限内滚动，直到找到 query 对应的可见控件或到达页面底部。wait 带 query 时会轮询等待该名称/角色的控件出现，wait_hidden 等待其消失，wait_navigation 等待页面导航完成；都不需要 observationId。click/fill/clear/focus/keypress/select/check 必须携带最新 observationId 和 ref；每次动作后引用失效并尽力返回新观察。表单提交、发送、投递、发布、删除、支付等可能产生外部影响的动作会由执行器强制暂停确认；密码和文件输入始终禁止。',
+    '使用最近一次 inspect_page 返回的 observationId 和元素 ref 执行一个受约束动作。支持 click、fill、clear、focus、keypress、select、check、scroll、scroll_until、wait、wait_hidden、wait_navigation、back、forward。scroll_until 会在严格步数与距离上限内滚动，直到找到 query 对应的可见控件或到达页面底部。wait 带 query 时会轮询等待该名称/角色的控件出现，wait_hidden 等待其消失，wait_navigation 等待页面导航完成；都不需要 observationId。click/fill/clear/focus/keypress/select/check 必须携带最新 observationId 和 ref；每次动作后引用失效并尽力返回新观察。sequence 可一次按顺序执行多个动作（如 click → wait → fill → keypress），每步与单个动作同样的验证与确认规则，首步失败即停并返回已执行步骤。表单提交、发送、投递、发布、删除、支付等可能产生外部影响的动作会由执行器强制暂停确认；密码和文件输入始终禁止。',
   parameters: {
     type: 'object',
     properties: {
@@ -161,6 +139,51 @@ export const INTERACT_PAGE_TOOL: GenerationToolDefinition = {
           'back',
           'forward',
         ],
+      },
+      sequence: {
+        type: 'array',
+        maxItems: 6,
+        description:
+          '可选：一次调用按顺序执行的多个动作。每个步骤是一个动作对象（action 必填，其余字段与单动作一致），例如 [{action:"click",observationId,ref},{action:"wait",query:"结果",waitMs:2000},{action:"keypress",observationId,ref,key:"Enter"}]。步骤会依次执行并各自验证；某一步需要确认或失败时立即停止，返回已执行步骤。',
+        items: {
+          type: 'object',
+          properties: {
+            action: {
+              type: 'string',
+              enum: [
+                'click',
+                'fill',
+                'clear',
+                'focus',
+                'keypress',
+                'select',
+                'check',
+                'scroll',
+                'scroll_until',
+                'wait',
+                'wait_hidden',
+                'wait_navigation',
+                'back',
+                'forward',
+              ],
+            },
+            observationId: { type: 'string' },
+            ref: { type: 'string' },
+            value: { type: 'string' },
+            key: { type: 'string' },
+            modifiers: {
+              type: 'array',
+              items: { type: 'string', enum: ['ctrl', 'shift', 'alt', 'meta'] },
+            },
+            checked: { type: 'boolean' },
+            deltaY: { type: 'number' },
+            query: { type: 'string' },
+            maxSteps: { type: 'number' },
+            waitMs: { type: 'number' },
+          },
+          required: ['action'],
+          additionalProperties: false,
+        },
       },
       observationId: {
         type: 'string',
@@ -217,6 +240,14 @@ export const INTERACT_PAGE_TOOL: GenerationToolDefinition = {
   },
 };
 
+/**
+ * inspect_page 只读已注入快照并基于它捕获观察，不修改页面状态；
+ * 同一标签页的并发由资源锁串行化，允许进入并行波次。
+ */
+export function inspectPageExecutionMode(): GenerationToolExecutionMode {
+  return 'parallel';
+}
+
 type ElementAction = 'click' | 'fill' | 'clear' | 'focus' | 'keypress' | 'select' | 'check';
 type PageAction =
   | ElementAction
@@ -231,6 +262,8 @@ type PageObservationScope = 'viewport' | 'document';
 
 interface InteractionRequest {
   action: PageAction;
+  /** 批量动作链：一次调用按顺序执行多个动作，首步失败即停。 */
+  sequence?: InteractionRequest[];
   observationId?: string;
   ref?: string;
   value?: string;
@@ -355,22 +388,6 @@ export class PageInteractionCoordinator {
     private readonly resources: BrowserResourceCoordinator = browserResourceCoordinator,
   ) {}
 
-  async observe(
-    call: GenerationToolCall,
-    snapshot: PageTurnSnapshot | null,
-    signal: AbortSignal,
-    requestId: string,
-    conversationId = '',
-  ): Promise<GenerationToolExecutionOutcome> {
-    const query = normalizeInline(call.arguments.query, MAX_QUERY_CHARS);
-    const limit = boundedInteger(call.arguments.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
-    const capture = () =>
-      this.captureObservation(snapshot, signal, requestId, conversationId, query, limit, true);
-    return snapshot && !signal.aborted
-      ? this.resources.withTab(snapshot.tabId, signal, capture)
-      : capture();
-  }
-
   async inspect(
     call: GenerationToolCall,
     snapshot: PageTurnSnapshot | null,
@@ -398,7 +415,7 @@ export class PageInteractionCoordinator {
     }
     const scope: PageObservationScope =
       call.arguments.scope === 'viewport' ? 'viewport' : 'document';
-    const limit = boundedInteger(call.arguments.limit, 30, 1, 50);
+    const limit = boundedInteger(call.arguments.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
     const capture = () =>
       this.captureObservation(
         snapshot,
@@ -634,7 +651,16 @@ export class PageInteractionCoordinator {
         reportProgress,
         conversationId,
       );
-    return ['click', 'keypress', 'back', 'forward'].includes(String(call.arguments.action))
+    const sequence = Array.isArray(call.arguments.sequence) ? call.arguments.sequence : null;
+    const needsFocus =
+      sequence !== null
+        ? sequence.some(
+            (step) =>
+              isRecord(step) &&
+              ['click', 'keypress', 'back', 'forward'].includes(String(step.action)),
+          )
+        : ['click', 'keypress', 'back', 'forward'].includes(String(call.arguments.action));
+    return needsFocus
       ? this.resources.withTabAndFocus(snapshot.tabId, signal, interact)
       : this.resources.withTab(snapshot.tabId, signal, interact);
   }
@@ -647,9 +673,22 @@ export class PageInteractionCoordinator {
     approved: boolean,
     reportProgress: InteractionProgress | undefined,
     conversationId: string,
+    continuation = false,
   ): Promise<GenerationToolExecutionOutcome> {
     const request = parseInteractionRequest(call.arguments);
     if (!request) return interactionFailure('INVALID_PAGE_INTERACTION', '页面操作参数无效');
+    if (request.sequence && request.sequence.length > 0) {
+      return this.runSequence(
+        request.sequence,
+        snapshot,
+        signal,
+        requestId,
+        approved,
+        reportProgress,
+        conversationId,
+        call.id,
+      );
+    }
     if (!snapshot?.isHttp || !snapshot.origin) {
       return interactionFailure(
         'OBSERVATION_REQUIRED',
@@ -877,15 +916,25 @@ export class PageInteractionCoordinator {
     if (!request.observationId || !request.ref) {
       return interactionFailure(
         'OBSERVATION_REQUIRED',
-        '元素操作必须使用最近一次 observe_page 返回的 observationId 和 ref。',
+        '元素操作必须使用最近一次 inspect_page 返回的 observationId 和 ref。',
         snapshot,
       );
     }
     const observation = await loadObservation(conversationId, requestId, snapshot.tabId);
-    if (!observation || observation.observationId !== request.observationId) {
+    if (!observation) {
       return interactionFailure(
         'STALE_ELEMENT_REFERENCE',
-        '页面观察已经过期或被新观察替换，请重新调用 observe_page。',
+        '页面观察已经过期或被新观察替换，请重新调用 inspect_page。',
+        snapshot,
+      );
+    }
+    const observationMatches =
+      observation.observationId === request.observationId ||
+      (continuation && observation.elements.some(({ ref }) => ref === request.ref));
+    if (!observationMatches) {
+      return interactionFailure(
+        'STALE_ELEMENT_REFERENCE',
+        '页面观察已经过期或被新观察替换，请重新调用 inspect_page。',
         snapshot,
       );
     }
@@ -896,7 +945,7 @@ export class PageInteractionCoordinator {
       await this.clear(requestId, conversationId, snapshot.tabId);
       return interactionFailure(
         'STALE_ELEMENT_REFERENCE',
-        '页面已经变化，旧元素引用不再安全，请重新调用 observe_page。',
+        '页面已经变化，旧元素引用不再安全，请重新调用 inspect_page。',
         snapshot,
       );
     }
@@ -988,6 +1037,81 @@ export class PageInteractionCoordinator {
       outcome,
     );
     return this.finishVerifiedAction(request.action, observed, verified, evidence, nextSnapshot);
+  }
+
+  /** 批量动作链：按顺序执行每个动作，每步与单动作同样的校验与验证；首步失败/需确认即停。 */
+  private async runSequence(
+    steps: InteractionRequest[],
+    snapshot: PageTurnSnapshot | null,
+    signal: AbortSignal,
+    requestId: string,
+    approved: boolean,
+    reportProgress: InteractionProgress | undefined,
+    conversationId: string,
+    callId: string,
+  ): Promise<GenerationToolExecutionOutcome> {
+    const executed: Array<{ action: PageAction; status: string }> = [];
+    let currentSnapshot = snapshot;
+    for (let index = 0; index < steps.length; index += 1) {
+      if (signal.aborted) return cancelled();
+      const step = steps[index]!;
+      const stepCall: GenerationToolCall = {
+        id: `${callId}:step-${index}`,
+        name: 'interact_page',
+        arguments: interactionArgumentsFromRequest(step),
+      };
+      reportProgress?.(
+        `sequence 第 ${index + 1}/${steps.length} 步：${actionLabel(step.action)}`,
+        '每步独立校验与验证，失败即停。',
+      );
+      const outcome = await this.interactLocked(
+        stepCall,
+        currentSnapshot,
+        signal,
+        requestId,
+        approved,
+        reportProgress,
+        conversationId,
+        true,
+      );
+      if ('deferred' in outcome) {
+        return {
+          ...outcome,
+          statusText: `sequence 第 ${index + 1} 步需要确认`,
+          detail: `已执行 ${executed.length} 步：${
+            executed.map((item) => actionLabel(item.action)).join(' → ') || '无'
+          }。第 ${index + 1} 步（${actionLabel(step.action)}）${outcome.statusText}，确认后才会继续。`,
+        };
+      }
+      if (outcome.isError) {
+        return {
+          ...outcome,
+          statusText: `sequence 在第 ${index + 1} 步失败，已执行 ${executed.length} 步`,
+          detail: `已执行：${executed.map((item) => actionLabel(item.action)).join(' → ') || '无'}。第 ${index + 1} 步（${actionLabel(step.action)}）失败：${outcome.statusText}。`,
+        };
+      }
+      executed.push({ action: step.action, status: outcome.statusText });
+      if (outcome.nextPageSnapshot) currentSnapshot = outcome.nextPageSnapshot;
+      // 步骤间留出渲染余量，避免连续动作被浏览器合并。
+      await abortableDelay(120, signal).catch(() => undefined);
+    }
+    return {
+      isError: false,
+      statusText: `已按顺序完成 ${executed.length} 步动作`,
+      detail: `执行链：${executed.map((item) => actionLabel(item.action)).join(' → ')}。`,
+      content: [
+        'sequence 执行完成。',
+        TOOL_DATA_OPEN,
+        JSON.stringify({ action: 'sequence', executed }).replaceAll('<', '\\u003c'),
+        TOOL_DATA_CLOSE,
+      ].join('\n'),
+      sourceOrigin: currentSnapshot?.origin,
+      sourceTitle: currentSnapshot
+        ? safePageTitle(currentSnapshot.title, currentSnapshot.url)
+        : undefined,
+      sourceUrl: currentSnapshot?.safeUrl,
+      ...(currentSnapshot ? { nextPageSnapshot: currentSnapshot } : {}),
+    };
   }
 
   async clear(requestId?: string, conversationId?: string, tabId?: number): Promise<void> {
@@ -1110,10 +1234,10 @@ export class PageInteractionCoordinator {
       statusText: actionLabel(action),
       detail:
         actionResult?.detail ??
-        '页面操作已完成；目标页面需要重新授权或仍在变化，请继续调用 observe_page。',
+        '页面操作已完成；目标页面需要重新授权或仍在变化，请继续调用 inspect_page。',
       content: [
         actionToolContent(action, snapshot),
-        '页面操作已经完成，但没有生成新的元素引用。继续操作前必须调用 observe_page。',
+        '页面操作已经完成，但没有生成新的元素引用。继续操作前必须调用 inspect_page。',
       ].join('\n'),
       sourceOrigin: snapshot.origin,
       sourceTitle: snapshot.title,
@@ -1217,7 +1341,7 @@ export class PageInteractionCoordinator {
     if (!parsed || navigationKey(parsed.executionUrl) !== navigationKey(snapshot.url)) {
       return interactionFailure(
         'STALE_ELEMENT_REFERENCE',
-        `检查期间页面已经变化，请重新调用 ${purpose === 'inspect' ? 'inspect_page' : 'observe_page'}。`,
+        '检查期间页面已经变化，请重新调用 inspect_page。',
         snapshot,
       );
     }
@@ -2672,6 +2796,23 @@ export function verifyPageElementState(params: {
 }
 
 function parseInteractionRequest(value: Record<string, unknown>): InteractionRequest | null {
+  const rawSequence = Array.isArray(value.sequence) ? value.sequence.slice(0, 6) : undefined;
+  const sequence = rawSequence?.map((step) =>
+    isRecord(step) ? parseSingleInteractionStep(step) : null,
+  );
+  if (rawSequence) {
+    if (!sequence || sequence.some((step) => !step)) return null;
+    if (value.action !== undefined) {
+      const single = parseSingleInteractionStep(value);
+      if (!single) return null;
+      return { ...single, sequence: sequence as InteractionRequest[] };
+    }
+    return { action: 'wait', sequence: sequence as InteractionRequest[] };
+  }
+  return parseSingleInteractionStep(value);
+}
+
+function parseSingleInteractionStep(value: Record<string, unknown>): InteractionRequest | null {
   if (!isPageAction(value.action)) return null;
   const observationId = normalizeInline(value.observationId, 80);
   const ref = normalizeInline(value.ref, 20);
@@ -2705,6 +2846,24 @@ function parseInteractionRequest(value: Record<string, unknown>): InteractionReq
     ...(maxSteps !== undefined ? { maxSteps } : {}),
     ...(waitMs !== undefined ? { waitMs } : {}),
   };
+}
+
+/** 把已解析的单步动作还原为工具调用参数，供 sequence 内部复用。 */
+function interactionArgumentsFromRequest(request: InteractionRequest): Record<string, unknown> {
+  const argumentsValue: Record<string, unknown> = { action: request.action };
+  if (request.observationId) argumentsValue.observationId = request.observationId;
+  if (request.ref) argumentsValue.ref = request.ref;
+  if (request.value !== undefined) argumentsValue.value = request.value;
+  if (request.key) argumentsValue.key = request.key;
+  if (request.modifiers && request.modifiers.length > 0)
+    argumentsValue.modifiers = request.modifiers;
+  if (request.checked !== undefined) argumentsValue.checked = request.checked;
+  if (request.deltaY !== undefined) argumentsValue.deltaY = request.deltaY;
+  if (request.query) argumentsValue.query = request.query;
+  if (request.containerQuery) argumentsValue.containerQuery = request.containerQuery;
+  if (request.maxSteps !== undefined) argumentsValue.maxSteps = request.maxSteps;
+  if (request.waitMs !== undefined) argumentsValue.waitMs = request.waitMs;
+  return argumentsValue;
 }
 
 function isPageAction(value: unknown): value is PageAction {
