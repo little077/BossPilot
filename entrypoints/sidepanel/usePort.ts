@@ -466,7 +466,24 @@ export function useAgentPort() {
                   (candidate) => candidate.requestId === message.requestId,
                 )
               : activeChatsRef.current.get(activeConversationIdRef.current ?? '');
-            if (message.requestId && !active) break;
+            if (message.requestId && !active) {
+              // 后台判定该请求已过期/失败，但本端没有对应活跃流（重连后暂停点
+              // 已过期导致 stream 未重放，或面板重开过）。不能静默丢弃：从运行
+              // 台账反查所属会话，解除运行状态并展示错误，否则"思考中"会残留。
+              const staleRun = runsRef.current.find((run) => run.requestId === message.requestId);
+              if (!staleRun) break;
+              setConversationRunning(false, staleRun.conversationId);
+              const errorMessage: ChatMessage = {
+                ...makeMessage('assistant', ''),
+                error: true,
+                status: 'error',
+                errorMessage: message.text,
+                retryable: true,
+              };
+              upsertMessage(staleRun.conversationId, errorMessage);
+              saveChatMessage(staleRun.conversationId, errorMessage, { unread: true });
+              break;
+            }
             const finalized = active ? interruptActiveAssistant(active, message.text) : false;
             if (active) {
               activeChatsRef.current.delete(active.conversationId);

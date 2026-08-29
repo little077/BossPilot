@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WorkspaceStore } from '@/lib/workspace/storage';
 import {
   ChromeSkillHostClient,
@@ -6,6 +6,8 @@ import {
   type SkillHostClient,
   SkillSandboxRunner,
 } from './sandbox';
+
+afterEach(() => vi.useRealTimers());
 
 describe('ChromeSkillHostClient', () => {
   const hasDocument = vi.fn();
@@ -189,6 +191,25 @@ describe('SkillSandboxRunner guards', () => {
     const running = runner.run('conversation', 'return input;', {}, [], controller.signal);
     controller.abort(new Error('stopped while running'));
     await expect(running).rejects.toThrow('stopped while running');
+  });
+
+  it('times out when the host never responds', async () => {
+    vi.useFakeTimers();
+    const runner = new SkillSandboxRunner({ run: () => new Promise(() => undefined) });
+    const running = runner.run(
+      'conversation',
+      'return input;',
+      {},
+      [],
+      new AbortController().signal,
+    );
+    const rejected = running.catch((error: unknown) => error);
+
+    await vi.advanceTimersByTimeAsync(8_000);
+
+    await expect(rejected).resolves.toEqual(
+      expect.objectContaining({ message: 'Skill 宿主超过 8 秒没有响应。' }),
+    );
   });
 
   it('requires Chrome origin permission before a declared network request', async () => {

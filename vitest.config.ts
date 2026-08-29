@@ -62,6 +62,7 @@ export default defineConfig({
         'lib/mcp/client.ts',
         'lib/mcp/official-client.ts',
         'lib/skills/parser.ts',
+        'lib/skills/host-bridge.ts',
         'lib/skills/package.ts',
         'lib/skills/sandbox.ts',
         'lib/skills/builtin.ts',

@@ -1,51 +1,31 @@
 // 可信 offscreen host 仅负责桥接 sandbox postMessage 与 Background 能力代理。
+import { SkillHostBridge } from '@/lib/skills/host-bridge';
+
 const frame = document.querySelector<HTMLIFrameElement>('#skill-sandbox');
 if (!frame) throw new Error('Skill sandbox iframe 缺失。');
 const sandboxFrame = frame;
-const ready = new Promise<void>((resolve) => {
-  if (sandboxFrame.contentDocument?.readyState === 'complete') resolve();
-  else sandboxFrame.addEventListener('load', () => resolve(), { once: true });
+const bridge = new SkillHostBridge((message) => {
+  const target = sandboxFrame.contentWindow;
+  if (!target) throw new Error('Skill sandbox iframe 尚未就绪。');
+  target.postMessage(message, '*');
 });
-const callbacks = new Map<
-  string,
-  { resolve: (value: SkillHostResponse) => void; timeout: ReturnType<typeof setTimeout> }
->();
+
+// 模块脚本可能在 iframe load 之后才执行；立即 ping 与后续 load ping 共同消除时序竞态。
+sandboxFrame.addEventListener('load', () => bridge.frameLoaded());
+bridge.ping();
 
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   if (!isRecord(message) || message.type !== 'skill-host:run') return;
   const runId = boundedString(message.runId, 128);
   const code = boundedString(message.code, 200_000);
   if (!runId || !code) return;
-  void ready.then(() => {
-    const timeout = setTimeout(() => {
-      callbacks.delete(runId);
-      sendResponse({ ok: false, error: 'Skill 脚本执行超过 5 秒。' } satisfies SkillHostResponse);
-    }, 5_000);
-    callbacks.set(runId, { resolve: sendResponse, timeout });
-    sandboxFrame.contentWindow?.postMessage(
-      { type: 'skill-sandbox:run', runId, code, input: message.input },
-      '*',
-    );
-  });
+  bridge.run({ runId, code, input: message.input }, sendResponse);
   return true;
 });
 
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (event.source !== sandboxFrame.contentWindow || !isRecord(event.data)) return;
-  if (event.data.type === 'skill-sandbox:result') {
-    const runId = boundedString(event.data.runId, 128);
-    if (!runId) return;
-    const callback = callbacks.get(runId);
-    if (!callback) return;
-    clearTimeout(callback.timeout);
-    callbacks.delete(runId);
-    callback.resolve(
-      event.data.ok === true
-        ? { ok: true, result: event.data.result }
-        : { ok: false, error: boundedString(event.data.error, 500) ?? 'Skill 脚本失败。' },
-    );
-    return;
-  }
+  if (bridge.receive(event.data)) return;
   if (event.data.type === 'skill-sandbox:capability') void proxyCapability(event.data);
 });
 
@@ -75,8 +55,6 @@ async function proxyCapability(message: Record<string, unknown>): Promise<void> 
     '*',
   );
 }
-
-type SkillHostResponse = { ok: true; result: unknown } | { ok: false; error: string };
 
 function boundedString(value: unknown, maxChars: number): string | undefined {
   return typeof value === 'string' && value.length > 0 && value.length <= maxChars

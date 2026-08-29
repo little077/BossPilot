@@ -16,6 +16,7 @@ import { WorkspaceStore } from '@/lib/workspace/storage';
 const MAX_SCRIPT_CHARS = 200_000;
 const MAX_INPUT_CHARS = 100_000;
 const MAX_NETWORK_RESULT_CHARS = 200_000;
+const SKILL_HOST_TIMEOUT_MS = 8_000;
 let offscreenCreation: Promise<void> | null = null;
 
 interface ActiveSkillRun {
@@ -115,10 +116,11 @@ export class SkillSandboxRunner {
     const runId = crypto.randomUUID();
     this.active.set(runId, { conversationId, capabilities: new Set(capabilities) });
     try {
-      const result = await Promise.race([
+      const result = await waitForSkillHost(
         this.host.run({ runId, code, input: safeInput }),
-        abortPromise(signal),
-      ]);
+        signal,
+        SKILL_HOST_TIMEOUT_MS,
+      );
       return cloneSerializable(result, MAX_INPUT_CHARS);
     } finally {
       this.active.delete(runId);
@@ -245,13 +247,31 @@ async function ensureOffscreenHost(): Promise<void> {
   await offscreenCreation;
 }
 
-function abortPromise(signal: AbortSignal): Promise<never> {
-  return new Promise((_, reject) => {
+function waitForSkillHost<T>(work: Promise<T>, signal: AbortSignal, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      signal.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = () =>
+      finish(() => reject(signal.reason ?? new DOMException('Skill 已取消。', 'AbortError')));
+    const timeout = setTimeout(
+      () => finish(() => reject(new Error('Skill 宿主超过 8 秒没有响应。'))),
+      timeoutMs,
+    );
+    signal.addEventListener('abort', onAbort, { once: true });
     if (signal.aborted) {
-      reject(signal.reason);
+      onAbort();
       return;
     }
-    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    work.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
   });
 }
 

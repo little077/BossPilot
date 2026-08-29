@@ -1150,6 +1150,54 @@ describe('useAgentPort', () => {
     });
   });
 
+  it('clears a stale waiting_user run when an expired-request error has no active stream', async () => {
+    const hook = await connectHook();
+    let accepted = false;
+    act(() => {
+      accepted = hook.result.current.sendChat('hello');
+    });
+    expect(accepted).toBe(true);
+    const request = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    expect(request?.requestId).toBeDefined();
+
+    // 模拟 SW 重启后的重连订阅：run_state 重放了 restore 保留的 waiting_user 僵尸 run
+    act(() => {
+      ports[0]?.emit({
+        type: 'run_state',
+        runs: [
+          {
+            runId: 'run-stale',
+            requestId: 'run-stale',
+            conversationId: 'conversation-1',
+            status: 'waiting_user',
+            updatedAt: 1,
+          },
+        ],
+      });
+    });
+    expect(hook.result.current.chatRunning).toBe(true);
+
+    // 用户点击授权后后台判定暂停点已过期；但 UI 没有该请求的活跃流（stream 未重放），
+    // 错误必须仍能解除"思考中"并展示给用户，而不是被静默丢弃。
+    act(() => {
+      ports[0]?.emit({
+        type: 'error',
+        requestId: 'run-stale',
+        text: '这次页面授权已经处理、过期或不存在，请重新发送问题。',
+      });
+    });
+
+    expect(hook.result.current.chatRunning).toBe(false);
+    expect(hook.result.current.messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      status: 'error',
+      errorMessage: '这次页面授权已经处理、过期或不存在，请重新发送问题。',
+      retryable: true,
+    });
+  });
+
   it('rebinds stale local request A to authoritative background request B during recovery', async () => {
     const hook = await connectHook();
     vi.useFakeTimers();

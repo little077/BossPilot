@@ -63,8 +63,14 @@ export class AgentRunRegistry {
     if (this.restored) return this.snapshots();
     const stored = await this.store.load();
     for (const item of stored) {
+      // SW 重启后内存中的生成管理器与暂停恢复点（deferred）都已丢失：
+      // running/queued/waiting_user 均无法自愈，统一标记为 interrupted，
+      // 否则 UI 会一直停留在"思考中"。用户通过授权/确认恢复时 enqueue
+      // 会重新创建 run，interrupted 状态不影响恢复路径。
       const status =
-        item.status === 'running' || item.status === 'queued' ? 'interrupted' : item.status;
+        item.status === 'running' || item.status === 'queued' || item.status === 'waiting_user'
+          ? 'interrupted'
+          : item.status;
       this.runs.set(item.requestId, {
         ...item,
         status,
@@ -163,6 +169,23 @@ export class AgentRunRegistry {
       return true;
     }
     return this.managerForRequest(requestId)?.stop(requestId) ?? false;
+  }
+
+  /** 强制中断不可达的残留运行（如 SW 重启后失去 manager 与恢复点的 waiting_user），并广播最新状态。 */
+  forceInterrupt(requestId: string): boolean {
+    const run = this.runs.get(requestId);
+    if (
+      !run ||
+      run.status === 'completed' ||
+      run.status === 'cancelled' ||
+      run.status === 'error' ||
+      run.status === 'interrupted'
+    ) {
+      return false;
+    }
+    this.update(requestId, 'interrupted');
+    void this.persistAndPublish();
+    return true;
   }
 
   steer(requestId: string, content: string): boolean {

@@ -856,6 +856,10 @@ export default defineBackground({
                       resuming.conversationId ?? '',
                     );
                     resumingContext.cancelPendingRequest(requestId);
+                  } else {
+                    // SW 重启后的僵尸等待：manager 与暂停点都已不存在，停止请求
+                    // 无处可去；直接强制中断并广播，否则 UI 会一直停留在"思考中"。
+                    runRegistry.forceInterrupt(requestId);
                   }
                 }
               }
@@ -1025,6 +1029,9 @@ export default defineBackground({
           requestId,
           text: '这次页面授权已经处理、过期或不存在，请重新发送问题。',
         });
+        // 暂停点已失效，对应 run 也无法再恢复：强制中断并广播，否则 UI 会一直
+        // 停留在"思考中"，重新发送也会被"该会话已有回复正在生成"拒绝。
+        runRegistry.forceInterrupt(requestId);
         return;
       }
       const conversationId = pending.conversationId ?? '';
@@ -1161,6 +1168,9 @@ export default defineBackground({
           requestId,
           text: '这次问题已经回答、过期或不存在，请重新发送问题。',
         });
+        // 暂停点已失效，对应 run 也无法再恢复：强制中断并广播，否则 UI 会一直
+        // 停留在"思考中"，重新发送也会被"该会话已有回复正在生成"拒绝。
+        runRegistry.forceInterrupt(requestId);
         return;
       }
       const conversationId = pending.conversationId ?? '';

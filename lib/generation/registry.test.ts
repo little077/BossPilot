@@ -92,7 +92,7 @@ describe('AgentRunRegistry', () => {
     await a;
   });
 
-  it('marks in-flight and queued persisted runs interrupted after recovery', async () => {
+  it('marks in-flight, queued and waiting-user persisted runs interrupted after recovery', async () => {
     const factory = managerFactory();
     const registry = new AgentRunRegistry(
       factory.create,
@@ -111,6 +111,13 @@ describe('AgentRunRegistry', () => {
           status: 'queued',
           updatedAt: 2,
         },
+        {
+          runId: 'run-c',
+          requestId: 'run-c',
+          conversationId: 'c',
+          status: 'waiting_user',
+          updatedAt: 3,
+        },
       ]),
       2,
       () => 20,
@@ -120,7 +127,35 @@ describe('AgentRunRegistry', () => {
     expect(registry.snapshots().map(({ status }) => status)).toEqual([
       'interrupted',
       'interrupted',
+      'interrupted',
     ]);
+    // 恢复后同一会话可以重新入队（interrupted 不算活跃 run），授权恢复链路不受影响。
+    const resumed = registry.enqueue('c', 'run-c', async () => void 0);
+    await expect(resumed).resolves.toBeUndefined();
+  });
+
+  it('forceInterrupt marks unreachable runs interrupted and ignores terminal states', async () => {
+    const factory = managerFactory();
+    const listener = vi.fn();
+    const registry = new AgentRunRegistry(factory.create, store(), 1, () => 20);
+    const hold = deferred();
+    void registry.enqueue('a', 'run-a', async () => hold.promise);
+    await Promise.resolve();
+    registry.subscribe(listener);
+    listener.mockClear();
+
+    expect(registry.forceInterrupt('run-missing')).toBe(false);
+    expect(registry.forceInterrupt('run-a')).toBe(true);
+    // persistAndPublish 是异步广播，等待微任务后再断言
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(registry.snapshots().map(({ status }) => status)).toEqual(['interrupted']);
+    expect(listener).toHaveBeenLastCalledWith([
+      expect.objectContaining({ requestId: 'run-a', status: 'interrupted' }),
+    ]);
+    expect(registry.forceInterrupt('run-a')).toBe(false);
+    hold.resolve();
+    await Promise.resolve();
   });
 
   it('rejects invalid concurrency, duplicate runs, and another run in one conversation', async () => {

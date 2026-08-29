@@ -108,9 +108,23 @@ export class SkillRunCoordinator {
         recoverability: 'safe_retry',
       };
     } catch (error) {
+      if (signal.aborted) return cancelled();
       return failure(error instanceof Error ? error.message : 'Skill 脚本执行失败。');
     }
   }
+}
+
+function cancelled(): GenerationToolExecutionResult {
+  return {
+    isError: true,
+    errorCode: 'cancelled',
+    statusText: '已停止运行 Skill 脚本',
+    detail: '用户取消了本次 Skill 运行。',
+    content: 'run_skill 已取消：用户停止了本次 Skill 运行。',
+    riskLevel: 'read',
+    authorizationStatus: 'not_required',
+    recoverability: 'safe_retry',
+  };
 }
 
 function permissionQuestion(

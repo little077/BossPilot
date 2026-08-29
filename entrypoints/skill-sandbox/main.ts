@@ -7,6 +7,10 @@ const pending = new Map<
 
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (event.source !== window.parent || !isRecord(event.data)) return;
+  if (event.data.type === 'skill-sandbox:ping') {
+    notifyReady();
+    return;
+  }
   if (event.data.type === 'skill-sandbox:capability-result') {
     const requestId = boundedString(event.data.requestId, 128);
     if (!requestId) return;
@@ -23,6 +27,9 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (!runId || !code) return;
   void runScript(runId, code, event.data.input);
 });
+
+// 主动通知覆盖正常加载顺序；响应 ping 覆盖 Host 晚启动或错过首次通知的顺序。
+notifyReady();
 
 async function runScript(runId: string, code: string, input: unknown): Promise<void> {
   try {
@@ -71,6 +78,10 @@ function requestCapability(runId: string, capability: unknown, payload: unknown)
       '*',
     );
   });
+}
+
+function notifyReady(): void {
+  window.parent.postMessage({ type: 'skill-sandbox:ready' }, '*');
 }
 
 function cloneSerializable(value: unknown): unknown {

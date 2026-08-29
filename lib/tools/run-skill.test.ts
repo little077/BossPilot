@@ -200,6 +200,26 @@ describe('SkillRunCoordinator', () => {
       coordinator.execute(call(), 'conversation', null, new AbortController().signal),
     ).resolves.toMatchObject({ isError: true, detail: 'sandbox crashed' });
   });
+
+  it('preserves cancellation while a sandbox run is pending', async () => {
+    const store = new SkillStore(storage, [], undefined, new MemorySkillRepository());
+    await store.importPackage(packageFixture());
+    await store.resolveGrant('table-maker', 'workspace.write', 'allow');
+    const coordinator = new SkillRunCoordinator(
+      store,
+      new SkillSandboxRunner({ run: () => new Promise(() => undefined) }),
+    );
+    const controller = new AbortController();
+    const running = coordinator.execute(call(), 'conversation', null, controller.signal);
+
+    controller.abort(new DOMException('用户停止了 Skill', 'AbortError'));
+
+    await expect(running).resolves.toMatchObject({
+      isError: true,
+      errorCode: 'cancelled',
+      statusText: '已停止运行 Skill 脚本',
+    });
+  });
 });
 
 describe('SkillSandboxRunner capability proxy', () => {
