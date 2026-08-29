@@ -1,23 +1,28 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  BossPilot 扩展图标 · 16px 专用简化变体
-  小尺寸下细节会糊：B 描边加粗、羽翼减为两根并加粗、圆角略收。
+  BossPilot 扩展图标 · 16px 专用简化变体（金色火种）
+  只保留高对比背景、开放轨道和火种，避免缩放后高光与细薄结构糊成一团。
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <title>BossPilot 小尺寸应用图标</title>
+  <title>BossPilot 金色火种小尺寸应用图标</title>
   <defs>
-    <linearGradient id="g-mono-s" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#3fdcba"/>
+    <linearGradient id="orbit" x1="26" y1="28" x2="101" y2="104" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6fffd1"/>
       <stop offset="1" stop-color="#00a98f"/>
     </linearGradient>
+    <radialGradient id="emberSmall" cx="42%" cy="35%" r="70%">
+      <stop offset="0" stop-color="#fff4a6"/>
+      <stop offset="0.35" stop-color="#ffd23f"/>
+      <stop offset="1" stop-color="#ee8415"/>
+    </radialGradient>
   </defs>
-  <rect width="128" height="128" rx="24" fill="#0e2a24"/>
-  <!-- 羽翼简化为两根粗杆 -->
-  <rect x="6" y="50" width="28" height="10" rx="5" fill="#00a98f"/>
-  <rect x="14" y="68" width="20" height="10" rx="5" fill="#00a98f" opacity="0.65"/>
-  <rect x="94" y="50" width="28" height="10" rx="5" fill="#00a98f"/>
-  <rect x="94" y="68" width="20" height="10" rx="5" fill="#00a98f" opacity="0.65"/>
-  <!-- B monogram：描边加粗到 14 -->
-  <path d="M52 30 H70 A17 17 0 0 1 70 64 H52 Z M52 64 H74 A17 17 0 0 1 74 98 H52 Z"
-        fill="none" stroke="url(#g-mono-s)" stroke-width="14" stroke-linejoin="round"/>
+  <rect width="128" height="128" rx="24" fill="#082a25"/>
+  <path
+    d="M94 28C108 41 113 61 104 78C94 98 68 108 45 102C27 98 18 84 22 68C26 51 43 40 62 34C76 30 88 24 98 16"
+    fill="none"
+    stroke="url(#orbit)"
+    stroke-width="17"
+    stroke-linecap="round"
+  />
+  <circle cx="63" cy="65" r="15" fill="url(#emberSmall)"/>
 </svg>

@@ -3,6 +3,7 @@ import { type ComponentProps, useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SkillCatalogEntry } from '@/lib/skills/types';
 import { SkillPicker } from './SkillPicker';
+import { TooltipProvider } from './ui/Tooltip';
 
 const SKILLS: SkillCatalogEntry[] = [
   {
@@ -38,7 +39,15 @@ const SKILLS: SkillCatalogEntry[] = [
 function Harness(props: Partial<ComponentProps<typeof SkillPicker>> = {}) {
   const [open, setOpen] = useState(false);
   return (
-    <SkillPicker skills={SKILLS} open={open} onOpenChange={setOpen} onSelect={vi.fn()} {...props} />
+    <TooltipProvider delayDuration={0}>
+      <SkillPicker
+        skills={SKILLS}
+        open={open}
+        onOpenChange={setOpen}
+        onSelect={vi.fn()}
+        {...props}
+      />
+    </TooltipProvider>
   );
 }
 
@@ -97,13 +106,15 @@ describe('SkillPicker', () => {
 
   it('打开时带入 initialQuery（斜杠触发语义）', () => {
     render(
-      <SkillPicker
-        skills={SKILLS}
-        open
-        initialQuery="resume"
-        onOpenChange={vi.fn()}
-        onSelect={vi.fn()}
-      />,
+      <TooltipProvider delayDuration={0}>
+        <SkillPicker
+          skills={SKILLS}
+          open
+          initialQuery="resume"
+          onOpenChange={vi.fn()}
+          onSelect={vi.fn()}
+        />
+      </TooltipProvider>,
     );
     expect(screen.getByRole('textbox', { name: '搜索技能' })).toHaveValue('resume');
     expect(screen.getByRole('option', { name: /resume/ })).toBeVisible();

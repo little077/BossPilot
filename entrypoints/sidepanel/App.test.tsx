@@ -169,6 +169,21 @@ afterEach(() => {
 });
 
 describe('首页发送过渡', () => {
+  it('展示通用浏览器 Agent 定位和非求职场景示例', () => {
+    render(<App />);
+
+    expect(screen.getByRole('heading', { name: /聊两句.*让浏览和求知更省心/ })).toBeInTheDocument();
+    expect(screen.getByText('Browser AI Agent')).toBeInTheDocument();
+    expect(screen.getByText(/整理小红书帖子、比较旅行攻略、提炼长文重点/)).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: '读一下当前的小红书帖子，总结正文重点和评论区共识' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: '比较我打开的旅行攻略，整理一份行程建议和避坑清单' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/求职|改简历|准备面试/)).not.toBeInTheDocument();
+  });
+
   it('发送被拒绝时不启动沉底动画，输入框保持在首页', async () => {
     vi.useFakeTimers();
     const sendChat = vi.fn(() => false);

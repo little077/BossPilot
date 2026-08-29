@@ -52,4 +52,42 @@ describe('SkillReference', () => {
     });
     expect(editor.getText()).toBe('用 xhs-note-scout 技能：');
   });
+
+  it('persists description attribute when provided', () => {
+    editor = new Editor({ extensions: [StarterKit, SkillReference] });
+
+    editor.commands.setContent({
+      type: 'doc',
+      content: [
+        {
+          type: 'paragraph',
+          content: [
+            {
+              type: 'skillReference',
+              attrs: { name: 'xhs-note-scout', description: '采集小红书笔记' },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(editor.getHTML()).toContain('data-skill-description="采集小红书笔记"');
+    // 空值不输出 data-skill-description=""，避免 HTML 冗余
+    expect(editor.getHTML()).not.toContain('data-skill-description=""');
+
+    // HTML → JSON 往返恢复 description
+    editor.commands.setContent(editor.getHTML());
+    expect(editor.getJSON()).toMatchObject({
+      content: [
+        {
+          content: [
+            {
+              type: 'skillReference',
+              attrs: { name: 'xhs-note-scout', description: '采集小红书笔记' },
+            },
+          ],
+        },
+      ],
+    });
+  });
 });

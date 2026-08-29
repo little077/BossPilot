@@ -27,6 +27,15 @@ if (!HTMLElement.prototype.releasePointerCapture) {
   HTMLElement.prototype.releasePointerCapture = () => undefined;
 }
 
+// jsdom 未实现 ResizeObserver；Radix Tooltip/Popper 用它追踪触发器和内容尺寸。
+if (!globalThis.ResizeObserver) {
+  globalThis.ResizeObserver = class ResizeObserverMock {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();

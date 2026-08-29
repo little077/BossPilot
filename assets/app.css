@@ -2088,7 +2088,7 @@ body {
   align-items: center;
   gap: 2px;
   margin: 0 1px;
-  padding: 0 6px 0 4px;
+  padding: 0 6px 0 2px;
   overflow: hidden;
   border: 1px solid transparent;
   border-radius: 5px;
@@ -2136,6 +2136,42 @@ body {
   overflow: hidden;
   color: var(--color-ink);
   text-overflow: ellipsis;
+}
+
+/* 移除按钮：默认隐藏，hover chip 时浮现；悬停变危险色。点击直接删除节点。 */
+.composer-skill-remove {
+  display: inline-grid;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  place-items: center;
+  margin: 0 0 0 -2px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-ink-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 110ms ease,
+    background 110ms ease,
+    color 110ms ease;
+}
+
+.composer-skill-reference:hover .composer-skill-remove,
+.composer-skill-remove:focus-visible {
+  opacity: 1;
+}
+
+.composer-skill-remove:hover {
+  background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+  color: var(--color-danger);
+}
+
+.composer-skill-remove:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-brand) 30%, transparent);
 }
 
 /* ─── 技能选择器菜单弹出动画（design/cmd-menu/variant-a-linear） ───

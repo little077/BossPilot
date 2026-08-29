@@ -10,6 +10,7 @@ import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SkillCatalogEntry } from '@/lib/skills/types';
 import { cn } from '@/lib/utils';
+import { Tooltip, TooltipContent, TooltipTrigger } from './ui/Tooltip';
 
 interface SkillPickerProps {
   skills: SkillCatalogEntry[];
@@ -235,31 +236,37 @@ export function SkillPicker({
               </div>
             ) : (
               filtered.map((skill, i) => (
-                <button
-                  key={skill.name}
-                  type="button"
-                  role="option"
-                  id={`skill-opt-${i}`}
-                  aria-selected={i === index}
-                  // mousedown preventDefault：防止失焦先于点击导致面板关闭
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => onSelectRef.current(skill)}
-                  // mousemove 而非 mouseenter：鼠标飘过时不同步选中态，避免闪烁
-                  onMouseMove={() => {
-                    if (i !== index) setIndex(i);
-                  }}
-                  className={cn(
-                    'flex w-full cursor-pointer flex-col gap-0.5 rounded-lg border-0 bg-transparent px-2.5 py-2 text-left transition-colors duration-75',
-                    i === index && 'bg-brand/10',
-                  )}
-                >
-                  <span className="truncate text-xs font-semibold text-ink">
-                    {highlight(`/${skill.name}`, query)}
-                  </span>
-                  <span className="truncate text-[11px] leading-[1.4] text-ink-faint">
-                    {highlight(skill.description, query)}
-                  </span>
-                </button>
+                <Tooltip key={skill.name}>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      role="option"
+                      id={`skill-opt-${i}`}
+                      aria-selected={i === index}
+                      // mousedown preventDefault：防止失焦先于点击导致面板关闭
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => onSelectRef.current(skill)}
+                      // mousemove 而非 mouseenter：鼠标飘过时不同步选中态，避免闪烁
+                      onMouseMove={() => {
+                        if (i !== index) setIndex(i);
+                      }}
+                      className={cn(
+                        'flex w-full cursor-pointer flex-col gap-0.5 rounded-lg border-0 bg-transparent px-2.5 py-2 text-left transition-colors duration-75',
+                        i === index && 'bg-brand/10',
+                      )}
+                    >
+                      <span className="truncate text-xs font-semibold text-ink">
+                        {highlight(`/${skill.name}`, query)}
+                      </span>
+                      <span className="truncate text-[11px] leading-[1.4] text-ink-faint">
+                        {highlight(skill.description, query)}
+                      </span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-60 whitespace-normal text-left">
+                    /{skill.name}：{skill.description}
+                  </TooltipContent>
+                </Tooltip>
               ))
             )}
           </div>

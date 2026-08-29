@@ -191,7 +191,7 @@ export function Composer({
     }
     chain
       .insertContent([
-        { type: 'skillReference', attrs: { name: skill.name } },
+        { type: 'skillReference', attrs: { name: skill.name, description: skill.description } },
         { type: 'text', text: ' ' },
       ])
       .focus()
