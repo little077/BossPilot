@@ -2,7 +2,7 @@
   "name": "bosspilot",
   "description": "BossPilot — 本地优先、由 Skills 驱动的可扩展浏览器 AI Agent（BYOK / MCP / 商业使用需授权）",
   "private": true,
-  "version": "1.3.2",
+  "version": "1.4.0",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "keywords": [
