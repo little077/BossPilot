@@ -16,6 +16,7 @@
       "!!playwright-report",
       "!!test-results",
       "!!design-prototype",
+      "!!design",
       "!!skills/**/scripts"
     ]
   },
