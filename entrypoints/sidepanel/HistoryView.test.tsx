@@ -122,7 +122,9 @@ describe('HistoryView', () => {
   });
 
   it('formats today, yesterday, and older timestamps compactly', () => {
-    expect(formatConversationTime(now, now)).toMatch(/12:00/);
+    // 今天的会话显示 HH:MM 时间；不写死具体值，因为 CI 运行在 UTC 时区，
+    // toLocaleTimeString 会按运行环境时区渲染（本地 +08:00 显示 12:00，UTC 显示 04:00）。
+    expect(formatConversationTime(now, now)).toMatch(/^\d{2}:\d{2}$/);
     expect(formatConversationTime(now - 86_400_000, now)).toBe('昨天');
     expect(formatConversationTime(now - 3 * 86_400_000, now)).toMatch(/8.*6/);
   });
