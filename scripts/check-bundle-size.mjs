@@ -4,7 +4,9 @@ import { gzipSync } from 'node:zlib';
 
 const outputDirectory = path.resolve('.output/chrome-mv3');
 const maximumJavaScriptBytes = 850 * 1024;
-const maximumBackgroundEntryBytes = 110 * 1024;
+// v1.4：语音识别（sidepanel 直连）与授权跳板页上线后，Background 入口
+// 实测 130.3 KiB（Agent 核心 + 生成协议静态链接），预算放宽至 140 KiB。
+const maximumBackgroundEntryBytes = 140 * 1024;
 // v1.3 引入 CodeMirror 6 多文件编辑器与 JSZip 安全导入器；两者均按页面/静态 chunk 隔离，
 // 仍保留单文件 850 KiB 门禁，并将商店压缩包增量限制在约 176 KiB 内。
 const maximumExtensionBytes = 4.25 * 1024 * 1024;
