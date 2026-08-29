@@ -78,7 +78,7 @@ function decisionForRisk(entry: CatalogToolEntry, call: GenerationToolCall): Pol
 
 /** confirm 且未获用户确认时的统一确认请求。 */
 export function policyConfirm(
-  call: GenerationToolCall,
+  _call: GenerationToolCall,
   decision: PolicyDecision,
   question: string,
 ): GenerationToolExecutionOutcome {

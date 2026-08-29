@@ -436,15 +436,15 @@ describe('pending page permission turns', () => {
         expiresAt: Infinity,
       },
     ];
-    stored['bosspilot_pending_agent_turn_v3'] = {
+    stored.bosspilot_pending_agent_turn_v3 = {
       version: 3,
       turns: Object.fromEntries(malformed.map((value, index) => [`bad-${index}`, value])),
     };
     await expect(listPendingPageTurns()).resolves.toEqual([]);
 
     // v3 键存在时优先使用它；移除后回退到 v2 旧键
-    delete stored['bosspilot_pending_agent_turn_v3'];
-    stored['bosspilot_pending_agent_turn_v2'] = {
+    delete stored.bosspilot_pending_agent_turn_v3;
+    stored.bosspilot_pending_agent_turn_v2 = {
       version: 2,
       requestId: 'legacy-1',
       kind: 'user_input',

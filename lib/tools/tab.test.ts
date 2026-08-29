@@ -716,19 +716,17 @@ describe('tab tool', () => {
 
   it('skips the repeated-open warning when the target was reused', async () => {
     const url = 'https://reused.example/page';
-    query
-      .mockReset()
-      .mockResolvedValue([
-        {
-          id: 7,
-          windowId: 3,
-          active: false,
-          pinned: false,
-          status: 'complete',
-          title: 'Reuse',
-          url,
-        },
-      ]);
+    query.mockReset().mockResolvedValue([
+      {
+        id: 7,
+        windowId: 3,
+        active: false,
+        pinned: false,
+        status: 'complete',
+        title: 'Reuse',
+        url,
+      },
+    ]);
     update.mockReset().mockResolvedValue({
       id: 7,
       windowId: 3,
