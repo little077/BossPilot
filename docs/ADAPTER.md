@@ -1,5 +1,6 @@
-# 站点适配层契约（SiteAdapter）
+# Boss 直聘内置 Skill：站点适配层契约（SiteAdapter）
 
+> 本文是 `boss-job-search` 内置 Skill 的站点契约，不代表 BossPilot 只能用于 Boss 直聘。
 > `lib/adapter/zhipin.ts` 是所有与 zhipin.com 页面结构耦合知识的**单一事实源**。本文档描述其契约与维护流程。
 
 ## 1. 契约版本

@@ -1,21 +1,31 @@
 # 消息协议（IPC）
 
 > 类型定义的单一事实源是 [`lib/ipc/protocol.ts`](../lib/ipc/protocol.ts)，本文档解释语义与时序。协议变更时必须同步更新两处。
+> 当前主路径是多会话 Agent 协议；`parse_only`、`run_params`、`run_nl`、任务 `snapshot`
+> 等消息属于早期 Boss 三段式流水线兼容通道，不应用于新增通用能力。
 
 ## 1. 通道总览
 
 | 通道 | 机制 | 用途 |
 | --- | --- | --- |
 | Sidepanel ↔ Background | `chrome.runtime.connect` 长连接 Port（名称 `bosspilot-agent`） | 对话流、任务指令、快照与日志 |
-| Content Script → Background | `chrome.runtime.sendMessage` | 验证码检测上报（单向、无应答） |
-| Background → 页面 | `chrome.scripting.executeScript` | 注入自包含抽取函数（非消息，见 [ADAPTER.md](ADAPTER.md)） |
+| Extension Page ↔ Background | `chrome.runtime.sendMessage` | Provider、Skills、MCP、记忆、备份与工作区命令 |
+| Content Script → Background | `chrome.runtime.sendMessage` | Boss Skill 验证码检测上报（单向、无应答） |
+| Background → 页面 | `chrome.scripting.executeScript` | 页面读取、观察与受约束交互；注入函数必须自包含 |
 
 ## 2. Client → Background（`ClientMessage`）
 
 | 消息 | 载荷 | 语义 |
 | --- | --- | --- |
 | `subscribe` | — | 连接后声明订阅；后台回放任务快照、最新聊天快照和聊天运行状态 |
-| `chat` | `requestId, messages: ChatMessage[]` | 发起流式对话；携带完整本地历史，由 requestId 对齐本轮 |
+| `chat` | `requestId, conversationId, messages` | 兼容入口；新代码优先使用 `run:*` 会话协议 |
+| `run:start` | `runId, conversationId, messages` | 启动一个会话 Agent 运行 |
+| `run:steer` | `runId, conversationId, content` | 把用户补充指令送入仍在运行的会话 |
+| `run:retry` | `runId, conversationId, messages` | 使用保存的会话上下文重试失败运行 |
+| `run:cancel` | `runId, conversationId` | 精确取消指定运行 |
+| `run:resume` | `runId, conversationId, messages` | 从可恢复 checkpoint 继续运行 |
+| `page_permission_result` | 授权请求标识与选择 | 恢复等待页面读取、交互或视觉权限的工具调用 |
+| `ask_user_result` | 运行、问题与答案标识 | 恢复等待用户澄清的 Agent 运行 |
 | `parse_only` | `text` | 仅做意图解析不执行；结果以 `parsed` 返回，UI 渲染成可编辑任务卡片 |
 | `run_params` | `params: SearchTaskParams` | 用确认后的结构化参数执行任务（**推荐路径**，人机协同） |
 | `run_nl` | `text` | 自然语言直接跑（解析后不经确认立即执行） |
@@ -30,6 +40,7 @@
 | --- | --- | --- |
 | `connected` | — | Port 建立成功的握手信号；客户端收到后应立刻发 `subscribe` |
 | `chat_state` | `running, requestId?` | 声明 Background 是否仍持有活动聊天，用于识别 SW 中断 |
+| `run_state` | `runs: AgentRunSnapshot[]` | 全量广播当前多会话运行、队列、暂停点和恢复状态 |
 | `snapshot` | `snapshot: TaskSnapshot` | 任务快照全量广播（phase/进度文本/已采集数/岗位数组） |
 | `parsed` | `params: SearchTaskParams` | `parse_only` 的解析结果 |
 | `log` | `level, text` | 面向用户的日志（追加到对话流；warn=验证码/改版提示） |

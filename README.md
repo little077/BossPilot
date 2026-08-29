@@ -2,47 +2,73 @@
 
 # 🧭 BossPilot
 
-**面向 Boss 直聘的定制化 AI 求职副驾 · 浏览器侧边栏扩展**
+**本地优先、由 Skills 驱动的可扩展浏览器 AI Agent**
 
-选择自己的模型，在侧边栏流式对话；也可以用一句话发起岗位搜索、批量采集、
-语义过滤和匹配打分。
+在浏览器侧边栏与自己的模型对话，通过 Skills、MCP 和受控网页工具完成页面理解、
+多步骤交互与内容整理。Boss 直聘岗位分析和小红书内容调研是内置技能，而不是产品边界。
 
-BYOK（自带模型 Key）· 数据全本地 · 不自动投递 · MIT 开源
+BYOK · 本地优先 · Skills / MCP · 敏感操作确认 · 源码可用 · 商业使用需授权
 
 [![Build](https://github.com/little077/BossPilot/actions/workflows/build.yml/badge.svg)](https://github.com/little077/BossPilot/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/little077/BossPilot?label=Release&color=00a98f)](https://github.com/little077/BossPilot/releases/latest)
 
-[快速开始](#-快速开始) · [功能特性](#-功能特性) · [架构文档](docs/ARCHITECTURE.md) · [多模型二期报告](docs/multi-model-phase-2-report.md) · [参与贡献](CONTRIBUTING.md)
+[快速开始](#-快速开始) · [核心能力](#-核心能力) · [内置技能](#-内置技能) · [安全边界](#-安全边界) · [架构文档](docs/ARCHITECTURE.md) · [参与贡献](CONTRIBUTING.md)
 
 </div>
 
 ---
 
-## ✨ 功能特性
+## 产品定位
 
-- **真实多模型流式聊天** — 配置并选中模型后，普通聊天会固定使用该模型，
-  支持流式回复、停止生成、错误现场保留、会话持久化和侧边栏断线恢复。
-- **多厂商 BYOK** — 提供 27 个厂商、本地或自定义端点入口，覆盖 OpenAI、
-  Anthropic、Gemini、Mistral 与 OpenAI-compatible 模型协议。
-- **自然语言发起任务** — 「帮我找西安的前端岗位，15K 以上，排除外包和驻场」，AI 解析为结构化搜索参数，确认后执行。
-- **确定性批量采集** — 站点适配层直接结构化抽取列表页/详情页，秒级采集数十条岗位，不靠 LLM 逐步猜页面，快且省 token。
-- **语义软条件过滤** — 「排除外包」「要求双休」这类原生筛选器表达不了的条件，交给 LLM 阅读 JD 全文批量判断。
-- **匹配度打分** — 在设置页维护你的简历档案，每个岗位输出 0-100 匹配分 + 亮点 + 风险点。
-- **结构化结果页** — 推荐排序、岗位亮点、风险点和排除原因集中展示，支持直接打开原岗位。
-- **人机协同风控** — 拟人化节流、遇验证码自动暂停等待手动通过、单次采集量硬上限（40 条）。
-- **本地优先隐私** — API Key 与档案仅存本机 `chrome.storage`；只把结构化岗位字段发给**你自己配置的**模型端点；无遥测、无云端。
+BossPilot 是一个运行在 Chromium 浏览器侧边栏中的通用 AI Agent。它把模型、页面、
+Skills、MCP 工具、本地记忆和会话产物连接成一条可恢复、可验证、需要授权的执行链。
+
+它不是只面向某个网站的自动化脚本，也不把任意网页控制权直接交给模型：模型负责理解
+目标与选择受约束工具，确定性执行器负责权限、参数、风险确认和结果验证。
+
+## ✨ 核心能力
+
+- **多模型 BYOK** — 支持多家模型厂商、本地模型与自定义 OpenAI-compatible 端点；
+  密钥只保存在本机可信扩展上下文中。
+- **可恢复 Agent Loop** — 流式多轮对话、工具调用、停止、失败现场保留、上下文压缩、
+  多会话并行和 MV3 Service Worker 中断恢复。
+- **通用页面理解** — 按需读取正文、标题、区域、链接与可交互控件摘要；网页内容始终
+  作为不可信数据处理。
+- **受控网页操作** — 管理标签页、搜索网站、查找控件、点击、填写、选择、滚动、等待与
+  导航；每一步都使用短生命周期引用并验证结果。
+- **视觉兜底** — 仅在 DOM 语义不足时，经用户同意截取当前可见区域并遮盖输入内容。
+- **Agent Skills** — 按需加载 `SKILL.md`、引用和脚本；支持创建、复制、编辑、导入、导出、
+  启停与能力授权，脚本在隔离页中运行。
+- **MCP 工具** — 连接用户信任的 Streamable HTTP MCP 服务；只读工具按声明执行，其他
+  外部操作逐次确认。
+- **本地上下文与产物** — 用户指令、可编辑长期记忆、会话历史和私有工作区全部保存在
+  本机；Agent 可以生成、读取、搜索和版本化会话产物。
+- **可移植与可诊断** — 备份恢复不包含 API Key、MCP Token 或网站权限；诊断日志在导出前
+  脱敏。
+
+## 🧩 内置技能
+
+| Skill | 能力 | 站点范围 |
+| --- | --- | --- |
+| `boss-job-search` | 岗位搜索、列表整理、职位详情分析和多岗位对比 | `zhipin.com` |
+| `xhs-note-scout` | 博主主页笔记采集、详情与评论读取、内容调研报告 | `xiaohongshu.com` |
+
+内置技能只是首批示例。用户可以在设置页创建或导入自己的 Skill，并为脚本声明页面读取、
+页面脚本、工作区写入等能力。完整说明只在任务匹配后渐进加载，避免每轮对话都携带全部
+技能正文。
 
 ## 🚀 快速开始
 
 ### 环境要求
 
 - Node.js ≥ 22.19.0
-- Chrome / Edge 等 Chromium 内核浏览器（支持 MV3 侧边栏）
+- Chrome、Edge 等支持 MV3 Side Panel 的 Chromium 浏览器
 - 一个受支持厂商的 API Key，或本地 Ollama / 自定义 OpenAI-compatible 端点
 
-### 方式一：直接下载（推荐）
+### 方式一：下载 Release
 
-从 [Releases](https://github.com/little077/BossPilot/releases/latest) 下载最新的 `bosspilot-*-chrome.zip` 并解压，然后跳到下方「加载扩展」（选择解压后的文件夹即可）。
+从 [Releases](https://github.com/little077/BossPilot/releases/latest) 下载最新的
+`bosspilot-*-chrome.zip` 并解压。
 
 ### 方式二：从源码构建
 
@@ -50,105 +76,110 @@ BYOK（自带模型 Key）· 数据全本地 · 不自动投递 · MIT 开源
 git clone https://github.com/little077/BossPilot.git
 cd BossPilot
 npm install
-npm run build        # 产物在 .output/chrome-mv3/
+npm run build
 ```
+
+生产构建位于 `.output/chrome-mv3/`。
 
 ### 加载扩展
 
-1. 打开 `chrome://extensions`，开启右上角「开发者模式」。
-2. 点「加载已解压的扩展程序」，选择 `.output/chrome-mv3/` 目录。
-3. 点击工具栏中的 BossPilot 图标打开侧边栏。
+1. 打开 `chrome://extensions`，开启「开发者模式」。
+2. 点击「加载已解压的扩展程序」，选择 `.output/chrome-mv3/`。
+3. 点击 BossPilot 图标打开侧边栏。
+4. 在「设置」中配置模型厂商、API Key 和默认模型。
+5. 回到「对话」开始使用；输入 `/` 可以选择已启用的 Skill。
 
-### 首次配置
+## 🧠 工作方式
 
-1. 进入侧边栏「设置」，从「发卡台」领取一个模型厂商。
-2. 填写 API Key 后开通；BossPilot 会读取厂商模型目录，再由你明确选择当前模型。
-3. 回到「对话」即可流式聊天。停止或失败时已生成内容会保留。
-4. 若要执行岗位搜索任务，请先在浏览器登录
-   [Boss 直聘](https://www.zhipin.com)；扩展复用现有登录态，不采集账号密码。
-
-### 开发模式
-
-```bash
-npm run dev          # WXT 热更新开发
-npm run compile      # TypeScript 类型检查
-npm run test         # Vitest 单元与组件测试
-npm run test:e2e:install # 首次安装 Playwright Chromium
-npm run test:e2e     # 在真实 MV3 扩展环境运行冒烟测试
-npm run quality      # Biome + 类型 + 覆盖率 + 依赖审计
-npm run mv3:check    # 检查 Background 静态模块闭包，不允许运行时 import()
-npm run bundle:check # MV3 安全检查 + Background/chunk/总体积预算
-npm run verify       # 完整质量门禁 + 生产构建 + 扩展端到端测试
-npm run zip          # 打包发布 zip
+```text
+用户目标
+   │
+   ▼
+Sidepanel 对话与授权 UI
+   │  Port 快照
+   ▼
+Background Agent Manager
+   ├─ 模型生成与上下文压缩
+   ├─ Tool Catalog + Policy Engine
+   ├─ Skills（渐进加载 + 隔离脚本）
+   ├─ MCP（动态外部工具）
+   └─ 页面 / 标签页 / 记忆 / 工作区工具
+              │
+              ▼
+       验证后的工具结果与会话产物
 ```
 
-## 🧠 工作原理
+Boss 直聘等已知站点仍使用确定性适配器增强结构化读取；通用网站则使用统一语义快照、
+可访问名称和短生命周期元素引用。详见[架构文档](docs/ARCHITECTURE.md)。
 
-区别于「通用 Agent 每一步都让 LLM 读全页、猜选择器」的模式，BossPilot 采用**三段式流水线**：
+## 🔐 安全边界
 
-```
-① 意图解析（1 次 LLM）      自然语言 → 结构化任务参数（硬条件 + 软条件）
-② 确定性采集（0 次 LLM）    站点适配层执行搜索/翻页/详情抓取 → 结构化岗位数组
-③ 批量语义评估（1~N 次 LLM）软条件过滤 + 匹配打分 → 结构化结果
-```
-
-页面结构知识全部集中在[站点适配层](lib/adapter/zhipin.ts)（单一事实源），站点改版只需修一处。详见[架构文档](docs/ARCHITECTURE.md)。
+- **权限按来源收敛**：内置 Skill 只拥有对应站点权限；通用网站按精确 origin 请求授权，
+  不申请常驻 `<all_urls>`。
+- **高影响动作确认**：提交、发送、投递、发布、删除、支付等操作必须由用户逐次确认。
+- **敏感输入禁用**：密码、文件上传和验证码必须由用户亲自处理。
+- **结果必须验证**：只有工具返回明确成功证据时，Agent 才能声称操作完成。
+- **网页内容不可信**：页面文字、截图和外部 MCP 返回值不能改变系统规则或扩大权限。
+- **本地优先**：无项目方服务器、无遥测、无账号体系；数据只在本机与用户主动配置的
+  模型或 MCP 端点之间流动。
+- **站点合规**：不绕过登录、验证码、频率限制或网站安全机制。
 
 ## 📁 项目结构
 
-```
-├─ entrypoints/            # WXT 入口
-│  ├─ background.ts        #   模块化后台 SW：流式生成 + Port + 编排
-│  ├─ zhipin.content.ts    #   内容脚本：验证码检测上报（职责极小）
-│  └─ sidepanel/           #   侧边栏 React UI（对话/结果/设置）
+```text
+├─ entrypoints/
+│  ├─ background.ts          # Agent 编排、工具目录、策略与 Port 服务端
+│  ├─ sidepanel/             # 对话、历史、产物和设置 UI
+│  ├─ skill-host/            # Skill 能力桥
+│  └─ skill-sandbox/         # 无扩展 API 的脚本隔离页
 ├─ lib/
-│  ├─ domain/              # 聊天、Provider 与任务实体
-│  ├─ ipc/protocol.ts      # Sidepanel ↔ Background 消息协议
-│  ├─ adapter/             # 站点适配层：URL 规则 + 选择器 + 抽取函数
-│  ├─ generation/          # 活动模型解析、统一适配、会话状态机与错误
-│  ├─ providers/           # 厂商注册表、目录、权限、存储与配置状态机
-│  ├─ llm/                 # 旧任务流水线客户端 + 三段式 Prompt
-│  ├─ pipeline/            # 编排器（三段式流水线）+ 拟人化节流
-│  └─ storage/             # BYOK 配置与用户档案（chrome.storage.local）
-├─ assets/app.css          # Tailwind v4 + 设计令牌
-├─ tests/                  # Vitest 全局测试环境
-├─ e2e/                    # Playwright 真实 MV3 扩展冒烟测试
-├─ biome.json              # 格式、Lint、无障碍与 import 规范
-├─ vitest.config.ts        # 测试环境与覆盖率硬门槛
-├─ playwright.config.ts    # 扩展端到端测试配置
-└─ docs/                   # 架构 / 适配层契约 / 消息协议文档
+│  ├─ agent/                 # 会话 Agent、状态机、策略与工具台账
+│  ├─ browser/               # 标签页路由、语义搜索、视觉观察与资源锁
+│  ├─ page/                  # 页面快照、授权、抽取与暂停恢复
+│  ├─ tools/                 # 模型可调用的受约束工具
+│  ├─ skills/                # Skill 解析、存储、加载、打包与沙箱
+│  ├─ mcp/                   # MCP 配置、发现与调用
+│  ├─ memory/                # 用户指令与本地长期记忆
+│  ├─ workspace/             # 会话私有文件与版本
+│  ├─ generation/            # 多模型流式生成与上下文治理
+│  ├─ providers/             # 厂商目录、权限和配置
+│  ├─ adapter/               # 已知站点的确定性增强适配器
+│  └─ diagnostics/           # 脱敏诊断与健康检查
+├─ skills/                   # 随扩展发布的内置 Skills
+├─ e2e/                      # Playwright 真实 MV3 测试
+└─ docs/                     # 架构、权限、协议和历史设计文档
 ```
 
-## 🔐 隐私与合规
+## 🛠 开发与验证
 
-- **不做全自动投递、不自动打招呼、不自动发消息** —— 这是本项目的合规红线。
-- 常驻 `host_permissions` 仅 `https://www.zhipin.com/*`；模型端点只在用户点击
-  「开通」时按具体 origin 申请可选权限。
-- 数据仅在本机与**你自己配置的**模型端点之间流动，项目方没有任何服务器。
-- API Key 不进入 UI 快照、诊断和导出；本地存储被限制为可信扩展上下文。
-- 内建拟人化节流与单次采集上限。请合理控制使用频率，遵守目标网站的用户协议；因过度使用导致的账号风控由使用者自行承担。
-- 本项目仅供个人求职效率场景的学习与研究使用。
+```bash
+npm run dev              # WXT 热更新开发
+npm run compile          # TypeScript 类型检查
+npm run test             # Vitest 单元与组件测试
+npm run test:e2e:install # 首次安装 Playwright Chromium
+npm run test:e2e         # 真实 MV3 扩展冒烟测试
+npm run quality          # Biome + 类型 + 覆盖率 + 依赖审计
+npm run verify           # 完整门禁 + 构建 + 体积检查 + E2E
+npm run zip              # 打包发布 ZIP
+```
 
 ## 🗺️ 路线图
 
-- [x] v0.1：任务流水线与多模型配置基座
-- [x] v0.2：真实多协议流式聊天、停止、错误与断线恢复
-- [ ] v0.3：求职者档案、上下文个性化与任务流水线迁移
-- [ ] v0.4：岗位工作台与结果沉淀
-- [ ] v0.5：Agent 工具循环与智能化
-- [ ] v0.6：求职 Skills 与提示词模板
-- [ ] v0.7：求职记忆与长期陪跑
-- [ ] v1.0：隐私、诊断、测试、迁移与 Chrome Web Store 发布
-
-OAuth Provider 不在 v0.2 范围内，将作为独立安全里程碑评审。完整范围与验收标准见
-[产品路线图](docs/ROADMAP.md)。
+当前实现基线和后续方向见[产品路线图](docs/ROADMAP.md)。历史求职垂直方案仍保留在
+[产品立项书](docs/PRODUCT_INITIATION.md)中，仅作为设计背景，不再代表当前产品边界。
 
 ## 🤝 参与贡献
 
-欢迎 Issue 与 PR！请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)（代码规范、分支流程、适配层维护指南）与 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
+欢迎 Issue 与 PR。提交前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)、
+[AGENTS.md](AGENTS.md)、[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) 和
+[NOTICE.md](NOTICE.md)。
 
-## 📄 许可证
+## 📄 许可证与商业授权
 
-[MIT](LICENSE) © BossPilot Contributors
+当前源码按 [PolyForm Noncommercial License 1.0.0](LICENSE) 提供。默认许可不授予商业
+使用权；商业使用必须事先取得版权所有者单独签发的书面商业许可。
 
-> 本项目为独立的全新实现，架构思路受社区通用浏览器 Agent 项目启发，未复制任何第三方源码。
+早期随 MIT License 发布的版本继续适用其随附的 MIT 条款。许可切换说明、权利声明和
+商业授权入口见 [NOTICE.md](NOTICE.md)。
+
+> BossPilot 是独立实现，与 Boss 直聘、小红书及其运营主体不存在隶属、授权或背书关系。
