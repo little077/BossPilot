@@ -2074,6 +2074,19 @@ body {
   color: var(--color-ink-faint);
 }
 
+/* 语音识别/提示条期间隐藏占位符：tiptap 占位符装饰只在编辑器内容或选区变化时
+   重算，识别开始的瞬间（尚无内容变化）仍会渲染旧文案，与覆盖其上的 voice-hint
+   浮层重叠（用户反馈的「文字叠加」），必须用 CSS 立即兜底。 */
+.composer-card.is-voicing .composer-editor .ProseMirror p.is-editor-empty:first-child::before {
+  display: none;
+}
+
+/* voice-hint 绝对定位在编辑区顶部；语音识别会把中间结果实时写入正文，因此语音态
+   需要为状态条预留首行空间，避免「正在输入语音 / 计时」覆盖已有或新识别的文字。 */
+.composer-card.is-voicing .composer-editor .ProseMirror {
+  padding-top: 40px;
+}
+
 .composer-editor .ProseMirror p {
   margin: 0;
 }
@@ -2967,6 +2980,170 @@ body {
 
 .data-portability-error {
   color: var(--color-danger);
+}
+
+/* ═══════════ 消息操作栏（对照 design-prototype/message-actions.html，浅色主题） ═══════════ */
+
+/* 重新生成：点击时图标旋转一圈 */
+.act-btn.is-retrying svg {
+  animation: spin-once 600ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes spin-once {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes wave-bounce {
+  0%,
+  100% {
+    height: 5px;
+  }
+  50% {
+    height: 13px;
+  }
+}
+
+/* ═══════════ 语音输入（对照 message-actions.html 的 voice-hint / tool-btn） ═══════════ */
+
+/* 语音输入提示条：识别期间覆盖在输入框顶部，替代占位符视觉 */
+.composer-voice-hint {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  left: 14px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  pointer-events: none;
+  color: var(--color-brand);
+  animation: hint-in 200ms cubic-bezier(0.22, 0.82, 0.22, 1);
+}
+
+@keyframes hint-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 红点呼吸（录制中） */
+.composer-voice-hint .rec-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-danger);
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes rec-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgb(176 85 78 / 38%);
+  }
+  50% {
+    opacity: 0.55;
+    box-shadow: 0 0 0 4px rgb(176 85 78 / 0%);
+  }
+}
+
+.composer-voice-hint .voice-label {
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-voice-hint .voice-timer {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--color-ink-soft);
+  white-space: nowrap;
+}
+
+/* 声波三线（右对齐） */
+.composer-voice-hint .wave-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 14px;
+  margin-left: auto;
+  padding-right: 2px;
+}
+
+.composer-voice-hint .wave-inline i {
+  width: 2.5px;
+  height: 5px;
+  border-radius: 2px;
+  background: var(--color-brand);
+  animation: wave-bounce 1s ease-in-out infinite;
+}
+
+.composer-voice-hint .wave-inline i:nth-child(2) {
+  animation-delay: 0.18s;
+}
+
+.composer-voice-hint .wave-inline i:nth-child(3) {
+  animation-delay: 0.36s;
+}
+
+/* 非聆听态（授权引导 / 错误）：声波静止、整体降透明 */
+.composer-voice-hint.is-paused .wave-inline i {
+  animation: none;
+  height: 5px;
+  opacity: 0.4;
+}
+
+.composer-voice-hint.is-paused .rec-dot {
+  animation: none;
+  opacity: 0.35;
+  box-shadow: none;
+}
+
+.composer-voice-hint.is-paused .voice-label {
+  color: var(--color-ink-soft);
+}
+
+/* 语音按钮：mic ↔ 暂停 icon 交叉切换 */
+.tool-btn .ic-swap {
+  display: none;
+}
+
+.tool-btn.is-voicing .ic-mic {
+  display: none;
+}
+
+.tool-btn.is-voicing .ic-swap {
+  display: block;
+  animation: icon-swap-in 240ms cubic-bezier(0.22, 0.82, 0.22, 1);
+}
+
+.tool-btn:not(.is-voicing) .ic-mic {
+  animation: icon-swap-in 240ms cubic-bezier(0.22, 0.82, 0.22, 1);
+}
+
+@keyframes icon-swap-in {
+  from {
+    opacity: 0;
+    transform: scale(0.72) rotate(-12deg);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
 }
 
 /* 动效降级 */

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChatAttachment, ChatConversation, ChatMessage } from '@/lib/domain/chat';
 import { makeMessage } from '@/lib/domain/chat';
 import type { SearchTaskParams, TaskSnapshot } from '@/lib/domain/types';
-import type { AgentRunSnapshot } from '@/lib/generation/registry';
+import { type AgentRunSnapshot, isAgentRunActive } from '@/lib/generation/registry';
 import { AGENT_PORT_NAME, type ClientMessage, type ServerMessage } from '@/lib/ipc/protocol';
 import { requestPageOriginAccess } from '@/lib/page/access';
 import { getChatHistorySettings } from '@/lib/storage/config';
@@ -83,9 +83,7 @@ export function useAgentPort() {
   const attemptedTitleMessageIdsRef = useRef(new Map<string, string>());
   const queuedTitleHistoriesRef = useRef(new Map<string, ChatMessage[]>());
 
-  const activeRuns = runs.filter(
-    (run) => run.status === 'queued' || run.status === 'running' || run.status === 'waiting_user',
-  );
+  const activeRuns = runs.filter(isAgentRunActive);
   const runningConversationIds = [...new Set(activeRuns.map((run) => run.conversationId))];
   const runningConversationId = runningConversationIds[0] ?? null;
   const chatRunning = activeRuns.length > 0;
@@ -660,12 +658,41 @@ export function useAgentPort() {
 
   const retryChat = useCallback((): boolean => {
     const conversationId = activeConversationIdRef.current;
-    if (!conversationId || runsRef.current.some((run) => run.conversationId === conversationId)) {
+    const hasActiveRun = runsRef.current.some(
+      (run) => run.conversationId === conversationId && isAgentRunActive(run),
+    );
+    if (!conversationId || hasActiveRun) {
       return false;
     }
     const history = getConversationMessages(conversationId);
     const last = history.at(-1);
     if (last?.role !== 'assistant' || !last.error || !last.retryable) return false;
+    const messages = history.slice(0, -1);
+    if (!messages.some((message) => message.role === 'user')) return false;
+    const runId = `retry-${crypto.randomUUID()}`;
+    activeChatsRef.current.set(conversationId, { requestId: runId, conversationId });
+    setConversationRunning(true, conversationId, runId);
+    if (!send({ type: 'run:retry', runId, conversationId, messages })) {
+      activeChatsRef.current.delete(conversationId);
+      setConversationRunning(false, conversationId);
+      return false;
+    }
+    return true;
+  }, [getConversationMessages, send, setConversationRunning]);
+
+  // 重新生成：与 retryChat 同一协议通路（run:retry → 后台 startChat），
+  // 但不要求最后一条是错误消息——去掉已完成回复，按历史重跑一轮新流。
+  const regenerateChat = useCallback((): boolean => {
+    const conversationId = activeConversationIdRef.current;
+    const hasActiveRun = runsRef.current.some(
+      (run) => run.conversationId === conversationId && isAgentRunActive(run),
+    );
+    if (!conversationId || hasActiveRun) {
+      return false;
+    }
+    const history = getConversationMessages(conversationId);
+    const last = history.at(-1);
+    if (last?.role !== 'assistant') return false;
     const messages = history.slice(0, -1);
     if (!messages.some((message) => message.role === 'user')) return false;
     const runId = `retry-${crypto.randomUUID()}`;
@@ -800,6 +827,7 @@ export function useAgentPort() {
     sendChat,
     cancelChat,
     retryChat,
+    regenerateChat,
     resolvePagePermission,
     resolveAskUser,
     downloadDiagnostics,

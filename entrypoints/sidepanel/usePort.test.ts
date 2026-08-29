@@ -257,6 +257,18 @@ describe('useAgentPort', () => {
         conversationId: 'conversation-1',
         message: failure,
       });
+      ports[0]?.emit({
+        type: 'run_state',
+        runs: [
+          {
+            runId: request?.requestId ?? '',
+            requestId: request?.requestId ?? '',
+            conversationId: 'conversation-1',
+            status: 'error',
+            updatedAt: 3,
+          },
+        ],
+      });
     });
 
     let accepted = false;
@@ -272,6 +284,99 @@ describe('useAgentPort', () => {
     expect(retry?.conversationId).toBe('conversation-1');
     expect(retry?.messages.filter((message) => message.role === 'user')).toHaveLength(1);
     expect(retry?.messages.some((message) => message.id === failure.id)).toBe(false);
+  });
+
+  it('regenerateChat 去掉最后一条 AI 回复后按历史重跑', async () => {
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('再来一次');
+    });
+    const request = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_start',
+        requestId: request?.requestId ?? '',
+        message: {
+          id: 'assistant-regen',
+          role: 'assistant',
+          content: '',
+          createdAt: 2,
+          status: 'streaming',
+        },
+      });
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: request?.requestId ?? '',
+        message: {
+          id: 'assistant-regen',
+          role: 'assistant',
+          content: '新回答',
+          createdAt: 2,
+          status: 'completed',
+          finishReason: 'stop',
+        },
+      });
+      // 真实后台会保留 completed 快照用于诊断，并在 stream_end 前后广播 run_state。
+      // 终态历史不能被误判为仍在生成，否则重新生成会被静默拦截。
+      ports[0]?.emit({
+        type: 'run_state',
+        runs: [
+          {
+            runId: request?.requestId ?? '',
+            requestId: request?.requestId ?? '',
+            conversationId: 'conversation-1',
+            status: 'completed',
+            updatedAt: 3,
+          },
+        ],
+      });
+    });
+
+    let accepted = false;
+    act(() => {
+      accepted = hook.result.current.regenerateChat();
+    });
+
+    expect(accepted).toBe(true);
+    const retry = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'run:retry' }> =>
+        message.type === 'run:retry',
+    );
+    expect(retry?.conversationId).toBe('conversation-1');
+    expect(retry?.messages.map((message) => message.role)).toEqual(['user']);
+    expect(retry?.messages.some((message) => message.id === 'assistant-regen')).toBe(false);
+  });
+
+  it('会话仍在生成时 regenerateChat 返回 false', async () => {
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('还在生成');
+    });
+
+    let accepted = true;
+    act(() => {
+      accepted = hook.result.current.regenerateChat();
+    });
+    expect(accepted).toBe(false);
+    expect(ports[0]?.sent.some((message) => message.type === 'run:retry')).toBe(false);
+  });
+
+  it('最后一条不是 AI 回复时 regenerateChat 返回 false', async () => {
+    dbMocks.loadConversations.mockResolvedValue([conversation()]);
+    dbMocks.loadMessages.mockResolvedValue([
+      { id: 'user-only', role: 'user', content: '只有用户消息', createdAt: 1 },
+    ]);
+    const hook = await connectHook();
+    await waitFor(() => expect(hook.result.current.messages).toHaveLength(1));
+
+    let accepted = true;
+    act(() => {
+      accepted = hook.result.current.regenerateChat();
+    });
+    expect(accepted).toBe(false);
+    expect(ports[0]?.sent.some((message) => message.type === 'run:retry')).toBe(false);
   });
 
   it('preserves partial text and stores the error separately', async () => {

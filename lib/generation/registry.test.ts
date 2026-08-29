@@ -4,6 +4,7 @@ import {
   AgentRunRegistry,
   type AgentRunSnapshot,
   createChromeRunRegistryStore,
+  isAgentRunActive,
   type RunRegistryStore,
 } from './registry';
 
@@ -48,6 +49,20 @@ function managerFactory() {
   });
   return { create, managers };
 }
+
+describe('isAgentRunActive', () => {
+  it.each([
+    ['queued', true],
+    ['running', true],
+    ['waiting_user', true],
+    ['completed', false],
+    ['cancelled', false],
+    ['error', false],
+    ['interrupted', false],
+  ] as const)('%s => %s', (status, expected) => {
+    expect(isAgentRunActive({ status })).toBe(expected);
+  });
+});
 
 describe('AgentRunRegistry', () => {
   it('runs two conversations and queues the third in FIFO order', async () => {

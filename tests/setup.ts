@@ -37,7 +37,10 @@ if (!globalThis.ResizeObserver) {
 }
 
 afterEach(() => {
+  // 先卸载组件树再清理全局 stub：afterEach 按 LIFO 执行，文件级 afterEach 若先
+  // unstubAllGlobals，组件卸载（cleanup）时访问 chrome 会 ReferenceError。
   cleanup();
   vi.restoreAllMocks();
   document.body.innerHTML = '';
+  vi.unstubAllGlobals();
 });

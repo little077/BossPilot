@@ -141,6 +141,8 @@ const basePort = {
   send: vi.fn(),
   sendChat: vi.fn(),
   cancelChat: vi.fn(),
+  retryChat: vi.fn(() => true),
+  regenerateChat: vi.fn(() => true),
   resolvePagePermission: vi.fn(),
   resolveAskUser: vi.fn(async () => true),
   downloadDiagnostics: vi.fn(),
@@ -160,12 +162,45 @@ beforeEach(() => {
     return 1;
   });
   vi.stubGlobal('cancelAnimationFrame', vi.fn());
+  vi.stubGlobal('chrome', {
+    runtime: {
+      sendMessage: vi.fn().mockResolvedValue({ ok: true, state: CONFIGURED_PROVIDER_STATE }),
+      onMessage: {
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+      },
+    },
+  });
   sendProviderCommandMock.mockResolvedValue(CONFIGURED_PROVIDER_STATE);
   useAgentPortMock.mockReturnValue({ ...basePort });
 });
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe('消息重新生成', () => {
+  it('仅最后一条已完成回答提供重新生成，历史回答仍可复制', async () => {
+    const regenerateChat = vi.fn(() => true);
+    useAgentPortMock.mockReturnValue({
+      ...basePort,
+      activeConversationId: 'conversation-1',
+      regenerateChat,
+      messages: [
+        { id: 'user-1', role: 'user', content: '第一次提问', createdAt: 1 },
+        { id: 'assistant-1', role: 'assistant', content: '第一次回答', createdAt: 2 },
+        { id: 'user-2', role: 'user', content: '第二次提问', createdAt: 3 },
+        { id: 'assistant-2', role: 'assistant', content: '第二次回答', createdAt: 4 },
+      ],
+    });
+    render(<App />);
+    await act(async () => {});
+
+    expect(screen.getAllByRole('button', { name: '复制回答' })).toHaveLength(2);
+    const regenerate = screen.getByRole('button', { name: '重新生成' });
+    fireEvent.click(regenerate);
+    expect(regenerateChat).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('首页发送过渡', () => {
@@ -558,10 +593,6 @@ describe('会话运行偏好（模型选择器）', () => {
       },
     ],
   };
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
 
   it('模型选择器嵌入输入框内部工具行，不在输入框外部', async () => {
     vi.stubGlobal('chrome', {

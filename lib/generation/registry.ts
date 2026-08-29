@@ -23,6 +23,17 @@ export interface AgentRunSnapshot {
   updatedAt: number;
 }
 
+const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<AgentRunStatus> = new Set([
+  'queued',
+  'running',
+  'waiting_user',
+]);
+
+/** 只有尚未进入终态的运行才会占用会话；completed 等历史快照仅用于恢复和诊断。 */
+export function isAgentRunActive(run: Pick<AgentRunSnapshot, 'status'>): boolean {
+  return ACTIVE_AGENT_RUN_STATUSES.has(run.status);
+}
+
 export interface RunRegistryStore {
   load(): Promise<AgentRunSnapshot[]>;
   save(runs: AgentRunSnapshot[]): Promise<void>;
@@ -149,9 +160,7 @@ export class AgentRunRegistry {
 
   runningForConversation(conversationId: string): AgentRunSnapshot | undefined {
     return this.snapshots().find(
-      (run) =>
-        run.conversationId === conversationId &&
-        (run.status === 'queued' || run.status === 'running' || run.status === 'waiting_user'),
+      (run) => run.conversationId === conversationId && isAgentRunActive(run),
     );
   }
 

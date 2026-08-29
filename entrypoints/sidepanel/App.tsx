@@ -27,6 +27,7 @@ import { ChatFlowStatus } from './ChatFlowStatus';
 import { Composer, type ComposerDraft, type ComposerHandle } from './Composer';
 import { ConversationRuntimeControls } from './ConversationRuntimeControls';
 import { HistoryView } from './HistoryView';
+import { MessageActions } from './MessageActions';
 import { PagePermissionPanel } from './PagePermissionPanel';
 import { TooltipProvider } from './ui/Tooltip';
 import { useAgentPort } from './usePort';
@@ -103,6 +104,7 @@ export default function App() {
     sendChat,
     cancelChat,
     retryChat,
+    regenerateChat,
     resolvePagePermission,
     resolveAskUser,
     downloadDiagnostics,
@@ -558,6 +560,16 @@ export default function App() {
                           className="ml-1 inline-block h-3 w-0.5 animate-pulse rounded-full bg-brand align-middle"
                           role="status"
                           aria-label="正在生成"
+                        />
+                      ) : null}
+                      {/* 已完成回答均可复制；只有会话末条回答可重新生成，避免旧消息按钮
+                          错误地重跑最新一轮。断线或运行中不暴露不可执行的操作。 */}
+                      {m.content && (m.status ?? 'completed') === 'completed' ? (
+                        <MessageActions
+                          message={m}
+                          {...(m.id === lastMessage?.id && connected && !currentConversationRunning
+                            ? { onRegenerate: regenerateChat }
+                            : {})}
                         />
                       ) : null}
                       {m.status === 'cancelled' ? (
