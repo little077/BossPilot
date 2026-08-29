@@ -52,11 +52,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: 移动扩展包到工作区根
+        # upload-artifact 的 glob 不匹配点开头目录（.output），先移出来再上传
+        run: mv .output/*.zip ./
+
       - name: 上传构建产物（Artifact）
         uses: actions/upload-artifact@v4
         with:
           name: bosspilot-chrome-${{ github.sha }}
-          path: .output/*.zip
+          path: bosspilot-*.zip
           retention-days: 90
 
       - name: 上传浏览器测试报告
