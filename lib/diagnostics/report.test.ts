@@ -332,7 +332,7 @@ describe('buildDiagnosticsReport', () => {
           outputText: 'ok',
           promptTokens: 10,
           latencyMs: 50,
-          finishReason: 'tool_calls',
+          finishReason: 'tool',
           toolName: 'tab',
         },
         {
@@ -362,7 +362,7 @@ describe('buildDiagnosticsReport', () => {
 
     const md = buildDiagnosticsReport([run], undefined, toolCalls);
 
-    expect(md).toContain('结束原因 `tool_calls`');
+    expect(md).toContain('结束原因 `tool`');
     expect(md).toContain('请求工具 `tab`');
     expect(md).toContain('token in/out=10/?');
     expect(md).toContain('token in/out=?/7');

@@ -538,8 +538,8 @@ describe('readCurrentPage', () => {
       null,
       { version: 2, untrusted: true, mode: 'article' },
       { version: 1, untrusted: false, mode: 'article' },
-      extraction({ mode: 'bogus' }),
-      extraction({ text: 123 }),
+      extraction({ mode: 'bogus' as never }),
+      extraction({ text: 123 as never }),
       extraction({ originalChars: -1 }),
       extraction({
         structure: {
@@ -547,11 +547,11 @@ describe('readCurrentPage', () => {
           headings: [],
           landmarks: [],
           controls: { total: 0, byRole: [] },
-          truncated: 'no',
+          truncated: 'no' as never,
         },
       }),
-      extraction({ pageLinks: 'nope' }),
-      extraction({ pageLinks: [{ text: '缺 href' }] }),
+      extraction({ pageLinks: 'nope' as never }),
+      extraction({ pageLinks: [{ text: '缺 href' } as never] }),
       extraction({
         pageLinks: Array.from({ length: 31 }, (_, index) => ({
           text: `t${index}`,
@@ -571,7 +571,7 @@ describe('readCurrentPage', () => {
         structure: {
           version: 1,
           headings: [],
-          landmarks: [{ role: 'main' }],
+          landmarks: [{ role: 'main' } as never],
           controls: { total: 0, byRole: [] },
           truncated: false,
         },
@@ -581,7 +581,7 @@ describe('readCurrentPage', () => {
           version: 1,
           headings: [],
           landmarks: [],
-          controls: { total: 0, byRole: [{ role: 'link', count: 'two' }] },
+          controls: { total: 0, byRole: [{ role: 'link', count: 'two' as never }] },
           truncated: false,
         },
       }),
@@ -684,7 +684,7 @@ describe('readCurrentPage', () => {
     const pending = readCurrentPage(SNAPSHOT, controller.signal);
     await waitFor(() => tabsGet.mock.calls.length >= 1);
     controller.abort();
-    gate.resolve({ id: 7, windowId: 3, url: SNAPSHOT.url });
+    gate.resolve({ id: 7, windowId: 3, url: SNAPSHOT.url } as chrome.tabs.Tab);
     await expect(pending).resolves.toMatchObject({ isError: true, errorCode: 'cancelled' });
   });
 

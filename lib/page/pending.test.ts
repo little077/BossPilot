@@ -488,7 +488,16 @@ describe('pending page permission turns', () => {
       ...DEFERRED,
       message: {
         ...DEFERRED.message,
-        attachments: [{ id: 'att-1', name: 'a.png', size: 1 }],
+        attachments: [
+          {
+            id: 'att-1',
+            kind: 'text',
+            name: 'a.png',
+            mimeType: 'text/plain',
+            size: 1,
+            content: '占位',
+          },
+        ],
         modelIdentity: { providerId: 'openai', modelId: 'gpt-test' },
         usage: {
           inputTokens: 1,
@@ -517,7 +526,13 @@ describe('pending page permission turns', () => {
             startedAt: 2,
           },
         ],
-        pendingUserQuestion: { options: [{ id: 'option-1', label: '继续' }] },
+        pendingUserQuestion: {
+          requestId: 'q-1',
+          callId: 'call-0',
+          question: '继续？',
+          allowCustom: false,
+          options: [{ id: 'option-1', label: '继续' }],
+        },
       },
       tools: [
         {
