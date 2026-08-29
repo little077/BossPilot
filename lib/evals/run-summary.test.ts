@@ -80,5 +80,21 @@ describe('summarizeAgentRun', () => {
         },
       }),
     ).toMatchObject({ status: 'error', model: expect.stringContaining('旧记录') });
+    expect(
+      summarizeAgentRun({
+        id: 'a3',
+        role: 'assistant',
+        content: '',
+        createdAt: 1,
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          totalTokens: 0,
+          cost: 0,
+        },
+      }),
+    ).toMatchObject({ status: 'completed', model: expect.stringContaining('旧记录') });
   });
 });

@@ -42,6 +42,7 @@ describe('模型厂商注册表', () => {
   it('内置厂商返回固定地址，自定义厂商使用用户地址', () => {
     expect(getProviderBaseUrl('deepseek')).toBe('https://api.deepseek.com/v1');
     expect(getProviderBaseUrl('custom', 'https://example.com/v1')).toBe('https://example.com/v1');
+    expect(getProviderBaseUrl('custom')).toBe('');
     expect(getProviderDefinition('missing')).toBeUndefined();
     expect(() => getProviderBaseUrl('missing')).toThrow('未知的模型厂商');
   });

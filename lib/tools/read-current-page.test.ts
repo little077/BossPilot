@@ -532,4 +532,232 @@ describe('readCurrentPage', () => {
     controller.abort();
     await expect(pending).resolves.toMatchObject({ errorCode: 'cancelled' });
   });
+
+  it('rejects malformed page extractions instead of trusting them', async () => {
+    const malformed = [
+      null,
+      { version: 2, untrusted: true, mode: 'article' },
+      { version: 1, untrusted: false, mode: 'article' },
+      extraction({ mode: 'bogus' }),
+      extraction({ text: 123 }),
+      extraction({ originalChars: -1 }),
+      extraction({
+        structure: {
+          version: 1,
+          headings: [],
+          landmarks: [],
+          controls: { total: 0, byRole: [] },
+          truncated: 'no',
+        },
+      }),
+      extraction({ pageLinks: 'nope' }),
+      extraction({ pageLinks: [{ text: '缺 href' }] }),
+      extraction({
+        pageLinks: Array.from({ length: 31 }, (_, index) => ({
+          text: `t${index}`,
+          href: `https://e.example/${index}`,
+        })),
+      }),
+      extraction({
+        structure: {
+          version: 1,
+          headings: [{ level: 0, text: 'x' }],
+          landmarks: [],
+          controls: { total: 0, byRole: [] },
+          truncated: false,
+        },
+      }),
+      extraction({
+        structure: {
+          version: 1,
+          headings: [],
+          landmarks: [{ role: 'main' }],
+          controls: { total: 0, byRole: [] },
+          truncated: false,
+        },
+      }),
+      extraction({
+        structure: {
+          version: 1,
+          headings: [],
+          landmarks: [],
+          controls: { total: 0, byRole: [{ role: 'link', count: 'two' }] },
+          truncated: false,
+        },
+      }),
+    ];
+    for (const result of malformed) {
+      executeScript.mockResolvedValueOnce([{ result }]);
+      const outcome = await readCurrentPage(SNAPSHOT, new AbortController().signal);
+      expect(outcome).toMatchObject({ isError: true, errorCode: 'invalid_page_result' });
+    }
+  });
+
+  it('stops when the page changes after the permission check or after enrichment', async () => {
+    tabsGet
+      .mockResolvedValueOnce({ id: 7, windowId: 3, url: SNAPSHOT.url })
+      .mockRejectedValueOnce(new Error('closed'));
+    await expect(readCurrentPage(SNAPSHOT, new AbortController().signal)).resolves.toMatchObject({
+      errorCode: 'page_changed',
+    });
+
+    tabsGet
+      .mockResolvedValueOnce({ id: 7, windowId: 3, url: SNAPSHOT.url })
+      .mockResolvedValueOnce({ id: 7, windowId: 3, url: SNAPSHOT.url })
+      .mockRejectedValueOnce(new Error('closed'));
+    await expect(readCurrentPage(SNAPSHOT, new AbortController().signal)).resolves.toMatchObject({
+      errorCode: 'page_changed',
+    });
+  });
+
+  it('cancels when injection settles after the caller aborted', async () => {
+    const first = deferred<unknown>();
+    executeScript.mockImplementationOnce(() => first.promise);
+    const firstController = new AbortController();
+    const pending = readCurrentPage(SNAPSHOT, firstController.signal);
+    await waitFor(() => executeScript.mock.calls.length >= 1);
+    firstController.abort();
+    first.resolve([{ result: extraction() }]);
+    await expect(pending).resolves.toMatchObject({ errorCode: 'cancelled' });
+
+    let rejectSecond: (reason?: unknown) => void = () => undefined;
+    const secondPromise = new Promise<unknown>((_resolve, rejectFn) => {
+      rejectSecond = rejectFn;
+    });
+    executeScript.mockImplementationOnce(() => secondPromise);
+    const secondController = new AbortController();
+    const rejected = readCurrentPage(SNAPSHOT, secondController.signal);
+    await waitFor(() => executeScript.mock.calls.length >= 2);
+    secondController.abort();
+    rejectSecond(new Error('boom'));
+    await expect(rejected).resolves.toMatchObject({ errorCode: 'cancelled' });
+  });
+
+  it('keeps boss enrichment best-effort for non-zhipin pages and blocked lists', async () => {
+    const foreign = {
+      ...SNAPSHOT,
+      isBoss: true,
+      url: 'https://other.example/job',
+      safeUrl: 'https://other.example/job',
+      origin: 'https://other.example',
+    };
+    executeScript.mockResolvedValueOnce([{ result: extraction({ executionUrl: foreign.url }) }]);
+    tabsGet.mockReset().mockResolvedValue({ id: 7, windowId: 3, url: foreign.url });
+    const outcome = await readCurrentPage(foreign, new AbortController().signal);
+    expect(outcome).toMatchObject({ isError: false, enrichmentStatus: 'failed' });
+
+    const zhipin = {
+      ...SNAPSHOT,
+      isBoss: true,
+      url: 'https://www.zhipin.com/job_detail/1.html',
+      safeUrl: 'https://www.zhipin.com/job_detail/1',
+      origin: 'https://www.zhipin.com',
+    };
+    executeScript
+      .mockReset()
+      .mockResolvedValueOnce([{ result: extraction({ executionUrl: zhipin.url }) }])
+      .mockResolvedValueOnce([
+        {
+          result: {
+            captcha: true,
+            description: '',
+            pageKind: 'detail',
+            title: '',
+            salaryText: '',
+            companyName: '',
+            city: '',
+            jobTags: [],
+            companyIntro: '',
+          },
+        },
+      ])
+      .mockResolvedValueOnce([{ result: { captcha: true, jobs: [] } }]);
+    tabsGet.mockReset().mockResolvedValue({ id: 7, windowId: 3, url: zhipin.url });
+    const blocked = await readCurrentPage(zhipin, new AbortController().signal);
+    expect(blocked).toMatchObject({ isError: false, enrichmentStatus: 'failed' });
+  });
+
+  it('cancels when the caller aborts during the pre-read page check', async () => {
+    const gate = deferred<chrome.tabs.Tab>();
+    tabsGet.mockReset().mockReturnValueOnce(gate.promise);
+    const controller = new AbortController();
+    const pending = readCurrentPage(SNAPSHOT, controller.signal);
+    await waitFor(() => tabsGet.mock.calls.length >= 1);
+    controller.abort();
+    gate.resolve({ id: 7, windowId: 3, url: SNAPSHOT.url });
+    await expect(pending).resolves.toMatchObject({ isError: true, errorCode: 'cancelled' });
+  });
+
+  it('cancels when the caller aborts during boss enrichment', async () => {
+    const zhipin = {
+      ...SNAPSHOT,
+      isBoss: true,
+      url: 'https://www.zhipin.com/job_detail/1.html',
+      safeUrl: 'https://www.zhipin.com/job_detail/1',
+      origin: 'https://www.zhipin.com',
+    };
+    const gate = deferred<unknown>();
+    tabsGet.mockReset().mockResolvedValue({ id: 7, windowId: 3, url: zhipin.url });
+    executeScript.mockReset().mockImplementation(async (options: { files?: string[] }) => {
+      if (options.files) return [{ result: extraction({ executionUrl: zhipin.url }) }];
+      return gate.promise;
+    });
+    const controller = new AbortController();
+    const pending = readCurrentPage(zhipin, controller.signal);
+    await waitFor(() => executeScript.mock.calls.length >= 2);
+    controller.abort();
+    gate.resolve([{ result: { captcha: false, description: '职位描述' } }]);
+    await expect(pending).resolves.toMatchObject({ isError: true, errorCode: 'cancelled' });
+  });
+
+  it('falls back to the origin when page and snapshot titles are empty', async () => {
+    const noTitle = { ...SNAPSHOT, title: '' };
+    executeScript.mockResolvedValueOnce([
+      { result: extraction({ title: '', executionUrl: SNAPSHOT.url }) },
+    ]);
+    const result = await readCurrentPage(noTitle, new AbortController().signal);
+    expect(result).toMatchObject({ isError: false, sourceTitle: '' });
+    if ('detail' in result) expect(result.detail).toContain('https://example.com');
+  });
+
+  it('clips long boss detail fields to the configured maximums', async () => {
+    const zhipin = {
+      ...SNAPSHOT,
+      isBoss: true,
+      url: 'https://www.zhipin.com/job_detail/1.html',
+      safeUrl: 'https://www.zhipin.com/job_detail/1',
+      origin: 'https://www.zhipin.com',
+    };
+    tabsGet.mockResolvedValue({ id: 7, windowId: 3, url: zhipin.url });
+    executeScript.mockImplementation(async (options: { files?: string[]; func?: unknown }) => {
+      if (options.files) return [{ result: extraction({ executionUrl: zhipin.url }) }];
+      if (options.func === extractJobDetail) {
+        return [
+          {
+            result: {
+              selectorMiss: false,
+              captcha: false,
+              pageKind: 'standalone_detail',
+              hasJobCards: false,
+              title: '高'.repeat(200),
+              salaryText: '薪'.repeat(200),
+              companyName: '公'.repeat(200),
+              jobTags: ['标'.repeat(100)],
+              description: '描'.repeat(200),
+              companyIntro: '介'.repeat(200),
+              city: '上'.repeat(200),
+            },
+          },
+        ];
+      }
+      return [];
+    });
+
+    const result = await readCurrentPage(zhipin, new AbortController().signal);
+    expect(result).toMatchObject({ isError: false, enrichmentStatus: 'success' });
+    if ('content' in result) {
+      expect(result.content).toContain(`"title":"${'高'.repeat(160)}"`);
+      expect(result.content).toContain(`"jobTags":["${'标'.repeat(80)}"]`);
+    }
+  });
 });

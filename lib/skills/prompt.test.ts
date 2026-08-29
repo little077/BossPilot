@@ -25,4 +25,14 @@ describe('buildSkillCatalogPrompt', () => {
   it('omits the catalog when all skills are disabled', () => {
     expect(buildSkillCatalogPrompt([skill('off', false)])).toBe('');
   });
+
+  it('omits the matched-origins attribute for entries without origin constraints', () => {
+    const prompt = buildSkillCatalogPrompt([
+      { ...skill('unbounded'), matchedOrigins: undefined },
+      { ...skill('empty-origins'), matchedOrigins: [] },
+    ]);
+    expect(prompt).not.toContain('matched-origins="');
+    expect(prompt).toContain('name="unbounded"');
+    expect(prompt).toContain('name="empty-origins"');
+  });
 });

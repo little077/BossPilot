@@ -6,6 +6,7 @@ import {
   pageContextHistory,
   safePageTitle,
   safePageUrl,
+  samePageKey,
   snapshotFromTab,
   validatePageTurnSnapshot,
 } from './snapshot';
@@ -150,5 +151,45 @@ describe('page turn snapshots', () => {
         title: 'x'.repeat(400),
       } as chrome.tabs.Tab),
     ).toMatchObject({ origin: '', scheme: 'data', isHttp: false, title: 'x'.repeat(300) });
+    expect(
+      snapshotFromTab({
+        id: 10,
+        windowId: 3,
+        url: 'not a url',
+        title: '坏地址',
+      } as chrome.tabs.Tab),
+    ).toMatchObject({ origin: '', scheme: '', isHttp: false });
+  });
+
+  it('treats opaque origins and replaced windows as changed or non-http', async () => {
+    const snapshot = snapshotFromTab({
+      id: 7,
+      windowId: 3,
+      url: 'https://example.com/page',
+      title: 'Page',
+    } as chrome.tabs.Tab);
+
+    // 窗口被替换
+    get.mockResolvedValue({ id: 7, windowId: 99, url: 'https://example.com/page' });
+    await expect(validatePageTurnSnapshot(snapshot)).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'page_changed',
+    });
+
+    // 标签页丢失 URL
+    get.mockResolvedValue({ id: 7, windowId: 3 });
+    await expect(validatePageTurnSnapshot(snapshot)).resolves.toMatchObject({ ok: false });
+
+    // 非 HTTP(S) 页面退化为严格比较
+    expect(samePageKey('chrome://settings/', 'chrome://settings/')).toBe(true);
+    expect(samePageKey('chrome://settings/', 'chrome://history/')).toBe(false);
+    expect(samePageKey('about:blank', 'about:blank')).toBe(true);
+
+    // 标题为空的页面不做 URL 化处理
+    expect(safePageTitle('', 'https://example.com/page')).toBe('');
+    // 与主机同名的标题且无查询串时原样保留
+    expect(safePageTitle('example.com/docs', 'https://www.example.com/docs')).toBe(
+      'example.com/docs',
+    );
   });
 });

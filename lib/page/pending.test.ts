@@ -371,4 +371,198 @@ describe('pending page permission turns', () => {
     expect(await listPendingPageTurns(700_000)).toEqual([]);
     await clearPendingPageTurn();
   });
+
+  it('rejects malformed payloads and falls back to the legacy storage key', async () => {
+    const malformed = [
+      { version: 1 },
+      {
+        version: 2,
+        requestId: 'bad-1',
+        kind: 'bogus',
+        status: 'awaiting_user',
+        snapshot: null,
+        generation: DEFERRED,
+        historyMessageIds: [],
+        expiresAt: 10,
+      },
+      {
+        version: 2,
+        requestId: 'bad-2',
+        kind: 'page_permission',
+        status: 'wrong',
+        snapshot: null,
+        generation: DEFERRED,
+        historyMessageIds: [],
+        expiresAt: 10,
+      },
+      {
+        version: 2,
+        requestId: 'bad-3',
+        kind: 'page_permission',
+        status: 'awaiting_user',
+        snapshot: { bad: true },
+        generation: DEFERRED,
+        historyMessageIds: [],
+        expiresAt: 10,
+      },
+      {
+        version: 2,
+        requestId: 'bad-4',
+        kind: 'page_permission',
+        status: 'awaiting_user',
+        snapshot: null,
+        generation: { version: 9, requestId: 'bad-4' },
+        historyMessageIds: [],
+        expiresAt: 10,
+      },
+      {
+        version: 2,
+        requestId: 'bad-5',
+        kind: 'page_permission',
+        status: 'awaiting_user',
+        snapshot: null,
+        generation: DEFERRED,
+        historyMessageIds: 'nope',
+        expiresAt: 10,
+      },
+      {
+        version: 2,
+        requestId: 'bad-6',
+        kind: 'page_permission',
+        status: 'awaiting_user',
+        snapshot: null,
+        generation: DEFERRED,
+        historyMessageIds: [],
+        expiresAt: Infinity,
+      },
+    ];
+    stored['bosspilot_pending_agent_turn_v3'] = {
+      version: 3,
+      turns: Object.fromEntries(malformed.map((value, index) => [`bad-${index}`, value])),
+    };
+    await expect(listPendingPageTurns()).resolves.toEqual([]);
+
+    // v3 键存在时优先使用它；移除后回退到 v2 旧键
+    delete stored['bosspilot_pending_agent_turn_v3'];
+    stored['bosspilot_pending_agent_turn_v2'] = {
+      version: 2,
+      requestId: 'legacy-1',
+      kind: 'user_input',
+      status: 'awaiting_user',
+      snapshot: null,
+      generation: DEFERRED,
+      historyMessageIds: ['user-1'],
+      expiresAt: Number.MAX_SAFE_INTEGER,
+    };
+    await expect(loadPendingPageTurn()).resolves.toMatchObject({ requestId: 'legacy-1' });
+    await expect(loadPendingPageTurn('missing-request')).resolves.toBeNull();
+  });
+
+  it('loads the most recent pending turn without a request id', async () => {
+    const older = createPendingAgentTurn(
+      { ...DEFERRED, requestId: 'older', deferredAt: 1 },
+      SNAPSHOT,
+      HISTORY,
+      'page_permission',
+      1_000,
+      'conversation-a',
+    );
+    const newer = createPendingAgentTurn(
+      { ...DEFERRED, requestId: 'newer', deferredAt: 2 },
+      SNAPSHOT,
+      HISTORY,
+      'user_input',
+      1_000,
+      'conversation-b',
+    );
+    await savePendingPageTurn(older);
+    await savePendingPageTurn(newer);
+
+    await expect(loadPendingPageTurn(3_000)).resolves.toMatchObject({ requestId: 'newer' });
+    await clearPendingPageTurn();
+    await expect(loadPendingPageTurn(3_000)).resolves.toBeNull();
+  });
+
+  it('deep-clones rich deferred turns across save and load', async () => {
+    const rich: DeferredGenerationTurn = {
+      ...DEFERRED,
+      message: {
+        ...DEFERRED.message,
+        attachments: [{ id: 'att-1', name: 'a.png', size: 1 }],
+        modelIdentity: { providerId: 'openai', modelId: 'gpt-test' },
+        usage: {
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          totalTokens: 2,
+          cost: 0,
+        },
+        reasoningActivity: { status: 'completed', summary: '完成', startedAt: 1 },
+        toolActivity: {
+          callId: 'call-0',
+          name: 'tab',
+          label: '列标签页',
+          status: 'succeeded',
+          statusText: '完成',
+          startedAt: 1,
+        },
+        toolActivities: [
+          {
+            callId: 'call-1',
+            name: 'tab',
+            label: '列标签页',
+            status: 'succeeded',
+            statusText: '完成',
+            startedAt: 2,
+          },
+        ],
+        pendingUserQuestion: { options: [{ id: 'option-1', label: '继续' }] },
+      },
+      tools: [
+        {
+          name: 'tab',
+          label: '标签页',
+          description: '管理浏览器标签页',
+          parameters: {
+            type: 'object',
+            properties: { action: { type: 'string' } },
+            required: ['action'],
+            additionalProperties: false,
+          },
+        },
+      ],
+      loopMessages: [
+        { role: 'user', content: '继续', createdAt: 3 },
+        {
+          role: 'assistant',
+          content: '',
+          createdAt: 4,
+          toolCalls: [{ id: 'call-2', name: 'tab', arguments: { action: 'list' } }],
+        },
+        { role: 'assistant', content: '未调用工具的说明', createdAt: 5 },
+      ],
+      toolCallSignatures: ['sig-1'],
+      toolAttemptSignatures: ['att-1'],
+      toolCalls: [{ id: 'call-3', name: 'tab', arguments: { action: 'list' } }],
+      completedToolExecutions: [
+        {
+          content: 'ok',
+          isError: false,
+          statusText: '完成',
+          nextPageSnapshot: SNAPSHOT,
+          pageSnapshots: [SNAPSHOT],
+        },
+        { content: 'ok', isError: false, statusText: '完成' },
+      ],
+    };
+    const pending = createPendingPageTurn(rich, SNAPSHOT, HISTORY);
+    await savePendingPageTurn(pending);
+
+    const loaded = await loadPendingPageTurn('request-1', 3_000);
+    expect(loaded?.generation.tools?.[0]?.parameters.required).toEqual(['action']);
+    expect(loaded?.generation.loopMessages).toHaveLength(3);
+    expect(loaded?.generation.completedToolExecutions?.[0]?.nextPageSnapshot).toEqual(SNAPSHOT);
+    expect(loaded?.generation.completedToolExecutions?.[0]?.pageSnapshots).toEqual([SNAPSHOT]);
+  });
 });

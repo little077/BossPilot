@@ -1535,4 +1535,1018 @@ describe('useAgentPort', () => {
     });
     expect(accepted).toBe(false);
   });
+
+  it('keeps AI title snapshots read-aware and surfaces title-save failures', async () => {
+    configMocks.getChatHistorySettings.mockResolvedValue({ autoTitle: true });
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('第一轮');
+    });
+    const firstChat = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    if (!firstChat) throw new Error('expected first chat');
+    act(() => {
+      hook.result.current.setViewedConversationId('conversation-1');
+    });
+    // 空结果：AI 标题保存返回 null 时静默跳过
+    dbMocks.saveAiConversationTitle.mockResolvedValueOnce(null as never);
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: firstChat.requestId,
+        message: {
+          id: 'title-answer-1',
+          role: 'assistant',
+          content: '第一轮答案',
+          createdAt: 2,
+          status: 'completed',
+        },
+      });
+    });
+    await waitFor(() =>
+      expect(ports[0]?.sent.some(({ type }) => type === 'summarize_conversation')).toBe(true),
+    );
+    const firstTitle = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'summarize_conversation' }> =>
+        message.type === 'summarize_conversation',
+    );
+    if (!firstTitle) throw new Error('expected first title');
+    await act(async () => {
+      ports[0]?.emit({
+        type: 'conversation_title',
+        requestId: firstTitle.requestId,
+        conversationId: firstTitle.conversationId,
+        title: '空结果标题',
+      });
+    });
+    expect(hook.result.current.conversations[0]?.title).toBe('历史记录 1');
+    // 快照返回 unread=true，但会话当前已读：标题链路不能把未读状态改回去。
+    act(() => {
+      hook.result.current.sendChat('第二轮');
+    });
+    const secondChat = ports[0]?.sent.filter(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    )[1];
+    if (!secondChat) throw new Error('expected second chat');
+    dbMocks.saveAiConversationTitle.mockResolvedValueOnce(
+      conversation({ unread: true, title: '已读标题', titleSource: 'ai' }),
+    );
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: secondChat.requestId,
+        message: {
+          id: 'title-answer-2',
+          role: 'assistant',
+          content: '第二轮答案',
+          createdAt: 4,
+          status: 'completed',
+        },
+      });
+    });
+    await waitFor(() =>
+      expect(ports[0]?.sent.filter(({ type }) => type === 'summarize_conversation')).toHaveLength(
+        2,
+      ),
+    );
+    const secondTitle = ports[0]?.sent.filter(
+      (message): message is Extract<ClientMessage, { type: 'summarize_conversation' }> =>
+        message.type === 'summarize_conversation',
+    )[1];
+    if (!secondTitle) throw new Error('expected second title');
+    await act(async () => {
+      ports[0]?.emit({
+        type: 'conversation_title',
+        requestId: secondTitle.requestId,
+        conversationId: secondTitle.conversationId,
+        title: '已读标题',
+      });
+    });
+    expect(hook.result.current.conversations[0]).toMatchObject({
+      title: '已读标题',
+      unread: false,
+    });
+    // 新一轮：保存失败必须可见
+    act(() => {
+      hook.result.current.sendChat('第三轮');
+    });
+    const thirdChat = ports[0]?.sent.filter(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    )[2];
+    if (!thirdChat) throw new Error('expected third chat');
+    dbMocks.saveAiConversationTitle.mockRejectedValueOnce(new Error('quota'));
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: thirdChat.requestId,
+        message: {
+          id: 'title-answer-3',
+          role: 'assistant',
+          content: '第三轮答案',
+          createdAt: 6,
+          status: 'completed',
+        },
+      });
+    });
+    await waitFor(() =>
+      expect(ports[0]?.sent.filter(({ type }) => type === 'summarize_conversation')).toHaveLength(
+        3,
+      ),
+    );
+    const thirdTitle = ports[0]?.sent.filter(
+      (message): message is Extract<ClientMessage, { type: 'summarize_conversation' }> =>
+        message.type === 'summarize_conversation',
+    )[2];
+    if (!thirdTitle) throw new Error('expected third title');
+    act(() => {
+      ports[0]?.emit({
+        type: 'conversation_title',
+        requestId: thirdTitle.requestId,
+        conversationId: thirdTitle.conversationId,
+        title: '失败标题',
+      });
+    });
+    await waitFor(() => expect(hook.result.current.historyError).toContain('本地历史记录保存失败'));
+  });
+
+  it('does not un-read a conversation from an AI title snapshot', async () => {
+    configMocks.getChatHistorySettings.mockResolvedValue({ autoTitle: true });
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('后台一轮');
+    });
+    const chat = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    if (!chat) throw new Error('expected chat request');
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: chat.requestId,
+        message: {
+          id: 'background-answer',
+          role: 'assistant',
+          content: '后台完成',
+          createdAt: 2,
+          status: 'completed',
+        },
+      });
+    });
+    await waitFor(() => expect(hook.result.current.conversations[0]?.unread).toBe(true));
+    const titleRequest = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'summarize_conversation' }> =>
+        message.type === 'summarize_conversation',
+    );
+    if (!titleRequest) throw new Error('expected title request');
+    await act(async () => {
+      dbMocks.saveAiConversationTitle.mockResolvedValueOnce(
+        conversation({ unread: true, title: '后台标题', titleSource: 'ai' }),
+      );
+      ports[0]?.emit({
+        type: 'conversation_title',
+        requestId: titleRequest.requestId,
+        conversationId: titleRequest.conversationId,
+        title: '后台标题',
+      });
+    });
+    expect(hook.result.current.conversations[0]?.unread).toBe(true);
+  });
+
+  it('rolls back an auto-title request when the Port refuses to send', async () => {
+    configMocks.getChatHistorySettings.mockResolvedValue({ autoTitle: true });
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('标题第一轮');
+    });
+    const firstChat = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    if (!firstChat) throw new Error('expected first chat');
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: firstChat.requestId,
+        message: {
+          id: 't-answer-1',
+          role: 'assistant',
+          content: '第一轮答案',
+          createdAt: 2,
+          status: 'completed',
+        },
+      });
+    });
+    await waitFor(() =>
+      expect(ports[0]?.sent.some(({ type }) => type === 'summarize_conversation')).toBe(true),
+    );
+    const firstTitle = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'summarize_conversation' }> =>
+        message.type === 'summarize_conversation',
+    );
+    if (!firstTitle) throw new Error('expected first title');
+    act(() => {
+      ports[0]?.emit({
+        type: 'conversation_title',
+        requestId: firstTitle.requestId,
+        conversationId: firstTitle.conversationId,
+        title: '第一轮标题',
+      });
+    });
+    await waitFor(() => expect(dbMocks.saveAiConversationTitle).toHaveBeenCalled());
+    const port = ports[0];
+    if (!port) throw new Error('expected a connected test port');
+    act(() => {
+      hook.result.current.sendChat('标题第二轮');
+    });
+    const secondChat = ports[0]?.sent.filter(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    )[1];
+    if (!secondChat) throw new Error('expected second chat');
+    port.throwOnPost = true;
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: secondChat.requestId,
+        message: {
+          id: 't-answer-2',
+          role: 'assistant',
+          content: '第二轮答案',
+          createdAt: 4,
+          status: 'completed',
+        },
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ports[0]?.sent.filter(({ type }) => type === 'summarize_conversation')).toHaveLength(1);
+    port.throwOnPost = false;
+    act(() => {
+      hook.result.current.sendChat('标题第三轮');
+    });
+    const thirdChat = ports[0]?.sent.filter(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    )[2];
+    if (!thirdChat) throw new Error('expected third chat');
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: thirdChat.requestId,
+        message: {
+          id: 't-answer-3',
+          role: 'assistant',
+          content: '第三轮答案',
+          createdAt: 6,
+          status: 'completed',
+        },
+      });
+    });
+    await waitFor(() =>
+      expect(ports[0]?.sent.filter(({ type }) => type === 'summarize_conversation')).toHaveLength(
+        2,
+      ),
+    );
+  });
+
+  it('skips automatic titles for user-renamed conversations', async () => {
+    configMocks.getChatHistorySettings.mockResolvedValue({ autoTitle: true });
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('先建会话');
+    });
+    const firstChat = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    if (!firstChat) throw new Error('expected first chat');
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: firstChat.requestId,
+        message: {
+          id: 'first-answer',
+          role: 'assistant',
+          content: '第一轮完成',
+          createdAt: 2,
+          status: 'completed',
+        },
+      });
+    });
+    await waitFor(() =>
+      expect(ports[0]?.sent.some(({ type }) => type === 'summarize_conversation')).toBe(true),
+    );
+    const conversationId = hook.result.current.activeConversationId;
+    if (!conversationId) throw new Error('expected conversation');
+    await act(async () => {
+      await hook.result.current.renameConversationTitle(conversationId, '手动标题');
+    });
+    act(() => {
+      hook.result.current.sendChat('完成一轮');
+    });
+    const chat = ports[0]?.sent.filter(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    )[1];
+    if (!chat) throw new Error('expected chat request');
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: chat.requestId,
+        message: {
+          id: 'renamed-answer',
+          role: 'assistant',
+          content: '完成',
+          createdAt: 2,
+          status: 'completed',
+        },
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // 只有第一轮（重命名前）发出过自动标题请求，重命名后的完成轮不再请求
+    expect(ports[0]?.sent.filter(({ type }) => type === 'summarize_conversation')).toHaveLength(1);
+  });
+
+  it('skips automatic titles when history settings are unreadable', async () => {
+    configMocks.getChatHistorySettings.mockRejectedValueOnce(new Error('settings unavailable'));
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('读取设置');
+    });
+    const chat = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    if (!chat) throw new Error('expected chat request');
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: chat.requestId,
+        message: {
+          id: 'settings-answer',
+          role: 'assistant',
+          content: '完成',
+          createdAt: 2,
+          status: 'completed',
+        },
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ports[0]?.sent.some(({ type }) => type === 'summarize_conversation')).toBe(false);
+  });
+
+  it('re-checks the conversation after settings resolve and honors a rename made meanwhile', async () => {
+    configMocks.getChatHistorySettings.mockResolvedValue({ autoTitle: true });
+    let resolveSettings: (() => void) | undefined;
+    const settingsGate = new Promise<void>((resolve) => {
+      resolveSettings = resolve;
+    });
+    configMocks.getChatHistorySettings.mockImplementation(() =>
+      settingsGate.then(() => ({ autoTitle: true })),
+    );
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('设置期间改名');
+    });
+    const chat = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    if (!chat) throw new Error('expected chat request');
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: chat.requestId,
+        message: {
+          id: 'rename-answer',
+          role: 'assistant',
+          content: '完成',
+          createdAt: 2,
+          status: 'completed',
+        },
+      });
+    });
+    const conversationId = hook.result.current.activeConversationId;
+    if (!conversationId) throw new Error('expected conversation');
+    await act(async () => {
+      await hook.result.current.renameConversationTitle(conversationId, '设置后才命名');
+    });
+    await act(async () => {
+      resolveSettings?.();
+      await settingsGate;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ports[0]?.sent.some(({ type }) => type === 'summarize_conversation')).toBe(false);
+  });
+
+  it('drains a queued title request once the earlier one finishes', async () => {
+    configMocks.getChatHistorySettings.mockResolvedValue({ autoTitle: true });
+    let resolveSettings: (() => void) | undefined;
+    const settingsGate = new Promise<void>((resolve) => {
+      resolveSettings = resolve;
+    });
+    configMocks.getChatHistorySettings.mockImplementation(() =>
+      settingsGate.then(() => ({ autoTitle: true })),
+    );
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('第一轮');
+    });
+    const firstChat = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    if (!firstChat) throw new Error('expected first chat');
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: firstChat.requestId,
+        message: {
+          id: 'queued-answer-1',
+          role: 'assistant',
+          content: '第一轮答案',
+          createdAt: 2,
+          status: 'completed',
+        },
+      });
+    });
+    act(() => {
+      hook.result.current.sendChat('第二轮');
+    });
+    const secondChat = ports[0]?.sent.filter(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    )[1];
+    if (!secondChat) throw new Error('expected second chat');
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: secondChat.requestId,
+        message: {
+          id: 'queued-answer-2',
+          role: 'assistant',
+          content: '第二轮答案',
+          createdAt: 4,
+          status: 'completed',
+        },
+      });
+    });
+    // 两个 title 请求都挂在 settings 读取上：第一个先恢复并发出，第二个排队
+    await act(async () => {
+      resolveSettings?.();
+      await settingsGate;
+    });
+    await waitFor(() =>
+      expect(ports[0]?.sent.filter(({ type }) => type === 'summarize_conversation')).toHaveLength(
+        1,
+      ),
+    );
+    const firstTitle = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'summarize_conversation' }> =>
+        message.type === 'summarize_conversation',
+    );
+    if (!firstTitle) throw new Error('expected first title');
+    act(() => {
+      ports[0]?.emit({
+        type: 'conversation_title',
+        requestId: firstTitle.requestId,
+        conversationId: firstTitle.conversationId,
+        title: '第一轮标题',
+      });
+    });
+    await waitFor(() =>
+      expect(ports[0]?.sent.filter(({ type }) => type === 'summarize_conversation')).toHaveLength(
+        2,
+      ),
+    );
+    const secondTitle = ports[0]?.sent.filter(
+      (message): message is Extract<ClientMessage, { type: 'summarize_conversation' }> =>
+        message.type === 'summarize_conversation',
+    )[1];
+    expect(secondTitle?.messages.at(-1)).toMatchObject({
+      id: 'queued-answer-2',
+      content: '第二轮答案',
+    });
+  });
+
+  it('rejects a send while a waiting_user or queued run owns the conversation', async () => {
+    const hook = await connectHook();
+    act(() => {
+      ports[0]?.emit({
+        type: 'run_state',
+        runs: [
+          {
+            runId: 'wait-run',
+            requestId: 'wait-run',
+            conversationId: 'conversation-1',
+            status: 'waiting_user',
+            updatedAt: 1,
+          },
+        ],
+      });
+    });
+    let accepted = true;
+    act(() => {
+      accepted = hook.result.current.sendChat('授权等待中');
+    });
+    expect(accepted).toBe(false);
+    act(() => {
+      ports[0]?.emit({
+        type: 'run_state',
+        runs: [
+          {
+            runId: 'queued-run',
+            requestId: 'queued-run',
+            conversationId: 'conversation-1',
+            status: 'queued',
+            updatedAt: 1,
+          },
+        ],
+      });
+    });
+    act(() => {
+      accepted = hook.result.current.sendChat('排队中');
+    });
+    expect(accepted).toBe(false);
+    expect(hook.result.current.messages).toEqual([]);
+  });
+
+  it('rolls back a steering attempt when the Port refuses to send', async () => {
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('第一句');
+    });
+    const port = ports[0];
+    if (!port) throw new Error('expected a connected test port');
+    port.throwOnPost = true;
+    let accepted = true;
+    act(() => {
+      accepted = hook.result.current.sendChat('第二句');
+    });
+    expect(accepted).toBe(false);
+    expect(port.sent.some(({ type }) => type === 'run:steer')).toBe(false);
+    expect(hook.result.current.messages.map(({ content }) => content)).toEqual(['第一句']);
+  });
+
+  it('rejects retry when idle, while a run is active, or without a retryable failure', async () => {
+    const hook = await connectHook();
+    expect(hook.result.current.retryChat()).toBe(false);
+    act(() => {
+      hook.result.current.sendChat('运行中');
+    });
+    expect(hook.result.current.retryChat()).toBe(false);
+    const chat = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    if (!chat) throw new Error('expected chat request');
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: chat.requestId,
+        message: {
+          id: 'plain-answer',
+          role: 'assistant',
+          content: '正常完成',
+          createdAt: 2,
+          status: 'completed',
+        },
+      });
+    });
+    expect(hook.result.current.retryChat()).toBe(false);
+    act(() => {
+      hook.result.current.sendChat('失败轮');
+    });
+    const secondChat = ports[0]?.sent.filter(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    )[1];
+    if (!secondChat) throw new Error('expected second chat');
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_error',
+        requestId: secondChat.requestId,
+        message: {
+          id: 'non-retryable',
+          role: 'assistant',
+          content: '部分内容',
+          createdAt: 4,
+          status: 'error',
+          error: true,
+          errorMessage: '不可重试',
+        },
+      });
+    });
+    expect(hook.result.current.retryChat()).toBe(false);
+  });
+
+  it('rejects retry when the only history is a synthesized error without a user turn', async () => {
+    dbMocks.loadConversations.mockResolvedValue([conversation()]);
+    const hook = await connectHook();
+    act(() => {
+      ports[0]?.emit({
+        type: 'run_state',
+        runs: [
+          {
+            runId: 'stale',
+            requestId: 'stale',
+            conversationId: 'conversation-1',
+            status: 'waiting_user',
+            updatedAt: 1,
+          },
+        ],
+      });
+    });
+    act(() => {
+      ports[0]?.emit({ type: 'error', requestId: 'stale', text: '授权已过期' });
+    });
+    expect(hook.result.current.retryChat()).toBe(false);
+  });
+
+  it('rolls back retry state when the Port refuses to send', async () => {
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('失败后重试');
+    });
+    const chat = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    if (!chat) throw new Error('expected chat request');
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_error',
+        requestId: chat.requestId,
+        conversationId: 'conversation-1',
+        message: {
+          id: 'fail-1',
+          role: 'assistant',
+          content: '部分内容',
+          createdAt: 2,
+          status: 'error',
+          error: true,
+          errorMessage: '网络中断',
+          retryable: true,
+        },
+      });
+    });
+    const port = ports[0];
+    if (!port) throw new Error('expected a connected test port');
+    port.throwOnPost = true;
+    let accepted = true;
+    act(() => {
+      accepted = hook.result.current.retryChat();
+    });
+    expect(accepted).toBe(false);
+    expect(hook.result.current.chatRunning).toBe(false);
+    expect(port.sent.some(({ type }) => type === 'run:retry')).toBe(false);
+  });
+
+  it('cancels through the run ledger when the local active-chat entry is missing', async () => {
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('先建会话');
+    });
+    act(() => {
+      ports[0]?.emit({
+        type: 'run_state',
+        runs: [
+          {
+            runId: 'ledger-run',
+            requestId: 'ledger-run',
+            conversationId: 'conversation-1',
+            status: 'waiting_user',
+            updatedAt: 1,
+          },
+        ],
+      });
+    });
+    act(() => {
+      hook.result.current.cancelChat();
+    });
+    expect(ports[0]?.sent).toContainEqual({
+      type: 'cancel',
+      scope: 'chat',
+      requestId: 'ledger-run',
+    });
+  });
+
+  it('rejects page permission resolution for an unknown request', async () => {
+    const hook = await connectHook();
+    let granted = true;
+    await act(async () => {
+      granted = await hook.result.current.resolvePagePermission(
+        'ghost-request',
+        'https://example.com/*',
+        true,
+      );
+    });
+    expect(granted).toBe(false);
+    expect(pageAccessMocks.requestPageOriginAccess).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a read-mark persistence failure', async () => {
+    dbMocks.loadConversations.mockResolvedValue([conversation({ unread: true })]);
+    const hook = await connectHook();
+    dbMocks.markConversationRead.mockRejectedValueOnce(new Error('write blocked'));
+    act(() => {
+      hook.result.current.setViewedConversationId('conversation-1');
+    });
+    expect(hook.result.current.conversations[0]?.unread).toBe(false);
+    await waitFor(() => expect(hook.result.current.historyError).toContain('本地历史记录保存失败'));
+  });
+
+  it('treats a null rename result as a failure', async () => {
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('建会话');
+    });
+    const conversationId = hook.result.current.activeConversationId;
+    if (!conversationId) throw new Error('expected conversation');
+    dbMocks.renameConversation.mockResolvedValueOnce(null as never);
+    await act(async () => {
+      await expect(
+        hook.result.current.renameConversationTitle(conversationId, '空结果'),
+      ).resolves.toBe(false);
+    });
+  });
+
+  it('surfaces a history-save failure from the stream persistence path', async () => {
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('保存失败');
+    });
+    const chat = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    if (!chat) throw new Error('expected chat request');
+    dbMocks.saveMessage.mockRejectedValueOnce(new Error('indexeddb full'));
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: chat.requestId,
+        message: {
+          id: 'save-fail-answer',
+          role: 'assistant',
+          content: '完成',
+          createdAt: 2,
+          status: 'completed',
+        },
+      });
+    });
+    await waitFor(() => expect(hook.result.current.historyError).toContain('本地历史记录保存失败'));
+  });
+
+  it('ignores history loads that resolve after the panel unmounts', async () => {
+    let resolveConversations: ((rows: ChatConversation[]) => void) | undefined;
+    dbMocks.loadConversations.mockReturnValue(
+      new Promise<ChatConversation[]>((resolve) => {
+        resolveConversations = resolve;
+      }),
+    );
+    const hook = renderHook(() => useAgentPort());
+    hook.unmount();
+    await act(async () => {
+      resolveConversations?.([conversation()]);
+    });
+  });
+
+  it('ignores message loads that resolve after the panel unmounts', async () => {
+    dbMocks.loadConversations.mockResolvedValue([conversation()]);
+    let resolveMessages: ((rows: ChatMessage[]) => void) | undefined;
+    dbMocks.loadMessages.mockReturnValue(
+      new Promise<ChatMessage[]>((resolve) => {
+        resolveMessages = resolve;
+      }),
+    );
+    const hook = renderHook(() => useAgentPort());
+    await waitFor(() => expect(dbMocks.loadMessages).toHaveBeenCalled());
+    hook.unmount();
+    await act(async () => {
+      resolveMessages?.([{ id: 'late', role: 'user', content: '晚到', createdAt: 1 }]);
+    });
+  });
+
+  it('ignores a stream for an unknown request when no conversation is active', async () => {
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.startNewConversation();
+    });
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_update',
+        requestId: 'ghost-request',
+        message: {
+          id: 'ghost',
+          role: 'assistant',
+          content: 'x',
+          createdAt: 2,
+          status: 'streaming',
+        },
+      });
+    });
+    expect(hook.result.current.messages).toEqual([]);
+    expect(hook.result.current.chatRunning).toBe(false);
+  });
+
+  it('ignores messages from a superseded Port after reconnecting', async () => {
+    const hook = await connectHook();
+    vi.useFakeTimers();
+    act(() => ports[0]?.emitDisconnect());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    act(() => {
+      ports[1]?.emit({ type: 'connected' });
+      ports[1]?.emit({ type: 'chat_state', running: false });
+    });
+    act(() => {
+      ports[0]?.emit({
+        type: 'snapshot',
+        snapshot: {
+          taskId: 'stale',
+          phase: 'idle',
+          statusText: '',
+          collected: 0,
+          assessed: 0,
+          jobs: [],
+        },
+      });
+    });
+    expect(hook.result.current.snapshot.taskId).toBe('');
+  });
+
+  it('buffers streams from a ghost conversation outside the active view', async () => {
+    const hook = await connectHook();
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_update',
+        requestId: 'ghost-run',
+        conversationId: 'ghost-conv',
+        message: {
+          id: 'g1',
+          role: 'assistant',
+          content: '后台流',
+          createdAt: 2,
+          status: 'streaming',
+        },
+      });
+    });
+    expect(hook.result.current.messages).toEqual([]);
+    act(() => {
+      ports[0]?.emit({
+        type: 'stream_end',
+        requestId: 'ghost-run',
+        conversationId: 'ghost-conv',
+        message: {
+          id: 'g1',
+          role: 'assistant',
+          content: '后台流完成',
+          createdAt: 2,
+          status: 'completed',
+        },
+      });
+    });
+    expect(hook.result.current.messages).toEqual([]);
+    expect(dbMocks.saveMessage).toHaveBeenCalledWith(
+      'ghost-conv',
+      expect.objectContaining({ id: 'g1', status: 'completed' }),
+      expect.objectContaining({ unread: true }),
+    );
+  });
+
+  it('surfaces a global error against the active conversation when idle', async () => {
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('跑一轮');
+    });
+    act(() => {
+      // 权威台账不含本地请求：本地 active 被打断清空，随后无 requestId 的错误落到当前会话
+      ports[0]?.emit({
+        type: 'run_state',
+        runs: [
+          {
+            runId: 'other-run',
+            requestId: 'other-run',
+            conversationId: 'conversation-1',
+            status: 'running',
+            updatedAt: 1,
+          },
+        ],
+      });
+      ports[0]?.emit({ type: 'error', text: '后台全局错误' });
+    });
+    expect(hook.result.current.messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      status: 'error',
+      errorMessage: '后台全局错误',
+    });
+  });
+
+  it('keeps its own run visible in run_state and finalizes only authoritative terminal states', async () => {
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('第一轮');
+    });
+    const firstChat = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    if (!firstChat) throw new Error('expected first chat');
+    act(() => {
+      // 权威台账包含自身仍在运行的 run：不打断
+      ports[0]?.emit({
+        type: 'run_state',
+        runs: [
+          {
+            runId: 'own-run',
+            requestId: firstChat.requestId,
+            conversationId: 'conversation-1',
+            status: 'running',
+            updatedAt: 1,
+          },
+        ],
+      });
+    });
+    expect(hook.result.current.chatRunning).toBe(true);
+    expect(hook.result.current.messages.at(-1)).toMatchObject({ role: 'user' });
+    act(() => {
+      // 权威台账把该 run 标记为 error：必须打断并落一条错误
+      ports[0]?.emit({
+        type: 'run_state',
+        runs: [
+          {
+            runId: 'own-run',
+            requestId: firstChat.requestId,
+            conversationId: 'conversation-1',
+            status: 'error',
+            updatedAt: 2,
+          },
+        ],
+      });
+    });
+    expect(hook.result.current.messages.at(-1)).toMatchObject({
+      status: 'error',
+      errorMessage: expect.stringContaining('生成连接已中断'),
+    });
+    act(() => {
+      hook.result.current.sendChat('第二轮');
+    });
+    const secondChat = ports[0]?.sent.filter(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    )[1];
+    if (!secondChat) throw new Error('expected second chat');
+    act(() => {
+      ports[0]?.emit({
+        type: 'run_state',
+        runs: [
+          {
+            runId: 'r2',
+            requestId: secondChat.requestId,
+            conversationId: 'conversation-1',
+            status: 'interrupted',
+            updatedAt: 1,
+          },
+        ],
+      });
+    });
+    act(() => {
+      hook.result.current.sendChat('第三轮');
+    });
+    const thirdChat = ports[0]?.sent.filter(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    )[2];
+    if (!thirdChat) throw new Error('expected third chat');
+    act(() => {
+      ports[0]?.emit({
+        type: 'run_state',
+        runs: [
+          {
+            runId: 'r3',
+            requestId: thirdChat.requestId,
+            conversationId: 'conversation-1',
+            status: 'cancelled',
+            updatedAt: 1,
+          },
+        ],
+      });
+    });
+    expect(hook.result.current.chatRunning).toBe(false);
+  });
+
+  it('clears all local run state when the worker reports idle with stale local runs', async () => {
+    const hook = await connectHook();
+    act(() => {
+      hook.result.current.sendChat('hello');
+    });
+    const chat = ports[0]?.sent.find(
+      (message): message is Extract<ClientMessage, { type: 'chat' }> => message.type === 'chat',
+    );
+    if (!chat) throw new Error('expected chat request');
+    act(() => {
+      // 让本地 active 指向一条非 assistant 消息：中断函数必须优雅跳过
+      ports[0]?.emit({
+        type: 'stream_update',
+        requestId: chat.requestId,
+        message: {
+          id: 'echo',
+          role: 'user',
+          content: '回显',
+          createdAt: 2,
+          status: 'streaming',
+        },
+      });
+      ports[0]?.emit({ type: 'chat_state', running: false });
+    });
+    expect(hook.result.current.chatRunning).toBe(false);
+    expect(hook.result.current.messages.find(({ id }) => id === 'echo')).toBeDefined();
+    expect(hook.result.current.runs).toEqual([]);
+  });
 });

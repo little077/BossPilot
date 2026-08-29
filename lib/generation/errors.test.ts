@@ -50,6 +50,7 @@ describe('generation errors', () => {
     );
     expect(sanitizeGenerationError(new Error('provider returned 401')).code).toBe('AUTH_ERROR');
     expect(sanitizeGenerationError(errorWithStatus('401')).code).toBe('NETWORK_ERROR');
+    expect(sanitizeGenerationError({ message: 'oops' }).code).toBe('NETWORK_ERROR');
   });
 
   it('recognizes timeout errors and safely handles unknown values', () => {

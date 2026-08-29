@@ -1,3 +1,4 @@
+import { Readability } from '@mozilla/readability';
 import { describe, expect, it, vi } from 'vitest';
 import { extractCurrentDocument } from '@/lib/page/extractor';
 
@@ -188,5 +189,166 @@ describe('extractCurrentDocument', () => {
       text: '第二篇笔记',
       href: 'https://www.xiaohongshu.com/note/2',
     });
+  });
+
+  it('classifies every input type and ignores presentation roles', () => {
+    document.body.innerHTML = `
+      <main>
+        <input type="button" value="触发" />
+        <input type="image" alt="图片按钮" />
+        <input type="checkbox" />
+        <input type="radio" />
+        <input type="range" />
+        <input type="search" />
+        <input type="hidden" value="不应出现" style="display:inline" />
+        <button>确认</button>
+        <div role="presentation" tabindex="0">占位文本</div>
+        <div role="none" onclick="void 0">占位文本二</div>
+      </main>`;
+
+    const result = extractCurrentDocument();
+
+    expect(result.structure.controls.total).toBe(7);
+    expect(result.structure.controls.byRole).toEqual([
+      { role: 'button', count: 3 },
+      { role: 'checkbox', count: 1 },
+      { role: 'radio', count: 1 },
+      { role: 'searchbox', count: 1 },
+      { role: 'slider', count: 1 },
+    ]);
+  });
+
+  it('clips long headings and skips hidden or blank text nodes', () => {
+    document.body.innerHTML = `
+      <main>
+        <h1>${'长'.repeat(199)}<span>尾部</span></h1>
+        <h2>可见<span style="display:none">隐藏片段</span><span>   </span>标题</h2>
+      </main>`;
+
+    const result = extractCurrentDocument();
+
+    expect(result.structure.headings).toEqual([
+      { level: 1, text: '长'.repeat(199) },
+      { level: 2, text: '可见 标题' },
+    ]);
+  });
+
+  it('tolerates a document without a body', () => {
+    document.documentElement.innerHTML = '<head><title>无正文文档</title></head>';
+
+    const result = extractCurrentDocument();
+
+    expect(result.mode).toBe('body-fallback');
+    expect(result.text).toBe('');
+    expect(result.pageLinks).toEqual([]);
+    document.documentElement.innerHTML = '<head><title>x</title></head><body></body>';
+  });
+
+  it('bounds fallback text past the cap and keeps walking siblings', () => {
+    const parse = vi.spyOn(Readability.prototype, 'parse').mockImplementation(() => {
+      throw new Error('readability unavailable');
+    });
+    document.body.innerHTML = `
+      <div>${'公开正文'.repeat(6_000)}</div>
+      <div>${'更多正文'.repeat(1_000)}</div>`;
+
+    const result = extractCurrentDocument();
+
+    expect(result.mode).toBe('body-fallback');
+    expect(result.returnedChars).toBe(20_000);
+    expect(result.truncated).toBe(true);
+    expect(result.text).not.toContain('更多正文');
+    parse.mockRestore();
+  });
+
+  it('filters off-screen and broken links and falls back to href for empty labels', () => {
+    document.body.innerHTML = `
+      <a id="v1" href="/visible">可见链接</a>
+      <a id="top" href="/above">视口上方</a>
+      <a id="zero" href="/zero">零尺寸</a>
+      <a id="bad" href="http://[invalid">坏链接</a>
+      <a id="empty" href="/empty"></a>
+      <a id="label" aria-label="标签优先" href="/label">不同文本</a>
+      <a id="title" title="标题兜底" href="/title"></a>
+      <a id="hidden" href="/hidden" style="display:none">隐藏链接</a>`;
+    const rect = { bottom: 100, top: 10, width: 80, height: 20 } as DOMRect;
+    for (const id of ['v1', 'bad', 'empty', 'label', 'title']) {
+      vi.spyOn(document.getElementById(id)!, 'getBoundingClientRect').mockReturnValue(rect);
+    }
+    vi.spyOn(document.getElementById('top')!, 'getBoundingClientRect').mockReturnValue({
+      bottom: -5,
+      top: -30,
+      width: 80,
+      height: 20,
+    } as DOMRect);
+    vi.spyOn(document.getElementById('zero')!, 'getBoundingClientRect').mockReturnValue({
+      bottom: 100,
+      top: 10,
+      width: 0,
+      height: 20,
+    } as DOMRect);
+
+    const result = extractCurrentDocument();
+
+    expect(result.pageLinks.map((link) => link.text)).toEqual([
+      '可见链接',
+      expect.stringMatching(/\/empty$/u),
+      '标签优先',
+      '标题兜底',
+    ]);
+    expect(result.pageLinks[1]?.href).toMatch(/\/empty$/u);
+  });
+
+  it('caps collected links at the configured maximum', () => {
+    document.body.innerHTML = Array.from(
+      { length: 31 },
+      (_, index) => `<a href="/link/${index}">链接${index}</a>`,
+    ).join('');
+    const rect = { bottom: 100, top: 10, width: 80, height: 20 } as DOMRect;
+    for (const link of document.querySelectorAll('a')) {
+      vi.spyOn(link, 'getBoundingClientRect').mockReturnValue(rect);
+    }
+
+    const result = extractCurrentDocument();
+
+    expect(result.pageLinks).toHaveLength(30);
+  });
+
+  it('stops appending text once the remaining budget is exactly exhausted', () => {
+    const parse = vi.spyOn(Readability.prototype, 'parse').mockImplementation(() => {
+      throw new Error('readability unavailable');
+    });
+    document.body.innerHTML = `<div>${'长'.repeat(19_999)}<span>尾</span></div>`;
+
+    const result = extractCurrentDocument();
+
+    expect(result.mode).toBe('body-fallback');
+    expect(result.returnedChars).toBe(19_999);
+    expect(result.text).not.toContain('尾');
+    parse.mockRestore();
+  });
+
+  it('ignores collapsed selections and selections rooted in editable elements', () => {
+    document.body.innerHTML = '<main><p>公开正文内容足够长，用于安全兜底。</p></main>';
+
+    const collapsed = vi.spyOn(window, 'getSelection').mockReturnValue({
+      rangeCount: 0,
+      isCollapsed: true,
+      toString: () => '',
+    } as unknown as Selection);
+    expect(extractCurrentDocument().mode).toBe('body-fallback');
+    collapsed.mockRestore();
+
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    const elementRooted = vi.spyOn(window, 'getSelection').mockReturnValue({
+      anchorNode: input,
+      focusNode: input,
+      rangeCount: 1,
+      isCollapsed: false,
+      toString: () => '',
+    } as unknown as Selection);
+    expect(extractCurrentDocument().mode).toBe('body-fallback');
+    elementRooted.mockRestore();
   });
 });

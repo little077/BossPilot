@@ -252,6 +252,123 @@ describe('buildDiagnosticsReport', () => {
 
     expect(md).toContain('耗时：进行中');
   });
+
+  it('渲染会话、Agent 事件流、上下文快照与工具调用台账', () => {
+    const run = makeRun({
+      conversationId: 'conv-1',
+      events: [
+        { atMs: 100, type: 'tool_started', requestId: 'req-1', summary: '调用 tab 工具' },
+        { atMs: 500, type: 'tool_finished', requestId: 'req-1', summary: '完成' },
+      ],
+      contextSnapshots: [
+        { atMs: 200, phase: '任务启动', summary: '绑定发送时页面' },
+        { atMs: 600, phase: '任务结束', summary: '完成', detail: 'tabId=7' },
+      ],
+    });
+    const toolCalls = [
+      {
+        id: 'entry-1',
+        runId: 'run-1',
+        conversationId: 'conv-1',
+        name: 'tab',
+        risk: 'confirm' as const,
+        decision: 'confirm' as const,
+        approved: true,
+        isError: false,
+        statusText: '完成',
+        costMs: 120,
+        paramsSummary: 'action=list',
+        createdAt: 1700000001000,
+      },
+      {
+        id: 'entry-2',
+        runId: 'run-1',
+        conversationId: 'conv-1',
+        name: 'tab',
+        risk: 'safe' as const,
+        decision: 'allow' as const,
+        approved: false,
+        isError: true,
+        statusText: '失败',
+        paramsSummary: 'action=open\nurl=x|y',
+        costMs: 30,
+        createdAt: undefined as unknown as number,
+      },
+    ];
+
+    const md = buildDiagnosticsReport([run], undefined, toolCalls);
+
+    expect(md).toContain('- 会话：`conv-1`');
+    expect(md).toContain('### Agent 事件流');
+    expect(md).toContain('`tool_started`');
+    expect(md).toContain('### Agent 上下文快照');
+    expect(md).toContain('（+0.2s）：绑定发送时页面');
+    expect(md).toContain('  - tabId=7');
+    expect(md).toContain('## 工具调用台账');
+    expect(md).toContain('| 需确认 | 确认 | ✅');
+    expect(md).toContain('120ms');
+    expect(md).toContain('action=list');
+    expect(md).toContain('url=x\\|y');
+    expect(md).toContain('❌ 失败');
+    expect(md).toContain('— |'); // createdAt 缺失时的时间占位
+  });
+
+  it('空台账与仅页面结构导出时给出对应占位', () => {
+    const md = buildDiagnosticsReport([], makePageStructure(), []);
+
+    expect(md).toContain('本次没有执行记录');
+    expect(md).toContain('_暂无工具调用记录。_');
+    expect(md).not.toContain('## 任务 1');
+  });
+
+  it('渲染结束原因、请求工具、单侧 token 与缺失的台账可选字段', () => {
+    const run = makeRun({
+      llmCalls: [
+        {
+          model: 'm1',
+          messageCount: 1,
+          promptChars: 5,
+          outputChars: 3,
+          outputText: 'ok',
+          promptTokens: 10,
+          latencyMs: 50,
+          finishReason: 'tool_calls',
+          toolName: 'tab',
+        },
+        {
+          model: 'm2',
+          messageCount: 1,
+          promptChars: 5,
+          outputChars: 3,
+          outputText: 'ok',
+          completionTokens: 7,
+          latencyMs: 60,
+        },
+      ],
+    });
+    const toolCalls = [
+      {
+        id: 'entry-1',
+        runId: 'run-1',
+        conversationId: 'conv-1',
+        name: 'tab',
+        risk: 'blocked' as const,
+        decision: 'deny' as const,
+        approved: false,
+        isError: true,
+        createdAt: 1700000001000,
+      },
+    ];
+
+    const md = buildDiagnosticsReport([run], undefined, toolCalls);
+
+    expect(md).toContain('结束原因 `tool_calls`');
+    expect(md).toContain('请求工具 `tab`');
+    expect(md).toContain('token in/out=10/?');
+    expect(md).toContain('token in/out=?/7');
+    expect(md).toContain('| 禁用 | 拒绝 | — | ❌');
+    expect(md).toContain('| — | — |');
+  });
 });
 
 describe('diagnosticsFileName', () => {
