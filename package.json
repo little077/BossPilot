@@ -111,7 +111,7 @@
     "@wxt-dev/module-react": "1.2.2",
     "acorn": "8.18.0",
     "fake-indexeddb": "6.2.5",
-    "jsdom": "26.1.0",
+    "jsdom": "30.0.1",
     "lint-staged": "16.4.0",
     "sharp": "^0.35.3",
     "simple-git-hooks": "2.13.1",
