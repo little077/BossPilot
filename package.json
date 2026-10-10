@@ -102,6 +102,6 @@
     "simple-git-hooks@2.13.1": true
   },
   "lint-staged": {
-    "*.{js,mjs,cjs,ts,tsx,json,jsonc,css}": "biome check --write"
+    "!(package-lock).{js,mjs,cjs,ts,tsx,json,jsonc,css}": "biome check --write"
   }
 }
