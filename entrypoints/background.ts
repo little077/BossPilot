@@ -1,139 +1,79 @@
-import { captureCurrentPageStructure } from '@/lib/diagnostics/page-structure';
-import { recorder } from '@/lib/diagnostics/recorder';
-import { redact } from '@/lib/diagnostics/redaction';
-import { buildDiagnosticsReport, diagnosticsFileName } from '@/lib/diagnostics/report';
-import type { ChatMessage } from '@/lib/domain/chat';
-import { sanitizeGenerationError } from '@/lib/generation/errors';
-import { type ChatGenerationEvent, ChatGenerationManager } from '@/lib/generation/manager';
-import { createPiGenerationAdapter } from '@/lib/generation/pi-adapter';
-import { resolveActiveGenerationTarget } from '@/lib/generation/resolve';
+// ─── 后台 Service Worker：Port 服务端 + LangChain 流式调度 ───
+// 职责：承接侧边栏的流式对话请求，用 DeepSeek（经 LangChain）逐 token 回复；
+// 支持「停止生成」（AbortController）与断线重连回放；所有跨域模型调用收口在此
+// （扩展上下文 + host_permissions 才能绕过浏览器 CORS）。密钥只在本进程内存解密，绝不回传 UI。
+
+import { streamAnswer } from '@/lib/chat/model';
+import { listModels } from '@/lib/chat/models';
 import {
   AGENT_PORT_NAME,
   type ClientMessage,
   isClientMessage,
-  isProviderCommand,
-  type ProviderCommandResponse,
   type ServerMessage,
-} from '@/lib/ipc/protocol';
-import { CHAT_SYSTEM } from '@/lib/llm/prompts';
-import { orchestrator } from '@/lib/pipeline/orchestrator';
-import { ProviderService } from '@/lib/providers/service';
-import { createTrustedStorageGate } from '@/lib/storage/access';
-import { READ_CURRENT_JOB_TOOL, readCurrentJob } from '@/lib/tools/read-current-job';
-import { READ_VISIBLE_JOBS_TOOL, readVisibleJobs } from '@/lib/tools/read-visible-jobs';
+} from '@/lib/chat/protocol';
+import type { ChatMessage } from '@/lib/domain/chat';
+import { makeMessage } from '@/lib/domain/chat';
+import type { ModelConfigView } from '@/lib/domain/types';
+import {
+  registerKeepAliveHandler,
+  startStreamKeepAlive,
+  stopStreamKeepAlive,
+} from '@/lib/keepalive';
+import { getModelConfig, getModelConfigView, setModelConfig } from '@/lib/storage/secureStore';
 
-interface ActiveDiagnostic {
+interface ActiveGeneration {
   requestId: string;
-  messageCount: number;
-  promptChars: number;
-  /** 本轮发送的完整消息（含 system prompt），供诊断日志记录原文。 */
-  messages: Array<{ role: string; content: string }>;
-  startedAt: number;
-  targetResolved: boolean;
+  controller: AbortController;
+  message: ChatMessage;
 }
+
+const EMPTY_CONFIG_VIEW: ModelConfigView = {
+  baseUrl: '',
+  model: '',
+  hasApiKey: false,
+  apiKeyLastFour: '',
+};
 
 export default defineBackground({
   type: 'module',
   main() {
-    const requireTrustedStorage = createTrustedStorageGate();
     chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => void 0);
+    // MV3 保活：注册闹钟处理器，流式期间由 startStreamKeepAlive 挂起闹钟。
+    registerKeepAliveHandler();
 
-    const providerService = new ProviderService();
-    const chatPorts = new Set<chrome.runtime.Port>();
-    const diagnosticInputs = new Map<string, string>();
-    const latestUserText = (requestId: string) => diagnosticInputs.get(requestId) ?? '';
-    let activeDiagnostic: ActiveDiagnostic | null = null;
+    const ports = new Set<chrome.runtime.Port>();
+    let active: ActiveGeneration | null = null;
 
-    const generationManager = new ChatGenerationManager({
-      adapter: createPiGenerationAdapter(),
-      systemPrompt: CHAT_SYSTEM,
-      maxOutputTokens: 8_192,
-      tools: [READ_CURRENT_JOB_TOOL, READ_VISIBLE_JOBS_TOOL],
-      executeTool: async (call, signal) => {
-        recorder.step('chat', 'tool', `模型调用 ${call.name}`);
-        const result =
-          call.name === READ_VISIBLE_JOBS_TOOL.name
-            ? await readVisibleJobs(signal)
-            : await readCurrentJob(signal);
-        recorder.step('chat', result.isError ? 'error' : 'tool', result.statusText, result.detail);
-        return result;
-      },
-      resolveTarget: async () => {
-        await requireTrustedStorage();
-        const target = await resolveActiveGenerationTarget();
-        if (activeDiagnostic && !activeDiagnostic.targetResolved) {
-          activeDiagnostic.targetResolved = true;
-          recorder.beginRun('chat', latestUserText(activeDiagnostic.requestId), {
-            model: target.identity.modelId,
-            baseUrl: target.baseUrl,
-          });
-        }
-        return target;
-      },
-    });
-
-    generationManager.subscribe((event) => {
-      broadcast(chatPorts, generationEventToServerMessage(event));
-      finishDiagnostics(event);
-    });
-
-    chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
-      if (!isProviderCommand(raw) || !isTrustedExtensionPage(sender)) return;
-
-      void requireTrustedStorage()
-        .then(() => providerService.handle(raw))
-        .then(
-          (state) => {
-            sendResponse({ ok: true, state } satisfies ProviderCommandResponse);
-          },
-          (error: unknown) => {
-            const secret =
-              raw.type === 'providers:connect' || raw.type === 'providers:add-manual-model'
-                ? raw.apiKey
-                : '';
-            sendResponse({
-              ok: false,
-              error: publicOperationError(error, secret),
-            } satisfies ProviderCommandResponse);
-          },
-        );
-      return true;
-    });
+    const broadcast = (message: ServerMessage): void => {
+      for (const port of ports) safelyPost(port, message);
+    };
 
     chrome.runtime.onConnect.addListener((port) => {
       if (port.name !== AGENT_PORT_NAME || !isTrustedExtensionPage(port.sender)) return;
-      chatPorts.add(port);
-
-      const send = (message: ServerMessage) => safelyPost(port, message);
-      const offSnapshot = orchestrator.onSnapshot((snapshot) =>
-        send({ type: 'snapshot', snapshot }),
-      );
-      const offLog = orchestrator.onLog((level, text) => send({ type: 'log', level, text }));
+      ports.add(port);
 
       port.onMessage.addListener((raw: unknown) => {
         if (!isClientMessage(raw)) {
-          send({ type: 'error', text: '收到无法识别的扩展消息。' });
+          safelyPost(port, { type: 'error', text: '收到无法识别的扩展消息。' });
           return;
         }
-        void handleClientMessage(raw, send);
+        void handleClientMessage(raw, (message) => safelyPost(port, message));
       });
-
       port.onDisconnect.addListener(() => {
-        chatPorts.delete(port);
-        offSnapshot();
-        offLog();
+        ports.delete(port);
       });
 
-      send({ type: 'connected' });
-    });
-
-    chrome.runtime.onMessage.addListener((raw: unknown, sender) => {
-      if (
-        isRecord(raw) &&
-        raw.type === 'zhipin_captcha_detected' &&
-        isTrustedZhipinContentScript(sender)
-      ) {
-        orchestrator.notifyCaptchaFromContent();
+      safelyPost(port, { type: 'connected' });
+      // 断线重连回放：若后台仍在生成，先同步状态与当前全量快照。
+      if (active) {
+        safelyPost(port, { type: 'chat_state', running: true, requestId: active.requestId });
+        safelyPost(port, {
+          type: 'stream_update',
+          requestId: active.requestId,
+          message: cloneMessage(active.message),
+        });
+      } else {
+        safelyPost(port, { type: 'chat_state', running: false });
       }
     });
 
@@ -141,209 +81,185 @@ export default defineBackground({
       message: ClientMessage,
       send: (message: ServerMessage) => void,
     ): Promise<void> {
-      try {
-        switch (message.type) {
-          case 'subscribe': {
-            send({ type: 'snapshot', snapshot: orchestrator.getSnapshot() });
-            const chatSnapshot = generationManager.getSnapshot();
-            if (chatSnapshot) send(generationEventToServerMessage(chatSnapshot));
+      switch (message.type) {
+        case 'subscribe':
+          // 连接时已回放，无需额外处理。
+          break;
+        case 'chat':
+          await startChat(message.requestId, message.messages);
+          break;
+        case 'cancel':
+          if (active && active.requestId === message.requestId) active.controller.abort();
+          break;
+        case 'clear_chat':
+          active = null;
+          break;
+        case 'config:get': {
+          const config = (await getModelConfigView()) ?? EMPTY_CONFIG_VIEW;
+          send({ type: 'config_state', requestId: message.requestId, config });
+          break;
+        }
+        case 'config:set': {
+          const config = await setModelConfig({
+            baseUrl: message.baseUrl,
+            model: message.model,
+            apiKey: message.apiKey,
+          });
+          send({ type: 'config_state', requestId: message.requestId, config });
+          break;
+        }
+        case 'models:fetch': {
+          // 密钥留空时回退到已保存密钥，支持「已配置用户点一下刷新模型列表」。
+          const apiKey =
+            message.apiKey.length > 0 ? message.apiKey : ((await getModelConfig())?.apiKey ?? '');
+          if (!apiKey) {
             send({
-              type: 'chat_state',
-              running: generationManager.isRunning,
-              ...(generationManager.currentRequestId
-                ? { requestId: generationManager.currentRequestId }
-                : {}),
+              type: 'models_state',
+              requestId: message.requestId,
+              models: [],
+              error: '请先填写 API Key 后再获取模型。',
             });
             break;
           }
-          case 'chat':
-            await startChat(message.requestId, message.messages);
-            break;
-          case 'run_nl':
-            await orchestrator.runNaturalLanguage(message.text);
-            break;
-          case 'run_params':
-            await orchestrator.runWithParams(message.params);
-            break;
-          case 'parse_only': {
-            const params = await orchestrator.parseOnly(message.text);
-            send({ type: 'parsed', params });
-            break;
+          try {
+            const models = await listModels(message.baseUrl, apiKey);
+            send({ type: 'models_state', requestId: message.requestId, models });
+          } catch (error) {
+            // 失败文本可能夹带密钥（如某些 SDK 把 header 回显进错误），走脱敏后处理。
+            send({
+              type: 'models_state',
+              requestId: message.requestId,
+              models: [],
+              error: safeErrorMessage(error, apiKey),
+            });
           }
-          case 'cancel': {
-            if (message.scope !== 'task') {
-              const requestId = message.requestId ?? generationManager.currentRequestId;
-              if (requestId) generationManager.stop(requestId);
-            }
-            if (message.scope !== 'chat') orchestrator.cancel();
-            break;
-          }
-          case 'clear_chat':
-            generationManager.clearReplay();
-            if (!generationManager.isRunning) recorder.clear();
-            break;
-          case 'resume_captcha':
-            orchestrator.resumeCaptcha();
-            break;
-          case 'download_diagnostics':
-            await downloadDiagnostics();
-            break;
+          break;
         }
-      } catch (error) {
-        send({
-          type: 'error',
-          text: publicOperationError(error),
-          ...('requestId' in message ? { requestId: message.requestId } : {}),
-        });
       }
     }
 
-    async function startChat(requestId: string, history: ChatMessage[]): Promise<void> {
-      if (generationManager.isRunning) {
-        broadcast(chatPorts, {
+    async function startChat(requestId: string, messages: ChatMessage[]): Promise<void> {
+      if (active) {
+        broadcast({ type: 'error', requestId, text: '当前已有回复正在生成，请先停止后再重试。' });
+        return;
+      }
+
+      const config = await getModelConfig();
+      if (!config?.apiKey) {
+        broadcast({
           type: 'error',
           requestId,
-          text: '当前已有回复正在生成，请先停止后再重试。',
+          text: '尚未配置 DeepSeek 模型密钥，请先到「设置」页填写并保存。',
+        });
+        return;
+      }
+      // 密钥之外还必须选定模型：未选则引导回卡包完成「获取模型 → 选择」。
+      if (!config.model) {
+        broadcast({
+          type: 'error',
+          requestId,
+          text: '尚未选择模型，请到「设置」页获取并选择一个模型后再开始对话。',
         });
         return;
       }
 
-      const lastUser = [...history].reverse().find((message) => message.role === 'user');
-      diagnosticInputs.set(requestId, lastUser?.content ?? '');
-      activeDiagnostic = {
-        requestId,
-        messageCount: history.length + 1,
-        promptChars:
-          CHAT_SYSTEM.length +
-          history.reduce((total, message) => total + message.content.length, 0),
-        messages: [
-          { role: 'system', content: CHAT_SYSTEM },
-          ...history.map((message) => ({ role: message.role, content: message.content })),
-        ],
-        startedAt: Date.now(),
-        targetResolved: false,
-      };
+      const controller = new AbortController();
+      const message: ChatMessage = { ...makeMessage('assistant', ''), status: 'streaming' };
+      active = { requestId, controller, message };
+
+      broadcast({ type: 'stream_start', requestId, message: cloneMessage(message) });
+      startStreamKeepAlive();
+
+      // 逐 token 累积，按时间节流广播全量快照（终态由 stream_end 保证最新）。
+      const update = makeThrottle(() => {
+        if (active) {
+          broadcast({ type: 'stream_update', requestId, message: cloneMessage(active.message) });
+        }
+      }, 60);
 
       try {
-        await generationManager.start(requestId, history);
+        for await (const text of streamAnswer(config, messages, controller.signal)) {
+          if (!active) break;
+          active.message.content += text;
+          update.notify();
+        }
+        if (active) {
+          active.message.status = 'completed';
+          broadcast({ type: 'stream_end', requestId, message: cloneMessage(active.message) });
+        }
       } catch (error) {
-        activeDiagnostic = null;
-        // 解析阶段还没有 stream_start；重连窗口可能已通过 chat_state 绑定本 requestId，
-        // 因此必须广播失败，不能只通知最初发起请求的 Port。
-        broadcast(chatPorts, {
-          type: 'error',
-          requestId,
-          text: sanitizeGenerationError(error).message,
-        });
+        if (!active) return;
+        if (controller.signal.aborted) {
+          active.message.status = 'cancelled';
+          broadcast({ type: 'stream_end', requestId, message: cloneMessage(active.message) });
+        } else {
+          active.message.status = 'error';
+          active.message.error = true;
+          active.message.errorMessage = safeErrorMessage(error, config.apiKey);
+          broadcast({ type: 'stream_error', requestId, message: cloneMessage(active.message) });
+        }
       } finally {
-        diagnosticInputs.delete(requestId);
+        update.cancel();
+        stopStreamKeepAlive();
+        active = null;
       }
-    }
-
-    function finishDiagnostics(event: ChatGenerationEvent): void {
-      if (event.type !== 'end' && event.type !== 'error') return;
-      const diagnostic = activeDiagnostic;
-      if (!diagnostic || diagnostic.requestId !== event.requestId) return;
-
-      const usage = event.message.usage;
-      recorder.logLlm('chat', {
-        model: event.message.modelIdentity?.modelId ?? 'unknown',
-        purpose: '对话',
-        messageCount: diagnostic.messageCount,
-        promptChars: diagnostic.promptChars,
-        outputChars: event.message.content.length,
-        messages: diagnostic.messages,
-        outputText: event.message.content,
-        promptTokens: usage?.inputTokens,
-        completionTokens: usage?.outputTokens,
-        latencyMs: Date.now() - diagnostic.startedAt,
-      });
-
-      if (event.type === 'error') {
-        recorder.logError('chat', event.message.errorMessage ?? '模型请求失败。');
-        recorder.finishRun('chat', 'error');
-      } else if (event.message.status === 'cancelled') {
-        recorder.step('chat', 'note', '用户停止了本轮生成。');
-        recorder.finishRun('chat', 'cancelled');
-      } else {
-        recorder.finishRun('chat', 'completed');
-      }
-      activeDiagnostic = null;
-    }
-
-    async function downloadDiagnostics(): Promise<void> {
-      const pageStructure = await captureCurrentPageStructure();
-      const markdown = buildDiagnosticsReport(recorder.snapshotRuns(), pageStructure);
-      const dataUrl = `data:text/markdown;charset=utf-8;base64,${base64EncodeUtf8(markdown)}`;
-      await chrome.downloads.download({
-        url: dataUrl,
-        filename: diagnosticsFileName(),
-        saveAs: true,
-      });
     }
   },
 });
 
-function generationEventToServerMessage(event: ChatGenerationEvent): ServerMessage {
-  switch (event.type) {
-    case 'start':
-      return { type: 'stream_start', requestId: event.requestId, message: event.message };
-    case 'update':
-      return { type: 'stream_update', requestId: event.requestId, message: event.message };
-    case 'end':
-      return { type: 'stream_end', requestId: event.requestId, message: event.message };
-    case 'error':
-      return { type: 'stream_error', requestId: event.requestId, message: event.message };
-  }
-}
-
-function broadcast(ports: ReadonlySet<chrome.runtime.Port>, message: ServerMessage): void {
-  for (const port of ports) safelyPost(port, message);
+function cloneMessage(message: ChatMessage): ChatMessage {
+  return { ...message };
 }
 
 function safelyPost(port: chrome.runtime.Port, message: ServerMessage): void {
   try {
     port.postMessage(message);
   } catch {
-    // A disconnected port is removed by onDisconnect; another subscriber may still be active.
+    // 端口已断开时由 onDisconnect 移除，忽略单次投递失败。
   }
+}
+
+/** 节流器：leading + trailing，两次广播间隔至少 `ms`，避免 token 洪泛压垮 Port。 */
+function makeThrottle(fn: () => void, ms: number) {
+  let last = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const invoke = () => {
+    last = Date.now();
+    fn();
+  };
+  return {
+    notify(): void {
+      const elapsed = Date.now() - last;
+      if (elapsed >= ms) {
+        if (timer) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+        invoke();
+      } else if (!timer) {
+        timer = setTimeout(() => {
+          timer = undefined;
+          invoke();
+        }, ms - elapsed);
+      }
+    },
+    cancel(): void {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
+}
+
+/** 生成面向用户的错误文本，压缩空白并移除可能出现的密钥明文。 */
+function safeErrorMessage(error: unknown, apiKey: string): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const withoutKey = apiKey ? raw.split(apiKey).join('[REDACTED]') : raw;
+  return withoutKey.replace(/\s+/g, ' ').trim().slice(0, 300) || '模型请求失败，请稍后重试。';
 }
 
 function isTrustedExtensionPage(sender: chrome.runtime.MessageSender | undefined): boolean {
   if (!sender || sender.id !== chrome.runtime.id) return false;
   if (sender.url) return sender.url.startsWith(chrome.runtime.getURL(''));
-  // Chrome may omit `url` for a native side panel. In that case only a sender
-  // without a web tab is trusted; a content script always carries its tab.
+  // 原生侧边栏可能不带 url；此时仅接受无 web tab 的发送方。
   return !sender.tab;
-}
-
-function isTrustedZhipinContentScript(sender: chrome.runtime.MessageSender): boolean {
-  if (sender.id !== chrome.runtime.id || !sender.tab || !sender.url) return false;
-  try {
-    return new URL(sender.url).origin === 'https://www.zhipin.com';
-  } catch {
-    return false;
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function publicOperationError(error: unknown, secret = ''): string {
-  const rawMessage = error instanceof Error ? error.message : String(error);
-  const withoutExactSecret = secret ? rawMessage.split(secret).join('[REDACTED]') : rawMessage;
-  return (
-    redact(withoutExactSecret).replace(/\s+/g, ' ').trim().slice(0, 360) || '操作失败，请稍后重试。'
-  );
-}
-
-function base64EncodeUtf8(value: string): string {
-  const bytes = new TextEncoder().encode(value);
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
-  }
-  return btoa(binary);
 }

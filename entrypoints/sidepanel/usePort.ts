@@ -1,22 +1,15 @@
+// ─── Sidepanel ↔ Background 长连接 Hook ───
+// 维护流式对话状态机：连接/重连、发送、取消、断线回放，以及模型配置读写。
+// Port 既是流式通道，也是 MV3 后台保活信号，因此面板打开期间始终保持连接。
+
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { AGENT_PORT_NAME, type ClientMessage, type ServerMessage } from '@/lib/chat/protocol';
 import type { ChatMessage } from '@/lib/domain/chat';
 import { makeMessage } from '@/lib/domain/chat';
-import type { SearchTaskParams, TaskSnapshot } from '@/lib/domain/types';
-import { AGENT_PORT_NAME, type ClientMessage, type ServerMessage } from '@/lib/ipc/protocol';
+import type { ModelCatalogEntry, ModelConfigView } from '@/lib/domain/types';
 import { clearMessages, loadMessages, saveMessage } from '@/lib/storage/db';
 
-const EMPTY_SNAPSHOT: TaskSnapshot = {
-  taskId: '',
-  phase: 'idle',
-  statusText: '',
-  collected: 0,
-  assessed: 0,
-  jobs: [],
-};
-
-const RECONNECT_DELAY_MS = 500;
-const REPLACED_REQUEST_MESSAGE = '连接恢复后已切换到后台正在运行的另一轮请求，此回复已中断。';
-const DISCONNECTED_REQUEST_MESSAGE = '生成连接已中断，请重试。';
+const RECONNECT_DELAY_MS = 300;
 
 interface ActiveChat {
   requestId: string;
@@ -24,21 +17,22 @@ interface ActiveChat {
 }
 
 export function useAgentPort() {
-  const [snapshot, setSnapshot] = useState<TaskSnapshot>(EMPTY_SNAPSHOT);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatRunning, setChatRunning] = useState(false);
   const [ready, setReady] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [pendingParams, setPendingParams] = useState<SearchTaskParams | null>(null);
+  const [config, setConfig] = useState<ModelConfigView | null>(null);
+  // 模型目录拉取：一次性结果，不持久化（下次打开重新拉取），故留在 UI 内存态。
+  const [models, setModels] = useState<ModelCatalogEntry[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState('');
 
   const portRef = useRef<chrome.runtime.Port | null>(null);
   const messagesRef = useRef<ChatMessage[]>([]);
-  const activeChatRef = useRef<ActiveChat | null>(null);
-  const runningRef = useRef(false);
-  const awaitingChatSyncRef = useRef(false);
+  const activeRef = useRef<ActiveChat | null>(null);
+  const modelsRequestIdRef = useRef<string | null>(null);
 
   const setRunning = useCallback((value: boolean) => {
-    runningRef.current = value;
     setChatRunning(value);
   }, []);
 
@@ -59,6 +53,7 @@ export function useAgentPort() {
     });
   }, []);
 
+  // 冷启动回放历史。
   useEffect(() => {
     let disposed = false;
     void loadMessages()
@@ -78,35 +73,11 @@ export function useAgentPort() {
     let disposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
-    const interruptActiveAssistant = (active: ActiveChat, errorMessage: string): boolean => {
-      if (!active.messageId) return false;
-      const message = messagesRef.current.find(({ id }) => id === active.messageId);
-      if (message?.role !== 'assistant' || message.status !== 'streaming') return false;
-
-      const interrupted: ChatMessage = {
-        ...message,
-        error: true,
-        status: 'error',
-        errorMessage,
-      };
-      upsertMessage(interrupted);
-      void saveMessage(interrupted);
-      return true;
-    };
-
-    const handleStreamMessage = (requestId: string, message: ChatMessage, terminal: boolean) => {
-      const active = activeChatRef.current;
-      /*
-       * subscribe 后 Background 会先回放权威 stream snapshot，再发送 chat_state。
-       * 这个短窗口允许把本地断线前的旧 requestId 改绑到后台当前轮次；同步完成后
-       * 仍严格拒绝其它 requestId，避免多窗口的延迟事件篡改正在显示的回复。
-       */
-      if (active && active.requestId !== requestId && !awaitingChatSyncRef.current) return;
-      if (active && active.requestId !== requestId) {
-        interruptActiveAssistant(active, REPLACED_REQUEST_MESSAGE);
-      }
-
-      activeChatRef.current = terminal ? null : { requestId, messageId: message.id };
+    const handleStream = (requestId: string, message: ChatMessage, terminal: boolean) => {
+      const active = activeRef.current;
+      // 只接受当前轮次的事件，避免多窗口延迟事件覆盖正在显示的回复。
+      if (!active || active.requestId !== requestId) return;
+      activeRef.current = terminal ? null : { requestId, messageId: message.id };
       setRunning(!terminal);
       upsertMessage(message);
       if (terminal) void saveMessage(message);
@@ -116,98 +87,75 @@ export function useAgentPort() {
       if (disposed) return;
       const port = chrome.runtime.connect({ name: AGENT_PORT_NAME });
       portRef.current = port;
-      awaitingChatSyncRef.current = true;
 
       port.onMessage.addListener((message: ServerMessage) => {
         if (portRef.current !== port) return;
         switch (message.type) {
           case 'connected':
             port.postMessage({ type: 'subscribe' } satisfies ClientMessage);
+            port.postMessage({
+              type: 'config:get',
+              requestId: `cfg-${crypto.randomUUID()}`,
+            } satisfies ClientMessage);
             break;
-          case 'chat_state': {
-            if (message.running) {
-              setRunning(true);
-              if (message.requestId) {
-                const active = activeChatRef.current;
-                if (active && active.requestId !== message.requestId) {
-                  interruptActiveAssistant(active, REPLACED_REQUEST_MESSAGE);
-                }
-                activeChatRef.current = {
-                  requestId: message.requestId,
-                  ...(active?.requestId === message.requestId && active.messageId
-                    ? { messageId: active.messageId }
-                    : {}),
-                };
-              }
-              awaitingChatSyncRef.current = false;
-              setConnected(true);
-              break;
-            }
-
-            const interrupted = activeChatRef.current;
-            if (interrupted && runningRef.current) {
-              const finalized = interruptActiveAssistant(interrupted, DISCONNECTED_REQUEST_MESSAGE);
-              if (!finalized) {
-                const errorMessage: ChatMessage = {
-                  ...makeMessage('assistant', ''),
-                  error: true,
-                  status: 'error',
-                  errorMessage: DISCONNECTED_REQUEST_MESSAGE,
-                };
-                upsertMessage(errorMessage);
-                void saveMessage(errorMessage);
-              }
-            }
-            activeChatRef.current = null;
-            setRunning(false);
-            awaitingChatSyncRef.current = false;
+          case 'chat_state':
             setConnected(true);
-            break;
-          }
-          case 'snapshot':
-            setSnapshot(message.snapshot);
-            break;
-          case 'parsed':
-            setPendingParams(message.params);
+            if (message.running && message.requestId) {
+              setRunning(true);
+              if (activeRef.current?.requestId !== message.requestId) {
+                activeRef.current = { requestId: message.requestId };
+              }
+            } else {
+              activeRef.current = null;
+              setRunning(false);
+            }
             break;
           case 'stream_start':
           case 'stream_update':
-            handleStreamMessage(message.requestId, message.message, false);
+            handleStream(message.requestId, message.message, false);
             break;
           case 'stream_end':
           case 'stream_error':
-            handleStreamMessage(message.requestId, message.message, true);
+            handleStream(message.requestId, message.message, true);
+            break;
+          case 'config_state':
+            setConfig(message.config);
+            break;
+          case 'models_state':
+            // 只接受当前发起的那次拉取，避免重连回放或迟到的旧结果覆盖。
+            if (message.requestId !== modelsRequestIdRef.current) break;
+            modelsRequestIdRef.current = null;
+            setModels(message.models);
+            setModelsError(message.error ?? '');
+            setModelsLoading(false);
             break;
           case 'error': {
-            const active = activeChatRef.current;
+            const active = activeRef.current;
             if (message.requestId && (!active || message.requestId !== active.requestId)) break;
-            const finalized = active ? interruptActiveAssistant(active, message.text) : false;
-            activeChatRef.current = null;
+            activeRef.current = null;
             setRunning(false);
-            if (!finalized) {
-              const errorMessage: ChatMessage = {
-                ...makeMessage('assistant', ''),
-                error: true,
-                status: 'error',
-                errorMessage: message.text,
-              };
-              upsertMessage(errorMessage);
-              void saveMessage(errorMessage);
-            }
+            const errorMessage: ChatMessage = {
+              ...makeMessage('assistant', ''),
+              error: true,
+              status: 'error',
+              errorMessage: message.text,
+            };
+            upsertMessage(errorMessage);
+            void saveMessage(errorMessage);
             break;
           }
-          case 'log':
-            break;
         }
       });
 
       port.onDisconnect.addListener(() => {
         if (portRef.current !== port) return;
         portRef.current = null;
-        awaitingChatSyncRef.current = false;
         setConnected(false);
         if (!disposed) reconnectTimer = setTimeout(connect, RECONNECT_DELAY_MS);
       });
+
+      // 触发后台回放当前轮次状态。
+      setConnected(true);
     };
 
     connect();
@@ -234,20 +182,17 @@ export function useAgentPort() {
   const sendChat = useCallback(
     (text: string): boolean => {
       const trimmed = text.trim();
-      if (!trimmed || !ready || !connected || activeChatRef.current) return false;
+      if (!trimmed || !ready || !connected || activeRef.current) return false;
 
       const requestId = `chat-${crypto.randomUUID()}`;
       const userMessage = makeMessage('user', trimmed);
       const next = [...messagesRef.current, userMessage];
-      const wasAwaitingChatSync = awaitingChatSyncRef.current;
-      awaitingChatSyncRef.current = false;
-      activeChatRef.current = { requestId };
+      activeRef.current = { requestId };
       replaceMessages(next);
       setRunning(true);
 
       if (!send({ type: 'chat', requestId, messages: next })) {
-        awaitingChatSyncRef.current = wasAwaitingChatSync;
-        activeChatRef.current = null;
+        activeRef.current = null;
         replaceMessages(messagesRef.current.filter((message) => message.id !== userMessage.id));
         setRunning(false);
         return false;
@@ -260,34 +205,75 @@ export function useAgentPort() {
   );
 
   const cancelChat = useCallback(() => {
-    const requestId = activeChatRef.current?.requestId;
+    const requestId = activeRef.current?.requestId;
     if (!requestId) return;
-    send({ type: 'cancel', scope: 'chat', requestId });
-  }, [send]);
-
-  const downloadDiagnostics = useCallback(() => {
-    send({ type: 'download_diagnostics' });
+    send({ type: 'cancel', requestId });
   }, [send]);
 
   const clearChat = useCallback(() => {
-    if (activeChatRef.current) return;
+    if (activeRef.current) return;
     replaceMessages([]);
     send({ type: 'clear_chat' });
     void clearMessages();
   }, [replaceMessages, send]);
 
+  const saveConfig = useCallback(
+    (input: { baseUrl: string; model: string; apiKey: string }): boolean =>
+      send({ type: 'config:set', requestId: `cfg-${crypto.randomUUID()}`, ...input }),
+    [send],
+  );
+
+  /** 拉取厂商模型目录：apiKey 传空串则后台用已存密钥。结果经 models_state 回流。 */
+  const fetchModels = useCallback(
+    (input: { baseUrl: string; apiKey: string }): boolean => {
+      const requestId = `models-${crypto.randomUUID()}`;
+      modelsRequestIdRef.current = requestId;
+      setModelsLoading(true);
+      setModelsError('');
+      setModels([]);
+      const ok = send({
+        type: 'models:fetch',
+        requestId,
+        baseUrl: input.baseUrl,
+        apiKey: input.apiKey,
+      });
+      if (!ok) {
+        modelsRequestIdRef.current = null;
+        setModelsLoading(false);
+        setModelsError('后台连接已断开，无法获取模型。');
+      }
+      return ok;
+    },
+    [send],
+  );
+
+  /** 选定模型：以空 apiKey 落库（后台沿用已存密钥），只更新 model 字段。 */
+  const selectModel = useCallback(
+    (baseUrl: string, model: string): boolean =>
+      send({
+        type: 'config:set',
+        requestId: `cfg-${crypto.randomUUID()}`,
+        baseUrl,
+        model,
+        apiKey: '',
+      }),
+    [send],
+  );
+
   return {
-    snapshot,
     messages,
     chatRunning,
     ready,
     connected,
-    pendingParams,
-    setPendingParams,
-    send,
+    config,
+    models,
+    modelsLoading,
+    modelsError,
     sendChat,
     cancelChat,
-    downloadDiagnostics,
     clearChat,
+    saveConfig,
+    fetchModels,
+    selectModel,
   };
 }

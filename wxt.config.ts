@@ -1,40 +1,18 @@
-import { fileURLToPath } from 'node:url';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'wxt';
 
-function generationChunk(id: string): string | undefined {
-  const moduleId = id.replaceAll('\\', '/');
-  if (!moduleId.includes('/node_modules/')) return undefined;
-
-  if (moduleId.includes('/@earendil-works/pi-ai/')) return 'generation-pi';
-  if (
-    moduleId.includes('/@mistralai/mistralai/') ||
-    moduleId.includes('/@opentelemetry/') ||
-    moduleId.includes('/zod/') ||
-    moduleId.includes('/zod-to-json-schema/')
-  ) {
-    return 'generation-mistral';
-  }
-  if (moduleId.includes('/@google/genai/')) return 'generation-google';
-  if (moduleId.includes('/@anthropic-ai/sdk/')) return 'generation-anthropic';
-  if (moduleId.includes('/openai/') || moduleId.includes('/partial-json/')) {
-    return 'generation-openai';
-  }
-  return undefined;
-}
-
-// BossPilot 扩展配置。
-// 权限最小化原则：页面操作权限只收敛到 Boss 直聘域名，不申请 <all_urls>。
+// BossPilot（LangChain + DeepSeek 流式对话 Demo）扩展配置。
+// 权限最小化：模型调用只在 background 发生，host_permissions 收敛到 DeepSeek 端点。
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
   manifest: {
-    name: 'BossPilot — Boss直聘 AI 求职副驾',
-    description:
-      '在侧边栏用自然语言搜索岗位、批量采集 JD、语义过滤（排除外包等）并进行匹配度打分。BYOK，数据全本地。',
-    permissions: ['sidePanel', 'tabs', 'scripting', 'storage', 'downloads'],
-    host_permissions: ['https://www.zhipin.com/*'],
-    // 模型端点在用户点「开通」时按具体 origin 申请；不把模型全网权限设为常驻权限。
-    optional_host_permissions: ['https://*/*', 'http://*/*'],
+    name: 'BossPilot — LangChain × DeepSeek 流式对话',
+    description: '极简 LangChain + DeepSeek 流式对话副驾。BYOK，数据全本地。',
+    // alarms：MV3 后台流式保活；storage：配置与密钥存储。
+    permissions: ['sidePanel', 'storage', 'alarms'],
+    host_permissions: ['https://api.deepseek.com/*'],
+    // 若改用其它 OpenAI 兼容端点，用户可在扩展授权后按需申请。
+    optional_host_permissions: ['https://*/*'],
     action: {
       default_title: '打开 BossPilot 侧边栏',
     },
@@ -44,31 +22,10 @@ export default defineConfig({
     // 运行时兼容，做一次类型收窄即可。
     plugins: [tailwindcss() as never],
     build: {
-      chunkSizeWarningLimit: 850,
-      // Vite's preload helper touches `document`, which does not exist in a
-      // Manifest V3 service worker. Background generation is statically linked.
+      // LangChain 运行时较大，放宽单文件体积告警。
+      chunkSizeWarningLimit: 1024,
+      // MV3 Service Worker 里没有 document，禁用 Vite 预加载 helper。
       modulePreload: false,
     },
-    resolve: {
-      alias: {
-        'node:fs': fileURLToPath(new URL('./lib/shims/node-fs.ts', import.meta.url)),
-      },
-    },
   }),
-  hooks: {
-    'vite:build:extendConfig': (entrypoints, viteConfig) => {
-      if (!entrypoints.some((entrypoint) => entrypoint.type === 'background')) return;
-
-      viteConfig.build ??= {};
-      viteConfig.build.rollupOptions ??= {};
-      const output = viteConfig.build.rollupOptions.output;
-      const outputs = Array.isArray(output) ? output : [output ?? {}];
-      for (const item of outputs) {
-        // MV3 禁止 Service Worker 运行时 import()，所以协议实现必须静态链接；
-        // 这里只拆分静态 ESM chunk，控制单文件解析成本。
-        item.manualChunks = generationChunk;
-      }
-      viteConfig.build.rollupOptions.output = Array.isArray(output) ? outputs : outputs[0];
-    },
-  },
 });

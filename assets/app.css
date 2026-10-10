@@ -560,25 +560,6 @@ body {
   font-size: 9px;
 }
 
-.provider-notice {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  border: 1px solid var(--color-line);
-  border-radius: 10px;
-  background: var(--color-surface-soft);
-  padding: 7px 9px;
-  color: var(--color-ink-soft);
-  font-size: 9.5px;
-  line-height: 1.5;
-}
-
-.provider-notice svg {
-  flex: 0 0 auto;
-  margin-top: 1px;
-  color: var(--color-brand);
-}
-
 .provider-wallet {
   display: flex;
   flex-direction: column;
@@ -605,15 +586,16 @@ body {
   border-radius: 16px;
   background: var(--color-surface);
   box-shadow: 0 8px 24px rgb(24 45 62 / 6%);
+  /* 只做阴影/描边过渡，不做位移：悬停上浮会带来廉价抖动，靠更深的投影表达层级更自然。 */
   transition:
-    border-color 180ms ease,
-    box-shadow 180ms ease,
-    transform 180ms ease;
+    border-color 200ms ease,
+    box-shadow 240ms cubic-bezier(0.22, 0.82, 0.22, 1);
 }
 
 .provider-card:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 14px 32px rgb(24 45 62 / 9%);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--color-brand) 18%, transparent),
+    0 14px 34px rgb(24 45 62 / 12%);
 }
 
 .provider-card-active {
