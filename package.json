@@ -81,7 +81,7 @@
     "@types/node": "24.13.3",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@vitest/coverage-v8": "4.1.10",
+    "@vitest/coverage-v8": "4.1.11",
     "@wxt-dev/module-react": "1.2.2",
     "acorn": "8.18.0",
     "jsdom": "26.1.0",
@@ -90,7 +90,7 @@
     "simple-git-hooks": "2.13.1",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.2",
-    "vitest": "4.1.10",
+    "vitest": "4.1.11",
     "wxt": "0.21.2"
   },
   "simple-git-hooks": {
