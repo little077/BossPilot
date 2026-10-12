@@ -3,6 +3,7 @@
 // 仅本地存储，无云同步、无遥测。
 
 import Dexie, { type Table } from 'dexie';
+import type { ArtifactRecord } from '@/lib/artifacts/store';
 import type { ChatMessage } from '@/lib/domain/chat';
 
 /** 加密后的模型配置；encApiKey 是 AES-GCM 密文，绝不含明文密钥。 */
@@ -16,6 +17,7 @@ export interface SecureConfigRow {
 class BossPilotDb extends Dexie {
   messages!: Table<ChatMessage, string>;
   secure!: Table<SecureConfigRow, string>;
+  artifacts!: Table<ArtifactRecord, string>;
 
   constructor() {
     super('bosspilot');
@@ -23,6 +25,8 @@ class BossPilotDb extends Dexie {
     this.version(1).stores({ messages: 'id, createdAt' });
     // v2：新增加密配置表（单行）。
     this.version(2).stores({ secure: 'id' });
+    // v3：新增工件（Artifact）表，主键 id，按 createdAt 建索引供超限淘汰最旧。
+    this.version(3).stores({ artifacts: 'id, createdAt' });
   }
 }
 

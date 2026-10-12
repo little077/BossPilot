@@ -1,14 +1,65 @@
 // ─── 对话视图 ───
-// 消息列表 + 输入框 + 流式光标 + 停止生成按钮 + 错误提示。纯展示，状态来自 useAgentPort。
+// 消息列表 + 输入框 + 流式光标 + 停止生成按钮 + 工具卡片 + 错误提示。
+// 纯展示，状态来自 useAgentPort。
 
-import { Loader2 } from 'lucide-react';
+import { AlertTriangle, Check, Loader2 } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import type { ChatMessage } from '@/lib/domain/chat';
+import type { ChatMessage, ToolCallView } from '@/lib/domain/chat';
 import { Composer } from './Composer';
 
 const MARKDOWN_PLUGINS = [remarkGfm];
+
+/** 工具名 → 中文展示名（未收录的工具名原样展示）。 */
+const TOOL_LABELS: Record<string, string> = {
+  read_current_page: '读取当前页面',
+  read_artifact: '取回工件全文',
+};
+
+/** 工具卡片：同一容器三态渲染——执行中（转圈）/ 成功（勾选 + 摘要）/ 失败（警示 + 摘要 + 错误码）。 */
+function ToolCallCard({ toolCall }: { toolCall: ToolCallView }) {
+  const label = TOOL_LABELS[toolCall.name] ?? toolCall.name;
+  return (
+    <div
+      role="status"
+      className="mb-1.5 flex items-center gap-1.5 rounded-lg border border-line-strong bg-app px-2 py-1.5 text-[10px] leading-4"
+    >
+      {toolCall.status === 'running' ? (
+        <>
+          <Loader2 size={12} className="shrink-0 animate-spin text-brand" aria-hidden />
+          <span className="text-ink-soft">正在{label}…</span>
+        </>
+      ) : toolCall.status === 'success' ? (
+        <>
+          <Check size={12} className="shrink-0 text-success" aria-hidden />
+          <span className="text-ink-soft">{toolCall.summary ?? `${label}完成`}</span>
+          {/* 工件短编号：告知用户全文去了哪，无浏览/下载 UI（阶段 2 边界）。 */}
+          {toolCall.artifactId ? (
+            <span
+              className="shrink-0 rounded border border-line-strong px-1 py-px font-mono text-ink-faint"
+              title={`工件编号 ${toolCall.artifactId}`}
+            >
+              #{toolCall.artifactId.slice(0, 8)}
+            </span>
+          ) : null}
+        </>
+      ) : (
+        <>
+          <AlertTriangle size={12} className="shrink-0 text-danger" aria-hidden />
+          <span className="min-w-0 flex-1 text-danger">
+            {toolCall.summary ?? `${label}失败，请重试。`}
+          </span>
+          {toolCall.errorCode ? (
+            <span className="shrink-0 rounded border border-danger/30 px-1 py-px font-mono text-danger">
+              {toolCall.errorCode}
+            </span>
+          ) : null}
+        </>
+      )}
+    </div>
+  );
+}
 
 interface ChatProps {
   messages: ChatMessage[];
@@ -57,7 +108,8 @@ export function Chat({ messages, running, connected, onSend, onCancel }: ChatPro
                     : 'border-line bg-surface text-ink'
                 }`}
               >
-                {streaming && !message.content ? (
+                {message.toolCall ? <ToolCallCard toolCall={message.toolCall} /> : null}
+                {streaming && !message.content && !message.toolCall ? (
                   <span className="flex items-center gap-1.5 text-ink-faint">
                     <Loader2 size={12} className="animate-spin text-brand" />
                     正在思考…

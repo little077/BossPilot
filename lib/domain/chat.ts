@@ -15,6 +15,21 @@ export interface ChatMessage {
   status?: 'streaming' | 'completed' | 'cancelled' | 'error';
   /** 错误说明与已生成正文分开保存，避免错误覆盖部分回复。 */
   errorMessage?: string;
+  /** 本轮回复中的工具调用展示记录（若有）。 */
+  toolCall?: ToolCallView;
+}
+
+/** 工具卡片展示记录：只保留摘要，完整工具结果不进入会话历史（重放安全）。 */
+export interface ToolCallView {
+  /** 工具名（如 read_current_page）。 */
+  name: string;
+  status: 'running' | 'success' | 'error';
+  /** 一句话结果摘要（成功：读到了什么；失败：人话错误说明）。 */
+  summary?: string;
+  /** 稳定错误码（失败时）。 */
+  errorCode?: string;
+  /** 成功结果落地后的工件编号（UI 展示短编号，全文在档案柜不在消息里）。 */
+  artifactId?: string;
 }
 
 /** 生成一条消息（补齐 id/createdAt）。 */

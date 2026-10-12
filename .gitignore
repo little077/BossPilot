@@ -11,6 +11,8 @@ stats-*.json
 # ─── 环境与本地配置 ───
 .env
 .env.*
+# 示例文件入库存档（不含真实密钥），实际密钥放 .env / .env.local
+!.env.example
 *.local
 web-ext.config.ts
 

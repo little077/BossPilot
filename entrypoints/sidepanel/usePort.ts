@@ -3,6 +3,7 @@
 // Port 既是流式通道，也是 MV3 后台保活信号，因此面板打开期间始终保持连接。
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { clearArtifacts } from '@/lib/artifacts/store';
 import { AGENT_PORT_NAME, type ClientMessage, type ServerMessage } from '@/lib/chat/protocol';
 import type { ChatMessage } from '@/lib/domain/chat';
 import { makeMessage } from '@/lib/domain/chat';
@@ -215,6 +216,8 @@ export function useAgentPort() {
     replaceMessages([]);
     send({ type: 'clear_chat' });
     void clearMessages();
+    // 历史消息没了，引用它们的全量工件就成了无主孤本：同步清档案柜，避免白占存储。
+    void clearArtifacts();
   }, [replaceMessages, send]);
 
   const saveConfig = useCallback(

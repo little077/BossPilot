@@ -4,7 +4,9 @@
 
 import { Bot, Loader2, MessageSquare, Settings } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { getDevAccess } from '@/lib/dev/access';
 import { Chat } from './Chat';
+import { DevDock } from './DevDock';
 import { SettingsView } from './SettingsView';
 import { useAgentPort } from './usePort';
 
@@ -108,6 +110,11 @@ export default function App() {
           />
         )}
       </main>
+
+      {/* DEV 专用悬浮球：一键应用 .env 调试配置；生产构建此块被摇树移除。 */}
+      {import.meta.env.DEV ? (
+        <DevDock access={getDevAccess()} onApply={saveConfig} onApplied={() => setTab('chat')} />
+      ) : null}
     </div>
   );
 }

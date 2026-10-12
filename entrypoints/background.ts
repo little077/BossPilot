@@ -1,9 +1,10 @@
-// ─── 后台 Service Worker：Port 服务端 + LangChain 流式调度 ───
-// 职责：承接侧边栏的流式对话请求，用 DeepSeek（经 LangChain）逐 token 回复；
+// ─── 后台 Service Worker：Port 服务端 + LangChain 流式调度 + 一来一回工具调用 ───
+// 职责：承接侧边栏的流式对话请求，用模型（经 LangChain，默认 DeepSeek 端点）逐 token 回复；
 // 支持「停止生成」（AbortController）与断线重连回放；所有跨域模型调用收口在此
 // （扩展上下文 + host_permissions 才能绕过浏览器 CORS）。密钥只在本进程内存解密，绝不回传 UI。
+// 工具调用采用「一来一回」：生成①带工具 → 确定性执行 → 生成②带工具结果总结。
 
-import { streamAnswer } from '@/lib/chat/model';
+import { type ParsedToolCall, streamFollowUp, streamToolTurn } from '@/lib/chat/model';
 import { listModels } from '@/lib/chat/models';
 import {
   AGENT_PORT_NAME,
@@ -13,13 +14,15 @@ import {
 } from '@/lib/chat/protocol';
 import type { ChatMessage } from '@/lib/domain/chat';
 import { makeMessage } from '@/lib/domain/chat';
-import type { ModelConfigView } from '@/lib/domain/types';
+import type { ModelConfig, ModelConfigView } from '@/lib/domain/types';
 import {
   registerKeepAliveHandler,
   startStreamKeepAlive,
   stopStreamKeepAlive,
 } from '@/lib/keepalive';
 import { getModelConfig, getModelConfigView, setModelConfig } from '@/lib/storage/secureStore';
+import { executeTool, hasTool, toBindableToolDefinitions } from '@/lib/tools/registry';
+import { type ToolResult, toolError } from '@/lib/tools/types';
 
 interface ActiveGeneration {
   requestId: string;
@@ -176,13 +179,53 @@ export default defineBackground({
           broadcast({ type: 'stream_update', requestId, message: cloneMessage(active.message) });
         }
       }, 60);
+      // 工具卡片状态切换等关键节点不走节流，立即广播。
+      const publish = (): void => {
+        if (active) {
+          broadcast({ type: 'stream_update', requestId, message: cloneMessage(active.message) });
+        }
+      };
 
       try {
-        for await (const text of streamAnswer(config, messages, controller.signal)) {
+        // 生成①：带工具流式生成；模型决定调用工具时在流末尾产出 tool_call（只取第一个）。
+        let call: ParsedToolCall | null = null;
+        let invalidCallName: string | null = null;
+        for await (const event of streamToolTurn(
+          config,
+          messages,
+          toBindableToolDefinitions(),
+          controller.signal,
+        )) {
           if (!active) break;
-          active.message.content += text;
-          update.notify();
+          if (event.type === 'text') {
+            active.message.content += event.text;
+            update.notify();
+          } else if (event.type === 'tool_call') {
+            call = event.call;
+          } else {
+            invalidCallName = event.name || '未知工具';
+          }
         }
+
+        // 模型产出了无法执行的工具调用：如实报错，不猜参数、不继续生成。
+        if (active && invalidCallName !== null) {
+          active.message.toolCall = {
+            name: invalidCallName,
+            status: 'error',
+            summary: '模型生成的工具调用无法解析，请重试。',
+            errorCode: 'invalid_arguments',
+          };
+          active.message.status = 'error';
+          active.message.error = true;
+          active.message.errorMessage = '模型生成的工具调用无法解析，请重试。';
+          broadcast({ type: 'stream_error', requestId, message: cloneMessage(active.message) });
+          return;
+        }
+
+        if (active && call) {
+          await executeToolRound(config, messages, call, controller, publish, update);
+        }
+
         if (active) {
           active.message.status = 'completed';
           broadcast({ type: 'stream_end', requestId, message: cloneMessage(active.message) });
@@ -204,8 +247,77 @@ export default defineBackground({
         active = null;
       }
     }
+
+    /** 工具执行 + 生成②：卡片置「执行中」→ 门禁 → 确定性执行 → 卡片置终态 → 不带工具总结。 */
+    async function executeToolRound(
+      config: ModelConfig,
+      messages: ChatMessage[],
+      call: ParsedToolCall,
+      controller: AbortController,
+      publish: () => void,
+      update: { notify: () => void },
+    ): Promise<void> {
+      if (!active) return;
+      active.message.toolCall = { name: call.name, status: 'running' };
+      publish();
+
+      const startedAt = Date.now();
+      let result: ToolResult;
+      if (beforeToolCall(call)) {
+        result = await executeTool(call.name, call.args, { signal: controller.signal });
+      } else {
+        result = toolError(
+          'unknown_tool',
+          `不支持的工具：${call.name}`,
+          `[工具调用被拦截] 错误码：unknown_tool，工具名：${call.name}。请如实告知用户当前版本不支持该操作。`,
+        );
+      }
+      console.debug(
+        `[tools] ${call.name} ${result.isError ? `失败(${result.errorCode})` : '成功'} ${Date.now() - startedAt}ms`,
+      );
+
+      if (!active) return;
+      active.message.toolCall = result.isError
+        ? {
+            name: call.name,
+            status: 'error',
+            summary: result.summary,
+            errorCode: result.errorCode,
+          }
+        : {
+            name: call.name,
+            status: 'success',
+            summary: result.summary,
+            artifactId: result.artifactId,
+          };
+      publish();
+
+      // 工具阶段被取消：交给外层 catch 走「已停止」终态。
+      controller.signal.throwIfAborted();
+
+      // 生成②：把「工具调用 + 工具结果」作为往返消息追加，不再绑定工具。
+      for await (const text of streamFollowUp(
+        config,
+        messages,
+        call,
+        result.llmText,
+        controller.signal,
+      )) {
+        if (!active) break;
+        active.message.content += text;
+        update.notify();
+      }
+    }
   },
 });
+
+/**
+ * 工具执行门禁：v1 注册表内全部是只读工具，直接放行；点位必须保留——
+ * 未来任何写类工具（点击/填表/发送）必须先在此接入用户确认，不得绕过。
+ */
+function beforeToolCall(call: ParsedToolCall): boolean {
+  return hasTool(call.name);
+}
 
 function cloneMessage(message: ChatMessage): ChatMessage {
   return { ...message };

@@ -93,7 +93,11 @@ export function isClientMessage(value: unknown): value is ClientMessage {
       return (
         isBoundedString(value.requestId, 128) &&
         isBoundedString(value.baseUrl, 2_048) &&
-        isBoundedString(value.model, 256) &&
+        // model 允许为空串：首次「保存密钥 → 拉模型目录 → 再选模型」的闭环里，
+        // 用户点「开通并获取模型」时还没选定任何模型，此时先落库密钥，空 model 是
+        // 合法中间态。若按非空校验会把这条消息判为非法，导致密钥存不进去。
+        typeof value.model === 'string' &&
+        value.model.length <= 256 &&
         typeof value.apiKey === 'string' &&
         value.apiKey.length <= 16_384
       );
@@ -110,7 +114,19 @@ function isChatMessage(value: unknown): value is ChatMessage {
     typeof value.content === 'string' &&
     value.content.length <= MAX_MESSAGE_CHARS &&
     typeof value.createdAt === 'number' &&
-    Number.isFinite(value.createdAt)
+    Number.isFinite(value.createdAt) &&
+    (value.toolCall === undefined || isToolCallView(value.toolCall))
+  );
+}
+
+/** 工具卡片展示记录：随 assistant 消息持久化后，重发历史时必须仍能通过校验。 */
+function isToolCallView(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isBoundedString(value.name, 128) &&
+    (value.status === 'running' || value.status === 'success' || value.status === 'error') &&
+    (value.summary === undefined || isBoundedString(value.summary, 512)) &&
+    (value.errorCode === undefined || isBoundedString(value.errorCode, 64))
   );
 }
 
