@@ -24,7 +24,7 @@
 | 感知 Perceive | 读取页面/标签页/网络等外部真实数据 | 已有第一个只读工具（读当前页） |
 | 推理 Reason | 让模型基于真实数据决定下一步 | 已有流式对话 |
 | 行动 Act | 对页面产生副作用（点击/填写/导航） | 尚未开始 |
-| 观察 Observe | 把行动结果回灌给模型形成下一轮决策 | 部分（一来一回，未成环） |
+| 观察 Observe | 把行动结果回灌给模型形成下一轮决策 | 已成环（有界 model–tool 循环，阶段 3） |
 
 **贯穿生命周期**：取消、断线重连、后台被杀后恢复、成本与轮次的预算控制。
 
@@ -140,7 +140,9 @@ entrypoints（浏览器各上下文入口） → components / hooks（界面与�
 
 ---
 
-### 阶段 3 · 有界工具循环 + 上下文管理 + 最薄观测
+### 阶段 3 · 有界工具循环 + 上下文管理 + 最薄观测 —— 已完成
+
+> **落地决策记录**（实现时与用户对齐后确定）：循环采用**手写有界 while**（LangGraph 方案否决：新依赖 + MV3 SW 适配错位 + 调试黑盒），核心收口于 `lib/agent/loop.ts` 的依赖注入运行器 `runBoundedAgentLoop`，后台只做「组装依赖 + 逐事件映射 + 前后挂压缩/异常终态」的胶水。**压缩用方案 A 分层**：源②循环内步进老化（第 5 步起撤最早步骤预览留工件引用，零 LLM 成本）+ 源①高水位 LLM 结构化摘要（`lib/agent/compaction.ts`，低频批量，摘要+截断下标落 Dexie `compact` 表单行复用不重算）；不用供应商托管 compaction API（BYOK 多端点不可依赖），不引入 SummarizationMiddleware（寄生 LangGraph runtime）。**trace 与循环同期**，最薄=记录+复制，集成到循环入口；结束原因五枚举（completed/max_turns/budget_exceeded/cancelled/error）与真实代码分支一一对应，写入只后台、环形 100 淘最旧、预览必须复用 `lib/diagnostics/redaction.ts` 的 `sanitizeForLog`、token 拿不到实测记「未上报」绝不冒充实测。参数硬编码于确定性代码：MAX_TURNS=8、TOKEN_BUDGET=50000/条用户消息、COMPACT_WATERLINE=24000、KEEP_RECENT=4、老化保留最近 2 步、reactive 硬裁保留最近 2 条重试 1 次。`compactEnabled` 贯通 ModelConfig→secureStore→config 协议→SettingsView 开关（默认可关可见）；触顶/超预算后追加一次「不带工具的收尾调用」保证用户拿到可读交代。
 
 **要解决的问题**：把 Agent 从"问一句答一句、最多调一次工具"升级为"能为一个目标连续多步推进"。
 

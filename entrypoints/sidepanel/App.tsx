@@ -31,6 +31,8 @@ export default function App() {
     saveConfig,
     fetchModels,
     selectModel,
+    fetchTrace,
+    setCompactEnabled,
   } = useAgentPort();
   const [tab, setTab] = useState<Tab>('chat');
   // 引导只发生一次：待配置快照从后台回来后，若「有密钥但没选模型」或完全未配置，
@@ -107,13 +109,19 @@ export default function App() {
             onSave={saveConfig}
             onFetchModels={fetchModels}
             onSelectModel={selectModel}
+            onToggleCompact={setCompactEnabled}
           />
         )}
       </main>
 
       {/* DEV 专用悬浮球：一键应用 .env 调试配置；生产构建此块被摇树移除。 */}
       {import.meta.env.DEV ? (
-        <DevDock access={getDevAccess()} onApply={saveConfig} onApplied={() => setTab('chat')} />
+        <DevDock
+          access={getDevAccess()}
+          onApply={saveConfig}
+          onApplied={() => setTab('chat')}
+          getTrace={fetchTrace}
+        />
       ) : null}
     </div>
   );

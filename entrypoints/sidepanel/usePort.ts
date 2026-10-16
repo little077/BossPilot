@@ -5,6 +5,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { clearArtifacts } from '@/lib/artifacts/store';
 import { AGENT_PORT_NAME, type ClientMessage, type ServerMessage } from '@/lib/chat/protocol';
+import type { TurnTrace } from '@/lib/diagnostics/trace';
+import { clearTraces } from '@/lib/diagnostics/trace';
 import type { ChatMessage } from '@/lib/domain/chat';
 import { makeMessage } from '@/lib/domain/chat';
 import type { ModelCatalogEntry, ModelConfigView } from '@/lib/domain/types';
@@ -32,6 +34,9 @@ export function useAgentPort() {
   const messagesRef = useRef<ChatMessage[]>([]);
   const activeRef = useRef<ActiveChat | null>(null);
   const modelsRequestIdRef = useRef<string | null>(null);
+  // trace 只读请求：一次性 Promise，按 requestId 配对 trace_state 回流（不持久化）。
+  const traceRequestIdRef = useRef<string | null>(null);
+  const traceResolverRef = useRef<((trace: TurnTrace | null) => void) | null>(null);
 
   const setRunning = useCallback((value: boolean) => {
     setChatRunning(value);
@@ -130,6 +135,13 @@ export function useAgentPort() {
             setModelsError(message.error ?? '');
             setModelsLoading(false);
             break;
+          case 'trace_state':
+            // 只接受当前发起的那次 trace 请求，交给挂起的 Promise resolve。
+            if (message.requestId !== traceRequestIdRef.current) break;
+            traceRequestIdRef.current = null;
+            traceResolverRef.current?.(message.trace);
+            traceResolverRef.current = null;
+            break;
           case 'error': {
             const active = activeRef.current;
             if (message.requestId && (!active || message.requestId !== active.requestId)) break;
@@ -216,13 +228,18 @@ export function useAgentPort() {
     replaceMessages([]);
     send({ type: 'clear_chat' });
     void clearMessages();
-    // 历史消息没了，引用它们的全量工件就成了无主孤本：同步清档案柜，避免白占存储。
+    // 历史消息没了，引用它们的全量工件与逐轮轨迹就成了无主孤本：同步清档，避免白占存储。
     void clearArtifacts();
+    void clearTraces();
   }, [replaceMessages, send]);
 
   const saveConfig = useCallback(
-    (input: { baseUrl: string; model: string; apiKey: string }): boolean =>
-      send({ type: 'config:set', requestId: `cfg-${crypto.randomUUID()}`, ...input }),
+    (input: {
+      baseUrl: string;
+      model: string;
+      apiKey: string;
+      compactEnabled?: boolean;
+    }): boolean => send({ type: 'config:set', requestId: `cfg-${crypto.randomUUID()}`, ...input }),
     [send],
   );
 
@@ -263,6 +280,37 @@ export function useAgentPort() {
     [send],
   );
 
+  /**
+   * 只读拉取最近一轮轨迹（阶段 3 最薄观测）。后台断开或无记录时 resolve(null)；
+   * 界面侧绝不写 trace（写入只在后台 loop 结束路径发生）。
+   */
+  const fetchTrace = useCallback((): Promise<TurnTrace | null> => {
+    const requestId = `trace-${crypto.randomUUID()}`;
+    return new Promise((resolve) => {
+      traceRequestIdRef.current = requestId;
+      traceResolverRef.current = resolve;
+      if (!send({ type: 'trace:latest', requestId })) {
+        traceRequestIdRef.current = null;
+        traceResolverRef.current = null;
+        resolve(null);
+      }
+    });
+  }, [send]);
+
+  /** 切换长会话自动压缩开关：以空 apiKey 落库（沿用已存密钥），只改开关位。 */
+  const setCompactEnabled = useCallback(
+    (enabled: boolean): boolean =>
+      send({
+        type: 'config:set',
+        requestId: `cfg-${crypto.randomUUID()}`,
+        baseUrl: config?.baseUrl ?? '',
+        model: config?.model ?? '',
+        apiKey: '',
+        compactEnabled: enabled,
+      }),
+    [config, send],
+  );
+
   return {
     messages,
     chatRunning,
@@ -278,5 +326,7 @@ export function useAgentPort() {
     saveConfig,
     fetchModels,
     selectModel,
+    fetchTrace,
+    setCompactEnabled,
   };
 }

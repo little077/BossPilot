@@ -3,6 +3,7 @@
 // 采用长连接 Port（chrome.runtime.connect）：既是流式通道，也是 MV3
 // Service Worker 的保活信号（活跃 Port 会不断重置后台的空闲计时器）。
 
+import type { TurnTrace } from '@/lib/diagnostics/trace';
 import type { ChatMessage } from '@/lib/domain/chat';
 import type { ModelCatalogEntry, ModelConfigView } from '@/lib/domain/types';
 
@@ -22,12 +23,25 @@ export type ClientMessage =
   /** 读取脱敏配置快照。 */
   | { type: 'config:get'; requestId: string }
   /** 保存模型配置（含明文密钥，仅在扩展内传输，落库前加密）。 */
-  | { type: 'config:set'; requestId: string; baseUrl: string; model: string; apiKey: string }
+  | {
+      type: 'config:set';
+      requestId: string;
+      baseUrl: string;
+      model: string;
+      apiKey: string;
+      /** 长会话自动压缩开关；缺省时后台沿用既有值。 */
+      compactEnabled?: boolean;
+    }
   /**
    * 拉取厂商模型目录（对齐主分支「领卡→开通→拉目录→选模型」）。
    * apiKey 传空串时后台回退到已保存密钥（UX：已配置用户只点一下即可刷新列表）。
    */
-  | { type: 'models:fetch'; requestId: string; baseUrl: string; apiKey: string };
+  | { type: 'models:fetch'; requestId: string; baseUrl: string; apiKey: string }
+  /**
+   * 请求最近一轮结构化轨迹（最薄观测）：界面只读，后台读 latestTrace 后经
+   * trace_state 回传；写入仍只发生在后台，界面永不调 putTrace。
+   */
+  | { type: 'trace:latest'; requestId: string };
 
 // ─── Background → Client ───
 
@@ -50,12 +64,16 @@ export type ServerMessage =
    * 以免与生成流的 error 通道混用、被误当成一条对话错误消息。
    */
   | { type: 'models_state'; requestId: string; models: ModelCatalogEntry[]; error?: string }
+  /** trace:latest 的结果：最近一轮轨迹；无记录时为 null（UI 据此提示「暂无」）。 */
+  | { type: 'trace_state'; requestId: string; trace: TurnTrace | null }
   /** 出错。 */
   | { type: 'error'; text: string; requestId?: string };
 
 const MAX_CHAT_MESSAGES = 200;
 const MAX_MESSAGE_CHARS = 100_000;
 const MAX_CHAT_CHARS = 500_000;
+// 单条 assistant 消息里循环工具卡片的上限：与循环最大轮次同源（不超循环能产生的数量）。
+const MAX_TOOL_CARDS = 8;
 
 export function isClientMessage(value: unknown): value is ClientMessage {
   if (!isRecord(value) || typeof value.type !== 'string') return false;
@@ -89,6 +107,8 @@ export function isClientMessage(value: unknown): value is ClientMessage {
         typeof value.apiKey === 'string' &&
         value.apiKey.length <= 16_384
       );
+    case 'trace:latest':
+      return isBoundedString(value.requestId, 128);
     case 'config:set':
       return (
         isBoundedString(value.requestId, 128) &&
@@ -99,7 +119,9 @@ export function isClientMessage(value: unknown): value is ClientMessage {
         typeof value.model === 'string' &&
         value.model.length <= 256 &&
         typeof value.apiKey === 'string' &&
-        value.apiKey.length <= 16_384
+        value.apiKey.length <= 16_384 &&
+        // compactEnabled 可缺省（沿用既有值）；出现时必须是布尔。
+        (value.compactEnabled === undefined || typeof value.compactEnabled === 'boolean')
       );
     default:
       return false;
@@ -115,7 +137,15 @@ function isChatMessage(value: unknown): value is ChatMessage {
     value.content.length <= MAX_MESSAGE_CHARS &&
     typeof value.createdAt === 'number' &&
     Number.isFinite(value.createdAt) &&
-    (value.toolCall === undefined || isToolCallView(value.toolCall))
+    (value.toolCall === undefined || isToolCallView(value.toolCall)) &&
+    (value.toolCalls === undefined ||
+      (Array.isArray(value.toolCalls) &&
+        value.toolCalls.length <= MAX_TOOL_CARDS &&
+        value.toolCalls.every(isToolCallView))) &&
+    (value.compacted === undefined ||
+      (isRecord(value.compacted) &&
+        typeof value.compacted.rounds === 'number' &&
+        Number.isFinite(value.compacted.rounds)))
   );
 }
 
@@ -124,6 +154,7 @@ function isToolCallView(value: unknown): boolean {
   return (
     isRecord(value) &&
     isBoundedString(value.name, 128) &&
+    (value.id === undefined || isBoundedString(value.id, 128)) &&
     (value.status === 'running' || value.status === 'success' || value.status === 'error') &&
     (value.summary === undefined || isBoundedString(value.summary, 512)) &&
     (value.errorCode === undefined || isBoundedString(value.errorCode, 64))

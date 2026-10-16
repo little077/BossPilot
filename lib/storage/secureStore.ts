@@ -24,7 +24,13 @@ export async function getModelConfig(): Promise<ModelConfig | null> {
   if (!row) return null;
   const key = await getEncryptionKey();
   const apiKey = await decryptString(row.encApiKey, key);
-  return { baseUrl: row.baseUrl, model: row.model, apiKey };
+  // compactEnabled 旧行可能为空：统一收敛为布尔，缺省保持默认开启。
+  return {
+    baseUrl: row.baseUrl,
+    model: row.model,
+    apiKey,
+    compactEnabled: row.compactEnabled ?? true,
+  };
 }
 
 /** 加密并保存配置；apiKey 为空串时保留原有密钥（UX：留空表示不修改）。 */
@@ -32,6 +38,7 @@ export async function setModelConfig(input: {
   baseUrl: string;
   model: string;
   apiKey: string;
+  compactEnabled?: boolean;
 }): Promise<ModelConfigView> {
   const key = await getEncryptionKey();
   const existing = await db.secure.get('config');
@@ -41,9 +48,17 @@ export async function setModelConfig(input: {
       : existing
         ? await decryptString(existing.encApiKey, key)
         : '';
+  // compactEnabled 未显式传入时沿用既有值（缺省 true）：支持「只改密钥不换开关」。
+  const compactEnabled = input.compactEnabled ?? existing?.compactEnabled ?? true;
   const encApiKey = await encryptString(apiKey, key);
-  await db.secure.put({ id: 'config', baseUrl: input.baseUrl, model: input.model, encApiKey });
-  return toView({ baseUrl: input.baseUrl, model: input.model, apiKey });
+  await db.secure.put({
+    id: 'config',
+    baseUrl: input.baseUrl,
+    model: input.model,
+    encApiKey,
+    compactEnabled,
+  });
+  return toView({ baseUrl: input.baseUrl, model: input.model, apiKey, compactEnabled });
 }
 
 /** 读取脱敏快照，供设置页展示。 */
@@ -58,5 +73,6 @@ function toView(config: ModelConfig): ModelConfigView {
     model: config.model,
     hasApiKey: config.apiKey.length > 0,
     apiKeyLastFour: lastFour(config.apiKey),
+    compactEnabled: config.compactEnabled ?? true,
   };
 }

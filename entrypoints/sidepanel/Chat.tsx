@@ -89,6 +89,9 @@ export function Chat({ messages, running, connected, onSend, onCancel }: ChatPro
         <div className="flex flex-col gap-2.5">
           {messages.map((message) => {
             const streaming = message.role === 'assistant' && message.status === 'streaming';
+            // 兼容历史：旧数据只有单卡 toolCall，新数据为多卡 toolCalls。统一成数组渲染。
+            const cards: ToolCallView[] =
+              message.toolCalls ?? (message.toolCall ? [message.toolCall] : []);
             if (message.role === 'user') {
               return (
                 <div
@@ -108,8 +111,16 @@ export function Chat({ messages, running, connected, onSend, onCancel }: ChatPro
                     : 'border-line bg-surface text-ink'
                 }`}
               >
-                {message.toolCall ? <ToolCallCard toolCall={message.toolCall} /> : null}
-                {streaming && !message.content && !message.toolCall ? (
+                {cards.map((card) => (
+                  <ToolCallCard key={card.id ?? card.name} toolCall={card} />
+                ))}
+                {/* 压缩可见性提示：本轮送模型前把早先 N 条折进了摘要（可关，见设置）。 */}
+                {message.compacted && message.compacted.rounds > 0 ? (
+                  <div className="mb-1.5 text-[10px] text-ink-faint">
+                    已将早先 {message.compacted.rounds} 条对话压缩为摘要
+                  </div>
+                ) : null}
+                {streaming && !message.content && cards.length === 0 ? (
                   <span className="flex items-center gap-1.5 text-ink-faint">
                     <Loader2 size={12} className="animate-spin text-brand" />
                     正在思考…

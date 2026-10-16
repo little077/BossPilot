@@ -3,7 +3,9 @@
 // 仅本地存储，无云同步、无遥测。
 
 import Dexie, { type Table } from 'dexie';
+import type { CompactRow } from '@/lib/agent/compaction';
 import type { ArtifactRecord } from '@/lib/artifacts/store';
+import type { TurnTrace } from '@/lib/diagnostics/trace';
 import type { ChatMessage } from '@/lib/domain/chat';
 
 /** 加密后的模型配置；encApiKey 是 AES-GCM 密文，绝不含明文密钥。 */
@@ -12,12 +14,16 @@ export interface SecureConfigRow {
   baseUrl: string;
   model: string;
   encApiKey: string;
+  /** 长会话自动压缩开关；旧行无此字段时按默认 true 处理（无需版本迁移）。 */
+  compactEnabled?: boolean;
 }
 
 class BossPilotDb extends Dexie {
   messages!: Table<ChatMessage, string>;
   secure!: Table<SecureConfigRow, string>;
   artifacts!: Table<ArtifactRecord, string>;
+  traces!: Table<TurnTrace, string>;
+  compact!: Table<CompactRow, string>;
 
   constructor() {
     super('bosspilot');
@@ -27,6 +33,9 @@ class BossPilotDb extends Dexie {
     this.version(2).stores({ secure: 'id' });
     // v3：新增工件（Artifact）表，主键 id，按 createdAt 建索引供超限淘汰最旧。
     this.version(3).stores({ artifacts: 'id, createdAt' });
+    // v4：新增 trace 轨迹表（主键 id=requestId，按 createdAt 供环形淘汰/取最近一轮），
+    //     与压缩态单行表 compact（id='current'，缓存摘要 + 已折叠下标，下轮复用不重算）。
+    this.version(4).stores({ traces: 'id, createdAt', compact: 'id' });
   }
 }
 
@@ -42,7 +51,8 @@ export async function saveMessage(message: ChatMessage): Promise<void> {
   await db.messages.put(message);
 }
 
-/** 清空对话（「新对话」按钮）。 */
+/** 清空对话（「新对话」按钮）：一并清掉压缩态，避免旧摘要锚定的下标错位。 */
 export async function clearMessages(): Promise<void> {
   await db.messages.clear();
+  await db.compact.clear();
 }

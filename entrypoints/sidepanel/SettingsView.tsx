@@ -20,6 +20,8 @@ interface SettingsViewProps {
   onSave: (input: { baseUrl: string; model: string; apiKey: string }) => boolean;
   onFetchModels: (input: { baseUrl: string; apiKey: string }) => boolean;
   onSelectModel: (baseUrl: string, model: string) => boolean;
+  /** 切换长会话自动压缩开关（阶段 3 源①）；返回 false 表示后台连接已断。 */
+  onToggleCompact: (enabled: boolean) => boolean;
 }
 
 export function SettingsView({
@@ -30,6 +32,7 @@ export function SettingsView({
   onSave,
   onFetchModels,
   onSelectModel,
+  onToggleCompact,
 }: SettingsViewProps) {
   const [apiKey, setApiKey] = useState('');
   const [savedNotice, setSavedNotice] = useState('');
@@ -37,6 +40,8 @@ export function SettingsView({
   const hasKey = Boolean(config?.hasApiKey);
   const selectedModel = config?.model ?? '';
   const configured = hasKey && selectedModel.length > 0;
+  // 压缩开关当前态：缺省视为开启（与新用户默认一致）。
+  const compactEnabled = config?.compactEnabled ?? true;
 
   // 「开通并获取模型」：先落库密钥（保留当前已选模型），再触发一次目录拉取。
   const connect = (event: React.FormEvent) => {
@@ -177,6 +182,25 @@ export function SettingsView({
                 </div>
               </div>
             ) : null}
+
+            {/* 长会话自动压缩开关：可见、可关（阶段 3 源①）。仅在已配置后可调。 */}
+            <div className="provider-field">
+              <div className="provider-key-row">
+                <input
+                  id="compact-toggle"
+                  type="checkbox"
+                  checked={compactEnabled}
+                  disabled={!configured}
+                  onChange={(event) => {
+                    setSavedNotice('');
+                    onToggleCompact(event.target.checked);
+                  }}
+                />
+                <label htmlFor="compact-toggle">
+                  长会话自动压缩（将早先轮次摘要以控制上下文规模，可关）
+                </label>
+              </div>
+            </div>
 
             <div className="provider-card-footer">
               <span>不上云 · 不同步 · 仅本地</span>

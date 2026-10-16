@@ -17,10 +17,19 @@ export interface ChatMessage {
   errorMessage?: string;
   /** 本轮回复中的工具调用展示记录（若有）。 */
   toolCall?: ToolCallView;
+  /**
+   * 有界循环本轮的多个工具卡片（阶段 3）：一条 assistant 消息可能连续调了多步工具。
+   * 旧 `toolCall` 字段仍保留做历史兼容；UI 以 `[...(toolCalls ?? [toolCall]) ]` 统一渲染。
+   */
+  toolCalls?: ToolCallView[];
+  /** 本轮送模型前对早先历史做了压缩：可见性提示（被折叠的条数）。 */
+  compacted?: { rounds: number };
 }
 
 /** 工具卡片展示记录：只保留摘要，完整工具结果不进入会话历史（重放安全）。 */
 export interface ToolCallView {
+  /** 卡片稳定主键：循环内每张卡唯一，供 UI 列表 key（旧数据可缺省，UI 回退用工具名）。 */
+  id?: string;
   /** 工具名（如 read_current_page）。 */
   name: string;
   status: 'running' | 'success' | 'error';
